@@ -50,12 +50,13 @@ without inheriting a vendor's license terms.
 - **v1b:** causality modeled explicitly (`caused_by`, `led_to`, `enabled_by`, `blocked_by`,
   `contradicts`), set by the agent's own judgment at write-time — not statistically
   inferred. The honest, tractable version of "causal search."
-- One database engine (Postgres, with pgvector always, Apache AGE added in v1b) handles
-  storage, vector search, and (in v1b) native graph traversal — not three bolted-together
-  systems, and the same engine that runs a solo user's local memory scales unmodified to
-  org-wide concurrent multi-writer use. No migration debt baked in from day one. (This
-  does mean a running Postgres process, not a single file — see Distribution Plan. And
-  separately: the embedding call for vector search and the LLM call for extraction are
+- One database engine (Postgres, with pgvector and Apache AGE both in place from v1a)
+  handles storage, vector search, and native graph traversal from day one — not three
+  bolted-together systems, and the same engine that runs a solo user's local memory
+  scales unmodified to org-wide concurrent multi-writer use. No migration debt at any
+  point — not SQLite-to-Postgres, and not plain-tables-to-AGE either. (This does mean a
+  running Postgres process, not a single file — see Distribution Plan. And separately:
+  the embedding call for vector search and the LLM call for extraction are
   external API calls regardless of storage choice — the database is self-hosted, the
   model calls aren't.)
 - One tenancy mechanism scales from your own cross-tool memory to a shared team/org graph.
@@ -80,9 +81,11 @@ without inheriting a vendor's license terms.
   best-effort secret-scrubbing pass at ingestion is worth adding cheaply if it doesn't
   block the timeline; full redaction policy is v1.1.
 - **v1a and v1b are a real, gated staging split**, not just a scheduling note — v1b work
-  does not start until v1a's exit criteria (see the CEO plan) are met. `causal_hint`, AGE,
-  and PPR are all v1b, together — none of them are needed to test whether basic recall
-  reduces re-explaining, which is the actual felt pain this project exists to solve.
+  does not start until v1a's exit criteria (see Success Criteria) are met. `causal_hint`
+  and PPR are v1b, together — neither is needed to test whether basic recall reduces
+  re-explaining, which is the actual felt pain this project exists to solve. (Apache AGE
+  is no longer part of this split — it's foundational, gating v1a's start instead of
+  v1b's, per Premise 6's reversal.)
 
 ## Premises
 
@@ -109,19 +112,23 @@ without inheriting a vendor's license terms.
 5. **This still solves the founder's own real pain** (cross-tool context loss), now scoped
    as something shareable, and now something you fully control the license of, on an
    architecture that doesn't need to be rebuilt as it grows.
-6. **v1a is decoupled from Apache AGE entirely — corrected after an outside-voice review
-   caught this design coupling v1a's schema to AGE despite v1a doing zero graph
-   traversal.** v1a ships on plain Postgres tables (identical shape to what AGE would
-   store — see Concrete Schema). AGE, `causal_hint`, and PPR are a single v1b bundle,
-   gated together on v1a's exit criteria. This also closes a real gap the same review
-   caught: converting AGE-vertex data to plain tables *after* v1a shipped with real data
-   in it would itself be a migration — the exact thing Premise 2 exists to avoid. Shipping
-   v1a AGE-free removes that risk entirely. Separately: PPR is computed via **`networkx`'s
-   `personalized_pagerank`** directly (BSD-licensed, generic graph-math library — same
-   category as numpy/scipy, not an AI-memory framework) rather than hand-rolled sparse
-   power iteration — the plan was already going to validate hand-rolled PPR against
-   `networkx` as a correctness reference, so using it directly removes an entire class of
-   "our reimplementation has a subtle bug the validation didn't catch" risk.
+6. **Reversed again: v1a is built on Apache AGE from the start, not decoupled from it.**
+   The earlier AGE-decoupling correction (v1a ships on plain tables, AGE added later)
+   avoided one migration (plain tables → AGE property graph) at the cost of reintroducing
+   exactly the thing Premise 2 was created to prevent: a staged "simple now, upgrade
+   later" storage decision. Applying the same reasoning that chose Postgres over SQLite —
+   final architecture now, not a migration path — AGE is part of the storage substrate
+   from v1a onward. **The real cost, stated plainly:** v1a's start now depends on the AGE
+   maturity spike passing, since v1a is built directly on AGE property graph tables — this
+   removes the "fast signal, AGE risk isolated to v1b" property the decoupling gave up.
+   The spike itself is unchanged in rigor (a genuine go/no-go, not a formality, same named
+   fallback of plain relational tables if it fails) — it just now gates v1a's start
+   instead of v1b's. `causal_hint` and PPR remain v1b-only — this reversal is specifically
+   about the *storage substrate* (AGE vs. plain tables), not about pulling v1b's features
+   forward; those stay staged on their own schedule. Separately, PPR is computed via
+   **`networkx`'s `personalized_pagerank`** directly (BSD-licensed, generic graph-math
+   library — same category as numpy/scipy, not an AI-memory framework) rather than
+   hand-rolled sparse power iteration, unchanged from before.
 7. **The core mechanism this project depends on — agents reliably calling `write_episode`/
    `query_memory` at natural checkpoints — is unverified and gets spiked before v1a
    proceeds.** An outside-voice review pointed out that if Claude Code/Cursor don't
@@ -150,21 +157,22 @@ unboundedly. This is where the actual R&D goes — not the storage engine (stays
 per Premise 8 below), the data structure and algorithm for how memory is organized,
 consolidated, and fetched.
 
-### Storage substrate honesty (why plain relational tables, not a new DBMS)
+### Storage substrate honesty (why Postgres+AGE, not a new DBMS)
 
-Graphs stored as adjacency-list tables (`nodes`, `edges` with foreign keys) are fast for
-the access patterns this system actually uses — indexed 1-2 hop lookups, and bulk
-group-scoped scans (PPR pulls an entire subgraph in one query, builds the graph in
-application memory, and runs power iteration there — it never asks Postgres to traverse
-hop-by-hop in SQL). They are genuinely slower than a native graph engine (index-free
-adjacency, O(1) pointer-chase per hop vs. O(log n) indexed join per hop) for deep,
-arbitrary multi-hop traversal with per-hop filtering — which is exactly why Apache AGE is
-the v1b upgrade path for that specific need, gated behind its own maturity spike, not
-something plain tables pretend to solve. Building an entirely new database engine
-(transactions, durability, crash recovery, concurrency control) to avoid this tradeoff
-would cost 6-12+ months before any of it is trustworthy enough to store real data on —
-the same trap already avoided once this session (see Premise 1's "fully from scratch"
-discussion). The differentiation lives in the data structure and algorithm layer above
+The graph lives in Apache AGE (index-free adjacency — O(1) pointer-chase per hop, not an
+indexed join) from v1a onward, per Premise 6 — not plain relational tables with
+traversal bolted on later. AGE itself is gated behind its own maturity spike (PR0a)
+before v1a starts; if that spike fails, the named fallback is plain adjacency-list tables
+(`nodes`, `edges` with foreign keys), which stay fast for this system's actual access
+patterns (indexed 1-2 hop lookups, and bulk group-scoped scans — PPR pulls an entire
+subgraph in one query, builds the graph in application memory, and runs power iteration
+there; it never asks Postgres to traverse hop-by-hop in SQL) but are genuinely slower
+than AGE for deep, arbitrary multi-hop traversal with per-hop filtering. Either way,
+building an entirely new database engine (transactions, durability, crash recovery,
+concurrency control) to avoid this tradeoff would cost 6-12+ months before any of it is
+trustworthy enough to store real data on — the same trap already avoided once this
+session (see Premise 1's "fully from scratch" discussion). The differentiation lives in
+the data structure and algorithm layer above
 storage, not in reinventing storage.
 
 ### Temporal Hierarchical Memory Graph (the actual novel structure)
@@ -251,7 +259,7 @@ github.com/osu-nlp-group/hipporag, falkordb.com, docs.letta.com.
 
 | System | What's genuinely good | Where it lacks | Where Echo Memory wins |
 |---|---|---|---|
-| **Honcho** (AGPL-3.0) | Real production infra (Postgres+pgvector, Redis, Docker Compose). "Theory of mind" framing tracks evolving belief about a peer, not static facts. Peer/Session model natively supports multi-agent. Hybrid BM25+vector retrieval validated in production. **Validates our own storage pivot** — same Postgres+pgvector choice, same reasoning (concurrent multi-tenant writes). | Not a graph at all — no edges, no payload, no traversal, no causal typing. AGPL-3.0 copyleft. | Graph structure (v1b, via AGE), causal typing (v1b), multi-hop PPR reasoning (v1b) — on the same proven storage foundation, v1a already running. |
+| **Honcho** (AGPL-3.0) | Real production infra (Postgres+pgvector, Redis, Docker Compose). "Theory of mind" framing tracks evolving belief about a peer, not static facts. Peer/Session model natively supports multi-agent. Hybrid BM25+vector retrieval validated in production. **Validates our own storage pivot** — same Postgres+pgvector choice, same reasoning (concurrent multi-tenant writes). | Not a graph at all — no edges, no payload, no traversal, no causal typing. AGPL-3.0 copyleft. | Graph structure (v1a, via AGE — in place from day one), causal typing (v1b), multi-hop PPR reasoning (v1b) — on the same proven storage foundation. |
 | **graphify** (Apache-2.0, installed locally) | Already solves several open problems: an honest EXTRACTED/INFERRED/AMBIGUOUS audit trail per edge (same spirit as this design's `confidence` enum); hybrid AST+LLM extraction; community detection for organization; incremental `--update` with manifest caching; an MCP server mode already built; NetworkX-backed (BSD, tested PageRank) — **this design now also uses networkx directly for PPR, per Premise 6**; zero-dependency local operation. | Built for point-in-time corpus snapshots, not episodic memory — no bi-temporal edges, no causal typing, no multi-tenant scoping, no session-based ingestion, no statistical retrieval fusion at query time. | Temporal/episodic model, multi-tenancy, causal typing, retrieval fusion. |
 | **Graphiti / cognee / HippoRAG / Mem0 / Letta / FalkorDB** | See Landscape table above. | See Landscape table above. | See Landscape table above. |
 
@@ -263,14 +271,28 @@ model carries assumptions (file-based, not episodic-memory-based) not worth inhe
 already-solved *graph math* like PPR, which is why `networkx` is used directly (Premise
 6) rather than hand-rolled and separately validated against the same library.
 
-## Recommended Approach: Staged, Final-Architecture, AGE-Decoupled
+## Recommended Approach: Staged, Final-Architecture, AGE-Native from v1a
 
-### v1a — prove the core recall loop (no AGE, no causal_hint, no PPR)
+### Foundational spike (before v1a — gates its start, per Premise 6's reversal)
 
-**Storage:** PostgreSQL (PostgreSQL License), the one canonical database from single-agent
-through org-wide — no staged migration on the *storage engine* itself. Nodes, edges, and
-the audit log live in **plain Postgres tables** (not an AGE property graph — see Premise
-6). Real MVCC gives correct concurrent multi-writer behavior natively.
+**Apache AGE maturity/performance.** Since v1a is now built directly on an AGE property
+graph, this spike moves earlier — it's no longer a v1b-only gate. Stand up Postgres +
+pgvector + AGE, model a synthetic graph as an AGE property graph, confirm Cypher
+traversal filtered by `group_id` and `t_valid`/`t_invalid` works correctly and at
+acceptable latency. **Named fallback if it fails:** plain relational tables (the
+previously-decoupled v1a design) — the schema shape is designed to support either
+without change (see Concrete Schema), so a failed spike doesn't strand any work, it just
+means v1a builds on plain tables instead, same as the prior plan. This runs alongside (or
+just after) the invocation-mechanism spike — both are gates before any other v1a work.
+
+### v1a — prove the core recall loop (AGE-native storage; no causal_hint, no PPR yet)
+
+**Storage:** PostgreSQL (PostgreSQL License) with **Apache AGE** (Apache-2.0, Apache
+Software Foundation-governed) from the start — the one canonical database and graph
+substrate from single-agent through org-wide, no staged storage migration at any point
+(Premise 2 and Premise 6). Nodes and edges live in an AGE property graph; the audit log
+stays a plain Postgres table (it's a log, not something needing graph traversal — see
+Concrete Schema). Real MVCC gives correct concurrent multi-writer behavior natively.
 
 **Vector search:** **pgvector** (PostgreSQL License) — mature, extremely widely adopted
 (including by Honcho), lives in the same database, no separate vector store to sync.
@@ -280,27 +302,25 @@ GIN-indexed, using `plainto_tsquery`/`websearch_to_tsquery` — never raw `to_ts
 user input, per the security review) — built-in, not a third-party dependency.
 
 **Fusion:** Reciprocal Rank Fusion combining pgvector + full-text-search scores only (2
-signals). PPR is not part of v1a's fusion — it needs the graph traversal infrastructure
-that's deliberately not part of v1a.
+signals) — v1a's *feature* scope is unchanged by the storage decision above. PPR isn't
+part of v1a's fusion yet; that's still a v1b feature-staging decision, separate from
+where the graph lives.
 
-**Effort: M.** Smaller than the original combined estimate specifically because AGE,
-causal_hint, and PPR — the three most novel and riskiest pieces — are no longer part of
-v1a's critical path.
+**Effort: M**, but now gated behind the AGE spike passing first (see above) — the
+"fast signal, isolate AGE risk to v1b" property the earlier decoupling provided is
+explicitly given up here in exchange for zero future storage migration.
 
-**Primary open risk:** does the invocation mechanism (agents actually calling the MCP
-tools reliably) work at all? Spiked first, before other v1a work (Next Steps #1).
-**Secondary risk:** entity resolution quality (unchanged from before — see Concrete
+**Primary open risk:** Apache AGE's maturity — moved earlier in the schedule, still a
+genuine go/no-go with a real fallback, not a formality.
+**Secondary open risk:** does the invocation mechanism (agents actually calling the MCP
+tools reliably) work at all? Spiked alongside the AGE spike, before other v1a work.
+**Tertiary risk:** entity resolution quality (unchanged from before — see Concrete
 Schema).
 
-### v1b — causal typing, graph traversal, multi-hop retrieval (gated on v1a's exit criteria)
+### v1b — causal typing, multi-hop retrieval (gated on v1a's exit criteria)
 
-**Graph traversal:** **Apache AGE** (Apache-2.0, Apache Software Foundation-governed) added
-to the same Postgres instance as a Cypher extension. v1a's plain tables convert to an AGE
-property graph at this point — a real, one-time, planned migration (using the versioned
-migration tooling from the CEO plan's Section 9 finding), not the kind of unplanned
-migration Premise 2 exists to avoid. **Contingent on a spike** (Next Steps) confirming
-AGE's maturity/performance; named fallback is hand-rolled traversal over the same plain
-tables if it fails — v1a's schema already supports this without change.
+**Graph traversal:** already in place from v1a — no migration needed here anymore, since
+AGE was the substrate from the start. This phase adds the *features* that use it.
 
 **Causal typing:** `causal_hint` classification (see Concrete Schema) added to the edge
 schema via migration; classified at ingestion by the same LLM call that extracts
@@ -308,16 +328,15 @@ schema via migration; classified at ingestion by the same LLM call that extracts
 during the v1a trial keeps `causal_hint: null`, which is a valid state, not a gap to fix).
 
 **Graph centrality:** **`networkx`'s `personalized_pagerank`** (BSD-licensed) run over the
-graph's adjacency structure, pulled via a Cypher query against AGE (or the plain-table
-fallback). Not hand-rolled — see Premise 6.
+graph's adjacency structure, pulled via a Cypher query against AGE. Not hand-rolled — see
+Premise 6.
 
 **Fusion:** RRF now combines pgvector + full-text-search + PPR (3 signals).
 
-**Effort: M-L**, contingent on the AGE spike's outcome.
+**Effort: M** — smaller than before, since the AGE integration work already happened
+before v1a rather than being part of this phase.
 
-**Primary risk:** Apache AGE's maturity — Cypher-on-Postgres has known rough edges. The
-spike is a genuine go/no-go, not a formality.
-**Secondary risk:** `causal_hint` classification quality — validated via the eval set,
+**Primary risk:** `causal_hint` classification quality — validated via the eval set,
 with the explicit caveat that 5-10 items gives directional confidence only (needs a real
 precision/recall threshold before the accepted `contradicts`-surfacing feature enables —
 see the CEO plan).
@@ -334,9 +353,13 @@ v1a and v1b.
 
 ## Concrete Schema
 
-### v1a schema (plain Postgres tables — no AGE)
+### v1a schema (AGE property graph — or plain Postgres tables if the AGE spike fails)
 
-**Node table:**
+Node and edge shapes below are identical either way — AGE vertex/edge properties, or
+plain-table columns with the same names. Whichever the spike resolves to, the schema
+itself doesn't change; only whether traversal happens via Cypher or SQL joins.
+
+**Node (AGE vertex, or table row):**
 ```
 node {
   id, name: string                # canonical entity name
@@ -356,7 +379,7 @@ as [candidate node], or a new one?" — only for candidates surfaced by embeddin
 above a threshold (avoids an LLM call per mention). No match on either pass creates a new
 node. A confirmed match appends the new surface form to `aliases`.
 
-**Edge table:**
+**Edge (AGE edge, or table row):**
 ```
 edge {
   id, source_node_id, target_node_id
@@ -438,9 +461,9 @@ Example: "switched to Postgres because SQLite couldn't handle concurrent writes"
 SQLite concurrent-write limits"}` — `relation_type` says what happened, `causal_hint` says
 why. "also considered using MongoDB" → `{relation_type: "considered", causal_hint: null}`.
 
-**Node/edge conversion to an AGE property graph** happens as part of v1b setup, via the
-versioned migration tool (CEO plan finding 9A) — a planned, tested migration, not an
-unplanned one.
+No storage migration needed for this addition — `causal_hint` is a straightforward
+column/property addition via the versioned migration tool (CEO plan finding 9A), since
+the graph substrate (AGE, per the reversal above) was already in place from v1a.
 
 ### Configuration (server startup, per agent — answers "how is scope actually set")
 
@@ -488,9 +511,9 @@ just always empty until v1b populates it).
   code under this project's control) — PR0's spike plus the v1a trial's week of continuous
   real usage is the accepted signal, not ongoing automated coverage. Revisit only if
   invocation drift is actually observed later.
-- **Apache AGE maturity/performance** — v1b-only now (decoupled from v1a per Premise 6).
-  Resolved by a spike before v1b work starts, with a named fallback (hand-rolled traversal
-  over the same plain tables v1a already uses) if it doesn't hold up.
+- **Apache AGE maturity/performance** — foundational now, gates v1a's start (reversed
+  per Premise 6). Resolved by the PR0a spike before any other work begins, with a named
+  fallback (plain relational tables, same schema shape) if it doesn't hold up.
 - Embedding model/provider choice — not yet decided; affects cost and portability.
 - RRF fusion weights (pgvector vs. full-text-search, and later vs. PPR) need tuning
   against real queries.
@@ -511,35 +534,39 @@ just always empty until v1b populates it).
 
 ## Success Criteria
 
-### v1a
-1. The invocation-mechanism spike (Open Questions) shows agents actually call the MCP
+### Foundational spikes (gate v1a's start)
+1. Apache AGE spike passes (or the plain-table fallback is confirmed sufficient) —
+   moved earlier per Premise 6's reversal.
+2. The invocation-mechanism spike (Open Questions) shows agents actually call the MCP
    tools at natural checkpoints without constant manual prompting — this is a gate before
    the rest of v1a is worth building, not just a nice-to-have signal.
-2. Postgres+pgvector store running (via Docker Compose — no AGE needed for v1a), ingesting
+
+### v1a
+1. Postgres+AGE (or plain-table fallback) store running via Docker Compose, ingesting
    real session data, including at least one real case where entity resolution correctly
    matches a new mention to an existing node — logged as an `entity_resolved` audit entry,
    not just observed anecdotally.
-3. Two working `group_id` scopes demonstrated: single-agent and multi-agent-shared-user.
-4. One concrete example where 2-signal hybrid retrieval (pgvector + full-text via RRF)
+2. Two working `group_id` scopes demonstrated: single-agent and multi-agent-shared-user.
+3. One concrete example where 2-signal hybrid retrieval (pgvector + full-text via RRF)
    answers a real question from your own memory better than either signal alone.
-5. An append-only audit log entry for at least one fact mutation and at least one entity
+4. An append-only audit log entry for at least one fact mutation and at least one entity
    resolution decision, human-readable enough to answer "why did this happen."
-6. A rough cost and latency baseline for a real ingestion + query cycle.
-7. The CEO plan's exit criteria (recall saves, duplicate/bad-merge rates, capped trial
-   window) — at least 3 real instances where a recalled fact saved re-explaining
-   something to a different tool; at most 1 duplicate node created by entity resolution;
-   zero cases of two distinct entities incorrectly merged into one node. If the bars
-   aren't met, revisit the recall mechanism itself before starting any v1b work.
+5. A rough cost and latency baseline for a real ingestion + query cycle.
+6. **v1a → v1b exit criteria** (over a trial of real cross-tool usage, capped at 3 weeks
+   total — a hard cap, not indefinitely extendable): at least 3 real instances where a
+   recalled fact saved re-explaining something to a different tool; at most 1 duplicate
+   node created by entity resolution; zero cases of two distinct entities incorrectly
+   merged into one node. If the bars aren't met, revisit the recall mechanism itself
+   before starting any v1b work.
 
 ### v1b (gated on v1a's exit criteria being met)
-1. Apache AGE spike passes (or the plain-table fallback is confirmed sufficient).
-2. A small eval set (5-10 real facts) manually checked for `causal_hint` classification
+1. A small eval set (5-10 real facts) manually checked for `causal_hint` classification
    quality, with a concrete precision/recall threshold set (not just "check the eval
    set") before enabling `contradicts` surfacing.
-3. PPR (via `networkx`) validated for correctness on a small test graph (using a trusted
+2. PPR (via `networkx`) validated for correctness on a small test graph (using a trusted
    library directly means this is closer to "confirm it's wired correctly" than "confirm
    our reimplementation is correct").
-4. One concrete example where 3-signal hybrid retrieval (adding PPR) answers a real
+3. One concrete example where 3-signal hybrid retrieval (adding PPR) answers a real
    multi-hop question that 2-signal v1a retrieval missed or ranked poorly.
 
 ### v1c (gated on v1b, and on enough accumulated history existing to matter)
@@ -554,11 +581,12 @@ just always empty until v1b populates it).
 
 ## Distribution Plan
 
-**v1a:** A single-command **Docker Compose** setup bundling Postgres + pgvector (no AGE
-yet — v1a doesn't need it) plus a thin process implementing the MCP server. Simpler than
-originally planned, since AGE is no longer part of v1a's footprint.
-**v1b:** The same Docker Compose setup gains the AGE extension; existing v1a data
-converts via the versioned migration tool.
+**v1a:** A single-command **Docker Compose** setup bundling Postgres + pgvector + Apache
+AGE (or, if the foundational spike fails, Postgres + pgvector only, per the named
+fallback) plus a thin process implementing the MCP server. AGE is part of the footprint
+from the start — no later Docker Compose change needed when v1b adds causal typing/PPR.
+**v1b:** Same Docker Compose setup, no storage changes — just new application code
+(`causal_hint` classification, PPR) on top of what v1a already has running.
 **v1.1:** Hosted/managed option and org-onboarding, once identity/auth is resolved and the
 managed-Postgres-provider question (Open Questions) is answered.
 Open-source repository, Apache-2.0 licensed: github.com/ayushcodes10/echo-mem.
@@ -574,8 +602,9 @@ reviewable PRs matter more than a single large landing)
 
 | PR | Scope | Modules | Depends on |
 |---|---|---|---|
-| PR0 | Invocation-mechanism spike (does Claude Code/Cursor actually call MCP tools reliably?) — throwaway script/findings, not merged as product code | — | — |
-| PR1 | Repo scaffold, CI (lint+test on push), Postgres+pgvector Docker Compose, migration tooling (Alembic), schema (node/edge/audit_entry tables + pgvector ANN index + GIN full-text index + composite indexes on `(group_id, source_node_id)`/`(group_id, target_node_id)`/`(group_id, t_valid, t_invalid)`) | `infra/`, `migrations/` | PR0 passes |
+| PR0a | **Apache AGE maturity spike** — model a synthetic graph as an AGE property graph, confirm Cypher traversal filtered by `group_id`/`t_valid`/`t_invalid` works correctly and at acceptable latency. Real go/no-go; throwaway script/findings, not merged as product code. Fallback if it fails: plain relational tables (schema shape unaffected, per Concrete Schema) | — | — |
+| PR0b | Invocation-mechanism spike (does Claude Code/Cursor actually call MCP tools reliably?) — throwaway script/findings, not merged as product code | — | — |
+| PR1 | Repo scaffold, CI (lint+test on push), Postgres+pgvector**+AGE** Docker Compose (or Postgres+pgvector only, per PR0a's fallback), migration tooling (Alembic), schema (node/edge as AGE property graph, audit_entry as a plain table, + pgvector ANN index + GIN full-text index + composite indexes on `(group_id, source_node_id)`/`(group_id, target_node_id)`/`(group_id, t_valid, t_invalid)`) | `infra/`, `migrations/` | PR0a **and** PR0b pass |
 | PR2 (Lane A) | Entity resolution + `write_episode`, connection pooling, structured server-side logging, input-size cap | `ingestion/`, `db/` | PR1 |
 | PR3 (Lane B) | Retrieval (pgvector+FTS+RRF, 2 signals) + `query_memory`, `top_k` cap, `plainto_tsquery`/`websearch_to_tsquery` (never raw `to_tsquery`) | `retrieval/` | PR1 |
 | PR4 | Audit log wiring (`entity_resolved` + `fact_superseded` entries, same-transaction writes) + `get_audit_log` | `audit/` | PR2 |
@@ -583,39 +612,24 @@ reviewable PRs matter more than a single large landing)
 | PR-FF1 | `echo-memory why`/`export` CLI | `cli/` | PR4 |
 | *(v1a exit-criteria trial begins — real usage against the CEO plan's gated window, no new code)* | | | PR5 **and** PR-FF1 |
 | PR-FF2 | Onboarding nudge + context digest | `ingestion/`, `retrieval/` (additive) | PR5 |
-| PR-B1 (v1b, gated on v1a exit criteria) | AGE spike; if it passes, migrate v1a's tables to an AGE property graph via Alembic, **preserving a stable mapping from v1a's plain-table IDs to AGE's internal `graphid` scheme** so `audit_entry` rows written during the v1a trial stay resolvable — required, not optional, since `echo-memory why` must keep working for the exact data the exit criteria were measured against | `migrations/`, `graph/` | v1a exit criteria met |
-| PR-B2 (Lane A) | `causal_hint` classification at ingestion | `ingestion/` | PR-B1 |
-| PR-B3 (Lane B) | PPR via `networkx.personalized_pagerank`, extend RRF to 3 signals | `retrieval/`, `graph/` | PR-B1 |
-| PR-B4 | `contradicts` surfacing (query-time + local notification), gated on the causal_hint quality threshold | `retrieval/`, `notifications/` | PR-B2, PR-B3 |
+| PR-B1 (v1b, gated on v1a exit criteria, Lane A) | `causal_hint` classification at ingestion — a column/property addition via migration, no storage-substrate change needed (AGE was already in place from PR1) | `ingestion/`, `migrations/` | v1a exit criteria met |
+| PR-B2 (Lane B) | PPR via `networkx.personalized_pagerank`, extend RRF to 3 signals | `retrieval/`, `graph/` | v1a exit criteria met |
+| PR-B3 | `contradicts` surfacing (query-time + local notification), gated on the causal_hint quality threshold | `retrieval/`, `notifications/` | PR-B1, PR-B2 |
 | PR-C1 (v1c, gated on v1b) | `tier`/`temperature`/`last_accessed` schema addition, partial index on `tier = 'consolidated'`, table partitioning by `group_id` | `migrations/` | v1b shipped |
 | PR-C2 | Temperature decay/reinforcement scoring + consolidation trigger (clustering + LLM summarization) | `consolidation/` | PR-C1 |
 | PR-C3 | Bounded-cost top-down retrieval (consolidated tier first, descend to hot tier on relevance threshold) | `retrieval/` | PR-C1, PR-C2 |
 | PR-1.1-* (v1.1) | Identity/auth → ACL enforcement → sensitive-data redaction, in that order | `auth/`, `db/`, `ingestion/` | v1b shipped |
 
-**Parallel lanes:** PR2 ∥ PR3 once PR1 lands (PR1 establishes the shared `db/`
-connection-pooling utility once, so PR2/PR3 only import it). PR-B2 ∥ PR-B3 once PR-B1
-lands, same reasoning — no shared modules between them.
+**Parallel lanes:** PR0a ∥ PR0b (independent spikes, both gate PR1). PR2 ∥ PR3 once PR1
+lands (PR1 establishes the shared `db/` connection-pooling utility once, so PR2/PR3 only
+import it). PR-B1 ∥ PR-B2 once v1a's exit criteria are met, same reasoning — no shared
+modules between them.
+
+**Note:** this resequencing also retires a risk the eng review's outside voice flagged
+against the old plan — AGE's internal `graphid` identity scheme no longer needs to be
+reconciled against pre-existing plain-table IDs from a v1a trial, since there's no
+plain-table-to-AGE migration happening after real data exists. That entire risk class is
+gone, not just mitigated.
 
 CI (basic: lint + test on push) is set up in PR1, not deferred — cheap now, catches
 regressions immediately as the rest of the PRs land.
-
-## What I noticed about how you think
-
-- When I flagged the FalkorDB license concern, you didn't shrug it off — you escalated to
-  "we need everything ours," which tells me licensing/control isn't a minor preference for
-  you, it's close to a hard requirement for anything you'd call genuinely open source.
-- When I laid out the real cost of "zero dependencies, even the storage engine," you took
-  the pragmatic middle path rather than either caving to the higher-effort option out of
-  stubbornness or abandoning the ownership principle entirely.
-- You've now revised this design's core architecture four times across one session
-  (curation-proof → Graphiti-based → owned engine on SQLite → owned engine on Postgres+
-  pgvector+AGE → AGE-decoupled staged version) without losing the thread — the underlying
-  goal stayed constant through every pivot.
-- When the outside-voice review surfaced a real contradiction between your own two
-  documents (causal_hint in v1a vs. v1b), you didn't defend either document out of
-  sunk-cost — you picked the version that matched your own actual intent (staging) and had
-  both docs corrected to agree with it.
-- You accepted seven of eight outside-voice findings and held firm on exactly one (keeping
-  Postgres+AGE despite the YAGNI critique) — the one place you'd already deliberated twice
-  before this review even started. That's not stubbornness, that's knowing which decisions
-  you've actually already made versus which ones just hadn't been pressure-tested yet.
