@@ -1,0 +1,38 @@
+# Local-only notes — never commit
+MATHS.local.md
+*.local.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Docker / local Postgres data
+postgres-data/
+*.pgdata
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
