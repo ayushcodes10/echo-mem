@@ -8,8 +8,10 @@ dependency-ordered implementation order.
 
 Two problems, one system:
 
-1. **Personal, felt pain:** switching between AI coding tools (Claude Code ↔ Cursor, etc.)
-   loses context. You re-explain decisions and state every time you switch.
+1. **Personal, felt pain (the validated wedge):** switching between AI coding tools
+   (Claude Code ↔ Cursor, etc.) loses context. You re-explain decisions and state every
+   time you switch. This is the specific, tested pain v1a's exit criteria measure — real
+   demand evidence, not a hypothesis.
 2. **Market gap, confirmed by research:** no open-source agent-memory system combines
    (a) graph edges that carry real payload, (b) retrieval beyond plain cosine similarity,
    (c) explicit causal-relation typing, and (d) clean multi-tenancy, in one package —
@@ -17,9 +19,19 @@ Two problems, one system:
    (Graphiti, cognee, FalkorDB) that could constrain how the resulting tool is licensed
    or shipped.
 
-Echo Memory is an open-source tool addressing both: your own daily pain, built as
-infrastructure you fully own and others can adopt without inheriting a vendor's license
-terms.
+**Vision, distinct from the validated wedge above (added after this session's scope
+broadening):** the same architecture generalizes past coding agents specifically — any
+MCP-compatible agent (chatbots, DevOps/ops agents, deployed agentic systems, internal
+business tooling) can read/write the same memory graph, and the tenancy model (single
+agent → shared-per-user → org-wide) already scales from one developer's local setup to an
+organization running agentic systems in production. **This is honestly a vision, not yet
+something v1a tests** — v1a's exit criteria stay scoped to the validated coding-tool
+wedge; the broader positioning is what the architecture is built toward, evaluated once
+the narrow wedge proves the mechanism actually works.
+
+Echo Memory is an open-source tool addressing all of this: your own daily pain first,
+built as infrastructure you fully own and others — any agent, any scale — can adopt
+without inheriting a vendor's license terms.
 
 ## What Makes This Cool
 
