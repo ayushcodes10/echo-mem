@@ -19,15 +19,20 @@ Two problems, one system:
    (Graphiti, cognee, FalkorDB) that could constrain how the resulting tool is licensed
    or shipped.
 
-**Vision, distinct from the validated wedge above (added after this session's scope
-broadening):** the same architecture generalizes past coding agents specifically — any
-MCP-compatible agent (chatbots, DevOps/ops agents, deployed agentic systems, internal
-business tooling) can read/write the same memory graph, and the tenancy model (single
-agent → shared-per-user → org-wide) already scales from one developer's local setup to an
-organization running agentic systems in production. **This is honestly a vision, not yet
-something v1a tests** — v1a's exit criteria stay scoped to the validated coding-tool
-wedge; the broader positioning is what the architecture is built toward, evaluated once
-the narrow wedge proves the mechanism actually works.
+**Vision, distinct from the validated wedge above:** the same architecture generalizes
+past coding agents specifically — any MCP-compatible agent (chatbots, DevOps/ops agents,
+deployed agentic systems, internal business tooling) can read/write the same memory
+graph. **This is honestly a vision, not yet something v1a tests** — v1a's exit criteria
+stay scoped to the validated coding-tool wedge.
+
+**Repositioned core differentiator (corrected after this session's second pass): this is
+NOT primarily a sharing/multi-tenancy product.** Multi-tenancy (single-agent → shared →
+org-wide) is one feature of the system, not the headline. The actual differentiator is
+**long-horizon memory quality** — an agent that remembers everything in the best possible
+way over a long time horizon, where "best possible" is a property of the read/write
+algorithm and the data structure, not just "we have a graph instead of a flat vector
+store." See the new "Long-Horizon Memory Architecture" section below — this is the part
+of the system meant to be genuinely novel, not an assembly of existing techniques.
 
 Echo Memory is an open-source tool addressing all of this: your own daily pain first,
 built as infrastructure you fully own and others — any agent, any scale — can adopt
@@ -122,6 +127,101 @@ without inheriting a vendor's license terms.
    proceeds.** An outside-voice review pointed out that if Claude Code/Cursor don't
    reliably invoke these tools without being told to, the whole value proposition (reduced
    re-explaining) doesn't materialize regardless of how good the retrieval is underneath.
+8. **The differentiation is the data structure/algorithm layer, not the storage engine —
+   Postgres stays, a new DBMS is explicitly rejected a second time.** Repositioned after
+   this session's second pass: the product's actual value isn't "we have a graph and
+   multi-tenancy," it's long-horizon memory quality — how well the system remembers,
+   consolidates, and retrieves over time. Building a new database engine (transactions,
+   durability, concurrency, crash recovery) to chase that would repeat the exact mistake
+   Premise 1 already walked through and rejected once (a multi-year undertaking that
+   produces zero memory-quality differentiation, since durability isn't where "remembers
+   things well" lives). The novel work goes into the Temporal Hierarchical Memory Graph
+   (below) — a real data structure and retrieval algorithm — running on Postgres's proven
+   storage, not replacing it.
+
+## Long-Horizon Memory Architecture (added — this is the actual differentiator)
+
+**The problem this section exists to solve:** a naive "keep every fact forever, traverse
+the whole graph on every query" design degrades as history accumulates — more candidates
+to search, more noise diluting retrieval, and (per the storage discussion below) growing
+query cost. "Long-horizon" memory needs a structural property none of the design so far
+provides: retrieval cost that stays bounded even as total accumulated history grows
+unboundedly. This is where the actual R&D goes — not the storage engine (stays Postgres,
+per Premise 8 below), the data structure and algorithm for how memory is organized,
+consolidated, and fetched.
+
+### Storage substrate honesty (why plain relational tables, not a new DBMS)
+
+Graphs stored as adjacency-list tables (`nodes`, `edges` with foreign keys) are fast for
+the access patterns this system actually uses — indexed 1-2 hop lookups, and bulk
+group-scoped scans (PPR pulls an entire subgraph in one query, builds the graph in
+application memory, and runs power iteration there — it never asks Postgres to traverse
+hop-by-hop in SQL). They are genuinely slower than a native graph engine (index-free
+adjacency, O(1) pointer-chase per hop vs. O(log n) indexed join per hop) for deep,
+arbitrary multi-hop traversal with per-hop filtering — which is exactly why Apache AGE is
+the v1b upgrade path for that specific need, gated behind its own maturity spike, not
+something plain tables pretend to solve. Building an entirely new database engine
+(transactions, durability, crash recovery, concurrency control) to avoid this tradeoff
+would cost 6-12+ months before any of it is trustworthy enough to store real data on —
+the same trap already avoided once this session (see Premise 1's "fully from scratch"
+discussion). The differentiation lives in the data structure and algorithm layer above
+storage, not in reinventing storage.
+
+### Temporal Hierarchical Memory Graph (the actual novel structure)
+
+Three tiers, not one flat graph:
+- **Hot tier:** raw episodic facts, full fidelity — what's already designed (edges with
+  `fact`, `causal_hint`, `confidence`, provenance).
+- **Consolidated tier:** periodically, clusters of related facts that co-occurred
+  temporally get summarized (via LLM) into a higher-level node — e.g. 50 individual facts
+  about iterating on a decision collapse into one consolidated node stating the outcome
+  and rationale, with edges back to every raw fact it summarizes. **Consolidation
+  demotes, it never deletes** — raw facts remain queryable (and remain what
+  `echo-memory why`'s audit trail resolves against), just not part of the default
+  retrieval path once consolidated.
+- **Archived tier:** consolidated nodes that stop being accessed at all eventually
+  demote further — excluded from retrieval by default, but never deleted (append-only
+  principle holds throughout — see the audit log design).
+
+**Node/edge schema addition:** `tier: enum (hot | consolidated | archived)`,
+`temperature: float` (see decay formula below), `last_accessed: timestamp`.
+
+**Temperature — decay/reinforcement scoring (spaced-repetition/cache-eviction inspired,
+not a novel formula, but a deliberate choice among known ones):**
+```
+temperature(e, t) = access_count(e) · exp(-λ · (t - last_accessed(e)))
+```
+Frequently and recently accessed facts stay "hot" (high temperature); facts nobody
+queries decay exponentially toward zero. `λ` (decay rate) is a tunable constant — needs
+empirical tuning against real usage patterns, not a guessed value (added to Open
+Questions below).
+
+**Consolidation trigger:** periodically (e.g. after N new writes to a `group_id`, or on a
+schedule), cluster hot-tier facts whose temperature has dropped below a threshold AND
+that are temporally/topically co-located (same session, or within k hops in the graph,
+within a time window) — summarize via LLM, demote the originals to `consolidated`-tier
+provenance of the new summary node.
+
+**Bounded-cost retrieval — the actual payoff:** `query_memory` searches the
+consolidated tier first (small, high-signal, cheap — a partial index on
+`tier = 'consolidated'` keeps this fast regardless of total hot-tier size), and only
+descends into the hot tier for nodes that pass a relevance threshold from the
+consolidated-tier search. This bounds total candidates examined per query independent of
+how much raw history has accumulated — the actual mathematical property "long-horizon"
+requires, since retrieval cost stops growing linearly with total stored history.
+
+**Why this is genuinely novel, not just "use HippoRAG" or "use GraphRAG":** HippoRAG's
+associative PageRank retrieval has no consolidation or decay — it treats the whole graph
+as equally "live" regardless of age. GraphRAG's community summarization happens once at
+ingest time, not as an ongoing, access-pattern-driven process. This design combines
+temporal decay (spaced-repetition-style), access-driven consolidation, and bounded
+top-down retrieval into one structure addressing the specific problem of *unboundedly
+growing* agent memory — none of the surveyed systems do this combination.
+
+**Staging (this is a new phase, not folded into v1b):** consolidation only matters once
+there's enough accumulated history for it to trigger — v1a's 3-week trial won't produce
+enough volume to need this. This becomes **v1c**, gated on v1b (multi-hop retrieval)
+proving out, not on v1a alone. See the updated PR Plan.
 
 ## Landscape (researched 2026-08-20 — kept as context, not as a dependency list)
 
@@ -402,6 +502,12 @@ just always empty until v1b populates it).
   patent grant, valuable for infrastructure meant to be built on.
 - Hosting story for a future managed offering (v1.1) — which providers support both
   pgvector *and* AGE together is worth checking before promising a hosted path.
+- **Decay rate `λ` and consolidation trigger thresholds (v1c)** — need empirical tuning
+  against real accumulated usage, not a guessed constant. Can't be tuned meaningfully
+  until v1b has been running long enough to accumulate real history.
+- **Consolidation summarization quality** — an LLM summarizing 50 facts into one
+  consolidated node is itself a judgment call, same eval-not-mock treatment as
+  `causal_hint` and entity resolution's fuzzy pass (see the test-strategy split).
 
 ## Success Criteria
 
@@ -419,12 +525,11 @@ just always empty until v1b populates it).
 5. An append-only audit log entry for at least one fact mutation and at least one entity
    resolution decision, human-readable enough to answer "why did this happen."
 6. A rough cost and latency baseline for a real ingestion + query cycle.
-7. **v1a → v1b exit criteria** (over a trial of real cross-tool usage, capped at 3 weeks
-   total — this is a hard cap, not indefinitely extendable): at least 3 real instances
-   where a recalled fact saved re-explaining something to a different tool; at most 1
-   duplicate node created by entity resolution; zero cases of two distinct entities
-   incorrectly merged into one node. If the bars aren't met, revisit the recall mechanism
-   itself before starting any v1b work.
+7. The CEO plan's exit criteria (recall saves, duplicate/bad-merge rates, capped trial
+   window) — at least 3 real instances where a recalled fact saved re-explaining
+   something to a different tool; at most 1 duplicate node created by entity resolution;
+   zero cases of two distinct entities incorrectly merged into one node. If the bars
+   aren't met, revisit the recall mechanism itself before starting any v1b work.
 
 ### v1b (gated on v1a's exit criteria being met)
 1. Apache AGE spike passes (or the plain-table fallback is confirmed sufficient).
@@ -436,6 +541,16 @@ just always empty until v1b populates it).
    our reimplementation is correct").
 4. One concrete example where 3-signal hybrid retrieval (adding PPR) answers a real
    multi-hop question that 2-signal v1a retrieval missed or ranked poorly.
+
+### v1c (gated on v1b, and on enough accumulated history existing to matter)
+1. At least one real consolidation event: a cluster of hot-tier facts correctly
+   summarized into one consolidated node, with the originals still resolvable via
+   `echo-memory why`, not deleted.
+2. One concrete example where bounded-cost retrieval (consolidated tier first) returns a
+   correct answer without touching the full hot-tier history — demonstrating the actual
+   sublinear-cost property this phase exists to deliver.
+3. A measured retrieval-latency comparison: with vs. without the consolidated-tier
+   shortcut, on a graph large enough for the difference to be visible.
 
 ## Distribution Plan
 
@@ -460,7 +575,7 @@ reviewable PRs matter more than a single large landing)
 | PR | Scope | Modules | Depends on |
 |---|---|---|---|
 | PR0 | Invocation-mechanism spike (does Claude Code/Cursor actually call MCP tools reliably?) — throwaway script/findings, not merged as product code | — | — |
-| PR1 | Repo scaffold, CI (lint+test on push), Postgres+pgvector Docker Compose, migration tooling (Alembic), schema (node/edge/audit_entry tables + pgvector ANN index + GIN full-text index) | `infra/`, `migrations/` | PR0 passes |
+| PR1 | Repo scaffold, CI (lint+test on push), Postgres+pgvector Docker Compose, migration tooling (Alembic), schema (node/edge/audit_entry tables + pgvector ANN index + GIN full-text index + composite indexes on `(group_id, source_node_id)`/`(group_id, target_node_id)`/`(group_id, t_valid, t_invalid)`) | `infra/`, `migrations/` | PR0 passes |
 | PR2 (Lane A) | Entity resolution + `write_episode`, connection pooling, structured server-side logging, input-size cap | `ingestion/`, `db/` | PR1 |
 | PR3 (Lane B) | Retrieval (pgvector+FTS+RRF, 2 signals) + `query_memory`, `top_k` cap, `plainto_tsquery`/`websearch_to_tsquery` (never raw `to_tsquery`) | `retrieval/` | PR1 |
 | PR4 | Audit log wiring (`entity_resolved` + `fact_superseded` entries, same-transaction writes) + `get_audit_log` | `audit/` | PR2 |
@@ -472,6 +587,9 @@ reviewable PRs matter more than a single large landing)
 | PR-B2 (Lane A) | `causal_hint` classification at ingestion | `ingestion/` | PR-B1 |
 | PR-B3 (Lane B) | PPR via `networkx.personalized_pagerank`, extend RRF to 3 signals | `retrieval/`, `graph/` | PR-B1 |
 | PR-B4 | `contradicts` surfacing (query-time + local notification), gated on the causal_hint quality threshold | `retrieval/`, `notifications/` | PR-B2, PR-B3 |
+| PR-C1 (v1c, gated on v1b) | `tier`/`temperature`/`last_accessed` schema addition, partial index on `tier = 'consolidated'`, table partitioning by `group_id` | `migrations/` | v1b shipped |
+| PR-C2 | Temperature decay/reinforcement scoring + consolidation trigger (clustering + LLM summarization) | `consolidation/` | PR-C1 |
+| PR-C3 | Bounded-cost top-down retrieval (consolidated tier first, descend to hot tier on relevance threshold) | `retrieval/` | PR-C1, PR-C2 |
 | PR-1.1-* (v1.1) | Identity/auth → ACL enforcement → sensitive-data redaction, in that order | `auth/`, `db/`, `ingestion/` | v1b shipped |
 
 **Parallel lanes:** PR2 ∥ PR3 once PR1 lands (PR1 establishes the shared `db/`
@@ -480,3 +598,24 @@ lands, same reasoning — no shared modules between them.
 
 CI (basic: lint + test on push) is set up in PR1, not deferred — cheap now, catches
 regressions immediately as the rest of the PRs land.
+
+## What I noticed about how you think
+
+- When I flagged the FalkorDB license concern, you didn't shrug it off — you escalated to
+  "we need everything ours," which tells me licensing/control isn't a minor preference for
+  you, it's close to a hard requirement for anything you'd call genuinely open source.
+- When I laid out the real cost of "zero dependencies, even the storage engine," you took
+  the pragmatic middle path rather than either caving to the higher-effort option out of
+  stubbornness or abandoning the ownership principle entirely.
+- You've now revised this design's core architecture four times across one session
+  (curation-proof → Graphiti-based → owned engine on SQLite → owned engine on Postgres+
+  pgvector+AGE → AGE-decoupled staged version) without losing the thread — the underlying
+  goal stayed constant through every pivot.
+- When the outside-voice review surfaced a real contradiction between your own two
+  documents (causal_hint in v1a vs. v1b), you didn't defend either document out of
+  sunk-cost — you picked the version that matched your own actual intent (staging) and had
+  both docs corrected to agree with it.
+- You accepted seven of eight outside-voice findings and held firm on exactly one (keeping
+  Postgres+AGE despite the YAGNI critique) — the one place you'd already deliberated twice
+  before this review even started. That's not stubbornness, that's knowing which decisions
+  you've actually already made versus which ones just hadn't been pressure-tested yet.
