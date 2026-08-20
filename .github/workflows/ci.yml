@@ -19,25 +19,10 @@ jobs:
           cache: "pip"
 
       - name: Install dependencies
-        run: |
-          if [ -f pyproject.toml ]; then
-            pip install -e ".[dev]"
-          else
-            echo "No pyproject.toml yet — skipping install (repo scaffold stage)"
-          fi
+        run: pip install -e ".[dev]"
 
       - name: Lint (ruff)
-        run: |
-          if [ -f pyproject.toml ]; then
-            ruff check .
-          else
-            echo "No pyproject.toml yet — skipping lint"
-          fi
+        run: ruff check .
 
       - name: Test (pytest, excluding LLM-quality evals)
-        run: |
-          if [ -f pyproject.toml ]; then
-            pytest -m "not eval"
-          else
-            echo "No pyproject.toml yet — skipping tests"
-          fi
+        run: pytest -m "not eval"

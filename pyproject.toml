@@ -1,0 +1,37 @@
+[project]
+name = "echo-memory"
+version = "0.1.0"
+description = "A long-horizon memory architecture for AI agents"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]>=3.2,<4",
+    "pgvector>=0.3,<1",
+    "alembic>=1.13,<2",
+    "sqlalchemy>=2,<3",
+    "mcp>=2.0,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.6,<1",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "eval: LLM-quality evals (slow, costs tokens, never mocked)",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

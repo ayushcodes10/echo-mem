@@ -1,10 +1,5 @@
 # Local Development
 
-> **Status:** this describes the target setup once PR1 (repo scaffold, Docker Compose,
-> migrations, schema) lands; see [`docs/designs/`](designs/) for the build plan. Update
-> this doc in the same PR that makes each step real; a setup guide that doesn't match
-> what actually exists is worse than none.
-
 ## Prerequisites
 
 - Python 3.11+
@@ -17,7 +12,9 @@
 git clone git@github.com:ayushcodes10/echo-mem.git
 cd echo-mem
 
-# Start Postgres with pgvector (and, from v1b onward, Apache AGE)
+# Start Postgres with pgvector + Apache AGE (built from source on top of
+# pgvector/pgvector:pg16, not the apache/age image — see docker/postgres.Dockerfile
+# and the design doc's Foundational spike section for why)
 docker compose up -d
 
 # Install dependencies
@@ -35,6 +32,8 @@ alembic upgrade head
 ```
 
 ## Running the MCP server locally
+
+Not built yet (PR5 in the design doc's PR Plan). Once it exists:
 
 ```bash
 python -m echo_memory.server
@@ -58,6 +57,11 @@ matching, RRF fusion, PPR correctness, audit log transactions) gets fast mocked 
 tests. LLM-quality judgment (causal_hint classification, entity-resolution's fuzzy
 confirm pass) is only measured by the eval suite (`pytest -m eval`), never mocked.
 
+`tests/integration/` applies real migrations against `ECHO_MEMORY_DATABASE_URL` and
+checks the resulting schema; it self-skips if that database isn't reachable, so it
+needs `docker compose up -d` and a real `ECHO_MEMORY_DATABASE_URL` to actually run.
+CI doesn't run it yet (see `TODOS.md`).
+
 ## Database migrations
 
 ```bash
@@ -68,4 +72,10 @@ alembic downgrade -1                       # roll back one step
 
 ## Common issues
 
-_(fill in as they come up; this section starts empty on purpose)_
+- **`alembic upgrade head` fails with "role postgres does not exist" even though
+  `docker compose up` succeeded.** Something else on your machine (a native Postgres
+  install, a homebrew service, an SSH tunnel) is already listening on 5432, and your
+  connection is silently hitting that instead of the container. Check with
+  `lsof -nP -iTCP:5432 -sTCP:LISTEN`. This is exactly why `docker-compose.yml` maps
+  the container to host port 5433, not 5432; if you changed that back, change it back
+  again, or point `ECHO_MEMORY_DATABASE_URL` at whatever port you actually chose.
