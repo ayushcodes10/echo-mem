@@ -1,7 +1,7 @@
 # Local Development
 
 > **Status:** this describes the target setup once PR1 (repo scaffold, Docker Compose,
-> migrations, schema) lands — see [`docs/designs/`](designs/) for the build plan. Update
+> migrations, schema) lands; see [`docs/designs/`](designs/) for the build plan. Update
 > this doc in the same PR that makes each step real; a setup guide that doesn't match
 > what actually exists is worse than none.
 
@@ -9,7 +9,7 @@
 
 - Python 3.11+
 - Docker and Docker Compose
-- An embedding API key (provider TBD — see the design doc's Open Questions)
+- An embedding API key (provider TBD; see the design doc's Open Questions)
 
 ## First-time setup
 
@@ -41,8 +41,8 @@ python -m echo_memory.server
 ```
 
 Point your MCP client (Claude Code's `.mcp.json`, Cursor's MCP config, etc.) at this
-process. Each client should run its own instance with a distinct `ECHO_MEMORY_AGENT_ID`
-— see the design doc's "Configuration" section for how `scope: "solo" | "shared"`
+process. Each client should run its own instance with a distinct `ECHO_MEMORY_AGENT_ID`;
+see the design doc's "Configuration" section for how `scope: "solo" | "shared"`
 resolves per agent.
 
 ## Running tests
@@ -68,4 +68,4 @@ alembic downgrade -1                       # roll back one step
 
 ## Common issues
 
-_(fill in as they come up — this section starts empty on purpose)_
+_(fill in as they come up; this section starts empty on purpose)_

@@ -15,5 +15,5 @@ We'll acknowledge reports and work on a fix; timelines depend on severity.
 
 ## Supported Versions
 
-This project is pre-1.0 and under active development — only the latest commit on `main`
+This project is pre-1.0 and under active development; only the latest commit on `main`
 is supported. There is no stable release yet.
