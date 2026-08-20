@@ -284,6 +284,26 @@ without change (see Concrete Schema), so a failed spike doesn't strand any work;
 means v1a builds on plain tables instead, same as the prior plan. This runs alongside (or
 just after) the invocation-mechanism spike; both are gates before any other v1a work.
 
+**Result: GO (run 2026-08-20).** A synthetic tenancy-scoped graph (5 groups, 2000 nodes,
+8000 edges, matching the v1a node/edge shape below) loaded into Postgres 16 + pgvector
+0.8.6 + AGE 1.5.0. Correctness: zero cross-tenant leaks across 8000 traversed edges, and
+Cypher's `t_invalid IS NULL` active-fact filter matched a plain-SQL count exactly (7192
+active edges both ways). Latency: 2-hop traversal p50 12.3ms/p95 12.7ms, 3-hop p50
+8.0ms/p95 9.1ms, both well under the 200ms budget (design doc's PPR latency target,
+reused here as the general traversal bar). One real finding worth keeping: AGE 1.5.0
+doesn't support whole-entity `SET n = row`/`n += row` from a map bound via `UNWIND`, or
+the openCypher `ALL(x IN list WHERE ...)` list predicate; both have working alternatives
+(explicit per-property `CREATE`/`SET`, and named edge variables per hop instead of
+`ALL(relationships(p) WHERE ...)`) and neither blocks v1a. Confound caught during the
+spike, not after: the published `apache/age` Docker image is amd64-only, so on this
+arm64 dev machine the first run went through QEMU emulation and returned a false
+NO-GO (2-hop p50 302ms, 3-hop p50 701ms/p95 1285ms) purely from emulation overhead, not
+from AGE itself. Rebuilding AGE from source on the native-arm64 `pgvector/pgvector:pg16`
+image reproduced identical correctness and the latency numbers above. Production
+deployment targets (Linux amd64 cloud VMs) won't hit this emulation tax at all; this was
+purely a local-dev-on-Apple-Silicon artifact, worth flagging for `docs/DEVELOPMENT.md`
+once PR1 lands so nobody re-triggers the same false signal.
+
 ### v1a, prove the core recall loop (AGE-native storage; no causal_hint, no PPR yet)
 
 **Storage:** PostgreSQL (PostgreSQL License) with **Apache AGE** (Apache-2.0, Apache
@@ -548,7 +568,9 @@ just always empty until v1b populates it).
 ## Success Criteria
 
 ### Foundational spikes (gate v1a's start)
-1. Apache AGE spike passes (or the plain-table fallback is confirmed sufficient), moved earlier per Premise 6's reversal.
+1. **DONE, GO (2026-08-20).** Apache AGE spike passes; see the Foundational spike section
+   above for the correctness/latency results and the native-vs-emulated-arch confound
+   caught along the way. Plain-table fallback not needed.
 2. The invocation-mechanism spike (Open Questions) shows agents actually call the MCP
    tools at natural checkpoints without constant manual prompting. This is a gate before
    the rest of v1a is worth building, not just a nice-to-have signal.

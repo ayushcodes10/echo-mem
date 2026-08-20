@@ -2,6 +2,9 @@
 MATHS.local.md
 *.local.md
 
+# Throwaway PR0a/PR0b spike scripts and findings — not merged as product code
+spikes/
+
 # Python
 __pycache__/
 *.py[cod]
