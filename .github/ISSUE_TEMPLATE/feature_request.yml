@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose an idea or enhancement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check `docs/designs/echo-memory-design.md` first — this project is
+        staged (v1a → v1b → v1.1), and proposals are evaluated against where the
+        current build phase actually is.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+    validations:
+      required: true
+  - type: dropdown
+    id: build-phase
+    attributes:
+      label: Which build phase does this fit?
+      options:
+        - v1a (core recall)
+        - v1b (causal typing / graph traversal)
+        - v1.1 (org tenancy)
+        - Not sure — needs discussion
+    validations:
+      required: true
