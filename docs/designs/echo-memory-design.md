@@ -56,10 +56,13 @@ without inheriting a vendor's license terms.
   bolted-together systems, and the same engine that runs a solo user's local memory
   scales unmodified to org-wide concurrent multi-writer use. No migration debt at any
   point, not SQLite-to-Postgres, and not plain-tables-to-AGE either. (This does mean a
-  running Postgres process, not a single file; see Distribution Plan. And separately:
-  the embedding call for vector search and the LLM call for extraction are
-  external API calls regardless of storage choice, the database is self-hosted, the
-  model calls aren't.)
+  running Postgres process, not a single file; see Distribution Plan. Separately: the
+  server itself never calls an external LLM or embedding API. Extraction (entities/facts
+  from raw text) is done by the calling agent, which is already an LLM reasoning over
+  the conversation in the same turn, the same pattern graphify uses for its own
+  subagent-driven extraction (see Competitor Analysis). Vector search uses a local
+  embedding model, no API key, no external call; see Recommended Approach and MCP tool
+  contract for the mechanics.)
 - One tenancy mechanism scales from your own cross-tool memory to a shared team/org graph.
 - **Day-to-day usage:** an agent calls the MCP server's write tool at natural checkpoints
   in a session (decisions made, preferences stated) and its query tool at session start or
@@ -378,9 +381,16 @@ as the edge table grows indefinitely. v1b sets an explicit latency budget (targe
 a stated fallback if that budget is blown: cap the graph size, or recompute PPR on a
 schedule rather than per-query.
 
-**Embedding model:** an external API call (provider TBD; see Open Questions), not a
-framework dependency, swappable without touching the rest of the system. Applies to both
-v1a and v1b.
+**Embedding model:** a local model (`sentence-transformers`, no API key, no external call,
+no per-call cost), not a framework dependency in the AI-memory-framework sense, just a
+generic, swappable embedding library the same way `networkx` is a swappable graph-math
+library (Premise 6). **Resolved after this session's architecture pivot** (see Open
+Questions): matches graphify's own "no API key needed" precedent, and keeps the server
+from ever calling an external LLM/embedding API at all, consistent with pushing
+extraction to the calling agent (below). Swappable to a hosted provider (Voyage, OpenAI)
+later without touching the rest of the system if local-model quality proves
+insufficient; that would be a real, visible tradeoff (cost/key vs. quality), not a
+silent default. Applies to both v1a and v1b.
 
 ## Concrete Schema
 
@@ -402,13 +412,24 @@ node {
 ```
 
 **Entity resolution (v1a procedure, the most load-bearing piece of v1a, addressed
-explicitly):** on each `write_episode` call, for every entity the extraction step names,
-resolve against existing nodes in the same `group_id` in two passes: (1) exact/near-exact
-string match against `node.name` and `node.aliases` (cheap, deterministic); (2) if no
-match, a single LLM confirmation call ("is this new mention referring to the same entity
-as [candidate node], or a new one?"), fired only for candidates surfaced by embedding
-similarity above a threshold (avoids an LLM call per mention). No match on either pass
-creates a new node. A confirmed match appends the new surface form to `aliases`.
+explicitly):** extraction itself (turning raw conversation text into entities and facts)
+happens in the *calling agent*, not the server, per the architecture pivot below: the
+calling agent is already an LLM reasoning over this exact text in the same turn, so
+`write_episode` receives already-structured `entities`/`facts`, not raw text (see MCP
+tool contract). Resolution runs server-side, per entity name, against existing nodes in
+the same `group_id`, in two passes: (1) exact/near-exact string match against `node.name`
+and `node.aliases` (cheap, deterministic, resolves silently); (2) if no exact match,
+embedding similarity (local model, see Recommended Approach) against existing nodes'
+embeddings. Below a low threshold: no real candidate, treat as a new node, no ambiguity.
+Above a high threshold: confident match, resolve silently, append the new surface form to
+`aliases`. Between the two thresholds: genuinely ambiguous, the server does **not** guess
+and does **not** call an LLM itself; it returns the mention plus candidate(s) in
+`write_episode`'s response as `ambiguous_entities` and defers those specific facts. The
+calling agent (which can reason about this immediately, in the same turn) resolves them
+by calling `write_episode` again with `entity_resolutions`, per the MCP tool contract.
+**Both threshold values are placeholders pending real usage data** (see MATHS.local.md
+§5 and Open Questions): start at low=0.75, high=0.92, revisit once the v1a trial has
+real ambiguous-match examples to tune against.
 
 **Edge (AGE edge, or table row):**
 ```
@@ -439,7 +460,8 @@ audit_entry {
   session_id: string
   summary: string            # e.g. "invalidated 'uses SQLite', superseded by 'uses Postgres'"
   resolution_detail: string | null  # for entity_resolved: which pass matched (exact/fuzzy),
-                                     # LLM rationale if the fuzzy pass fired
+                                     # and the calling agent's stated rationale for
+                                     # fuzzy-pass confirmations (entity_resolutions), if any
 }
 ```
 **Renamed after the outside-voice review:** the mutation type formerly called `merged` is
@@ -463,8 +485,9 @@ invalidated (`t_invalid` set), the newer one's `fact` and `confidence` win, and 
 `audit_entry` with `mutation_type: fact_superseded` records both `affected_edge_ids`. No
 LLM-judged fuzzy merging of *facts* in v1a. That's a real risk (false merges) explicitly
 deferred, not silently dropped. (Entity-node resolution's fuzzy pass, above, is different
-and does use LLM confirmation: that's a node-identity decision, not a fact-content
-decision.)
+and does route genuinely ambiguous cases back to the calling agent for a judgment call:
+that's a node-identity decision, not a fact-content decision. It's the calling agent's
+judgment, via `entity_resolutions`, not a separate server-side LLM call.)
 
 **`group_id` naming convention (two tiers in v1a/v1b, org tier in v1.1):**
 - Single-agent: `group_id = "user:{user_id}:agent:{agent_id}"`, e.g. `user:ayush:agent:claude-code`
@@ -483,10 +506,13 @@ describes *what* the fact is (e.g. `"decided"`, `"uses"`), while `causal_hint` c
 *why/how it relates causally*, never `relation_type: "caused"` alongside
 `causal_hint: "caused_by"`, which is redundant.
 
-**`causal_hint` classification (v1b procedure):** at ingestion, the same LLM call
-extracting `relation_type` also asks: "did the source fact directly cause, enable, or
-block the target fact, per what the conversation/session explicitly states, not what you
-infer statistically?" Answer one of the five enum values or `null` if associative only.
+**`causal_hint` classification (v1b procedure):** since extraction happens in the calling
+agent (not the server, per the architecture pivot above), a v1b-aware agent asks itself
+the same question while it's already reasoning out `relation_type` for each fact: "did
+the source fact directly cause, enable, or block the target fact, per what the
+conversation/session explicitly states, not what you infer statistically?", and includes
+`causal_hint` as an optional field per fact in `write_episode`'s `facts` payload. Answer
+one of the five enum values or `null` if associative only.
 Example: "switched to Postgres because SQLite couldn't handle concurrent writes" → edge
 `{relation_type: "decided", causal_hint: "caused_by", fact: "switched to Postgres due to
 SQLite concurrent-write limits"}`: `relation_type` says what happened, `causal_hint` says
@@ -512,11 +538,54 @@ Postgres data, different identity per process. `ECHO_MEMORY_ORG_ID` is added in 
 
 ### MCP tool contract (minimal, stable across v1a → v1b)
 
+**Architecture pivot (this session): the server never calls an external LLM.** The
+original contract had `write_episode` take raw `text` and extract entities/facts
+server-side via its own LLM call, mirroring the still-unresolved "which LLM provider"
+question in Open Questions. Prompted by checking how `graphify` (installed locally, see
+Competitor Analysis) solves the same problem: it needs no API key for the common case
+because *the calling agent itself* does the extraction (via Agent/subagent dispatch in
+the same session), not a separate call the tool's own code makes. Applied here: the
+calling agent is already an LLM reasoning over this exact conversation in this exact
+turn, so `write_episode` takes already-structured `entities`/`facts`, and the server's
+job is storage, resolution, and retrieval, never inference. This also resolves the
+embedding-provider question (see above): the one remaining "real math" operation
+(embedding similarity) uses a local model, so the server has no external API dependency
+at all in v1a.
+
 ```
-write_episode(scope: "solo" | "shared", session_id, text) -> {edges_created: [id]} | {error: string}
+write_episode(
+  scope: "solo" | "shared",
+  session_id: string,
+  entities: [{name: string, type: string, aliases?: [string]}],
+  facts: [{source: string, target: string, relation_type: string, fact: string,
+           confidence: "extracted" | "inferred" | "ambiguous", causal_hint?: string | null}],
+  entity_resolutions?: [{mention: string, resolved_to: id | "new", rationale?: string}]
+) -> {
+  edges_created: [id],
+  ambiguous_entities: [{mention: string, candidates: [{node_id: id, name: string, similarity: float}]}]
+} | {error: string}
+
 query_memory(scope: "solo" | "shared", query, top_k: int = 10, max 100) -> {facts: [{fact, confidence, causal_hint, provenance}]} | {error: string}
 get_audit_log(scope: "solo" | "shared", since?: ISO8601 timestamp) -> {entries: [audit_entry]} | {error: string}
 ```
+
+`entities`/`facts` reference each other by `name`, not node id: node ids don't exist yet
+for genuinely new entities at call time, and the server resolves `source`/`target` names
+to ids (existing or newly created) internally. `causal_hint` is accepted from v1a onward
+(part of the stable contract) but only meaningfully populated by a v1b-aware calling
+agent; v1a agents simply omit it or send `null` (see Concrete Schema's `causal_hint`
+classification).
+
+**Entity resolution round-trip:** if resolution surfaces a genuinely ambiguous match
+(see Concrete Schema), the server does not create that entity or the facts referencing
+it. It returns `ambiguous_entities` and skips those specific facts, creating everything
+unambiguous immediately. The calling agent resolves the rest by calling `write_episode`
+again, in the same turn, with the same `entities`/`facts` plus `entity_resolutions`
+naming what each `mention` actually is; the server is stateless between these two
+calls. It doesn't need to remember anything: the second call just repeats the payload
+with resolutions attached. `rationale` is optional free text the agent can supply,
+stored on the resulting `entity_resolved` audit entry.
+
 `scope` replaces a raw `group_id` parameter: the agent picks "solo" (this agent's own
 private memory, `user:{USER_ID}:agent:{AGENT_ID}`) or "shared" (the pool all of this
 user's agents read/write, `user:{USER_ID}:shared`); the server resolves the actual
@@ -527,9 +596,9 @@ layer landing.
 
 All three tools return a typed `{error: string}` object on failure rather than raising;
 `top_k` defaults to 10, capped at 100; `since` is an ISO8601 timestamp, entries at or
-after it. In v1a, `causal_hint` in `query_memory`'s response is always `null` (the field
-exists in the contract from the start so v1b doesn't need a breaking API change; it's
-just always empty until v1b populates it).
+after it. In v1a, `causal_hint` in `query_memory`'s response is always `null` unless a
+v1b-aware agent populated it at write time (the field exists in the contract from the
+start so v1b doesn't need a breaking API change).
 
 ## Open Questions
 
@@ -545,7 +614,13 @@ just always empty until v1b populates it).
 - **Apache AGE maturity/performance**, foundational now, gates v1a's start (reversed
   per Premise 6). Resolved by the PR0a spike before any other work begins, with a named
   fallback (plain relational tables, same schema shape) if it doesn't hold up.
-- Embedding model/provider choice, not yet decided; affects cost and portability.
+- ~~Embedding model/provider choice~~, resolved: **a local `sentence-transformers` model**,
+  no API key, matching graphify's precedent (see MCP tool contract's architecture pivot).
+  Swappable to a hosted provider later if local quality proves insufficient. Specific
+  model/dimension still needs picking during PR2 implementation.
+- **Entity-resolution similarity thresholds** (low=0.75, high=0.92, see Concrete Schema)
+  are placeholders with no real usage data behind them yet; revisit once the v1a trial
+  produces real ambiguous-match examples.
 - RRF fusion weights (pgvector vs. full-text-search, and later vs. PPR) need tuning
   against real queries.
 - **`causal_hint` precision/recall threshold**, the eval set gives directional confidence

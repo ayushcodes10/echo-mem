@@ -28,10 +28,13 @@ not `fix bug`. No AI-tool attribution in commit messages or co-author trailers.
 
 - Keep PRs scoped to one thing; this project intentionally uses small, independently
   reviewable PRs rather than large landings (see the design doc's PR plan).
-- Every new codepath needs a test. Deterministic logic gets a unit test; anything
-  depending on LLM judgment (entity resolution's fuzzy-match confirm, `causal_hint`
-  classification) goes through the eval suite instead of a mocked unit test; see
-  `docs/DEVELOPMENT.md`'s test-strategy note.
+- Every new codepath needs a test. The server itself has no LLM-judgment code path to
+  eval-test: extraction, entity-resolution confirmation, and `causal_hint` classification
+  all happen in the calling agent, not this codebase (see the design doc's MCP tool
+  contract). Deterministic server-side logic (resolution threshold branching, RRF fusion,
+  audit log transactions) gets a mocked unit test. The `eval` pytest marker is reserved
+  for future retrieval-quality evals (e.g. "does `query_memory` rank a labeled query set
+  well"), not in use yet; see `docs/DEVELOPMENT.md`'s test-strategy note.
 - CI must pass before merge.
 
 ## Code of Conduct

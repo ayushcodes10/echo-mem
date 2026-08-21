@@ -4,7 +4,10 @@
 
 - Python 3.11+
 - Docker and Docker Compose
-- An embedding API key (provider TBD; see the design doc's Open Questions)
+
+No API key needed for v1a: extraction happens in the calling agent (not this server),
+and embeddings use a local `sentence-transformers` model. See the design doc's MCP tool
+contract section for why.
 
 ## First-time setup
 
@@ -24,8 +27,7 @@ pip install -e ".[dev]"
 
 # Configure environment
 cp .env.example .env
-# edit .env: set ECHO_MEMORY_USER_ID, ECHO_MEMORY_AGENT_ID, ECHO_MEMORY_DATABASE_URL,
-# and your embedding provider's API key
+# edit .env: set ECHO_MEMORY_USER_ID, ECHO_MEMORY_AGENT_ID, ECHO_MEMORY_DATABASE_URL
 
 # Apply migrations
 alembic upgrade head
@@ -54,8 +56,10 @@ pytest tests/unit/         # deterministic unit tests only
 
 Per the CEO review's test-strategy split: deterministic logic (entity resolution
 matching, RRF fusion, PPR correctness, audit log transactions) gets fast mocked unit
-tests. LLM-quality judgment (causal_hint classification, entity-resolution's fuzzy
-confirm pass) is only measured by the eval suite (`pytest -m eval`), never mocked.
+tests. The server has no LLM-judgment code path of its own to eval-test (extraction,
+entity-resolution confirmation, and `causal_hint` classification all happen in the
+calling agent, see the design doc's MCP tool contract); the `eval` marker (`pytest -m
+eval`) is reserved for future retrieval-quality evals, not in use yet.
 
 `tests/integration/` applies real migrations against `ECHO_MEMORY_DATABASE_URL` and
 checks the resulting schema; it self-skips if that database isn't reachable, so it
