@@ -18,6 +18,13 @@ follows PR0a's spike: explicit per-property CREATE (not `SET n = row`,
 unsupported in AGE 1.5.0 from a runtime map) and agtype key literals cast
 explicitly (`properties ->> '"key"'::agtype`, not a bare SQL string).
 
+HNSW indexes use vector_ip_ops (inner product), not vector_cosine_ops:
+embeddings are L2-normalized on write, so <#> (negative inner product) gives
+the same ranking as <=> (cosine distance) without computing both norms on
+every comparison. The index opclass has to match the operator used at query
+time or the index isn't used at all; see MATHS.local.md §1 and
+ingestion/resolution.py's _fuzzy_candidates.
+
 EMBEDDING_DIM=384 matches `all-MiniLM-L6-v2` (the default local embedding
 model, see PR2 and the design doc's MCP tool contract architecture pivot:
 the server uses a local sentence-transformers model, not an external API).
@@ -120,7 +127,7 @@ def upgrade() -> None:
     op.execute("CREATE INDEX fact_embedding_group_idx ON public.fact_embedding (group_id)")
     op.execute(
         "CREATE INDEX fact_embedding_hnsw_idx ON public.fact_embedding "
-        "USING hnsw (embedding vector_cosine_ops)"
+        "USING hnsw (embedding vector_ip_ops)"
     )
 
     op.execute(f"""
@@ -133,7 +140,7 @@ def upgrade() -> None:
     op.execute("CREATE INDEX node_embedding_group_idx ON public.node_embedding (group_id)")
     op.execute(
         "CREATE INDEX node_embedding_hnsw_idx ON public.node_embedding "
-        "USING hnsw (embedding vector_cosine_ops)"
+        "USING hnsw (embedding vector_ip_ops)"
     )
 
 
