@@ -18,9 +18,13 @@ follows PR0a's spike: explicit per-property CREATE (not `SET n = row`,
 unsupported in AGE 1.5.0 from a runtime map) and agtype key literals cast
 explicitly (`properties ->> '"key"'::agtype`, not a bare SQL string).
 
-EMBEDDING_DIM=1536 is a placeholder (OpenAI text-embedding-3-small's
-dimension) pending the embedding provider decision in the design doc's Open
-Questions; changing it later is a migration like any other.
+EMBEDDING_DIM=384 matches `all-MiniLM-L6-v2` (the default local embedding
+model, see PR2 and the design doc's MCP tool contract architecture pivot:
+the server uses a local sentence-transformers model, not an external API).
+Model choice is still a placeholder pending real quality tuning (see
+MATHS.local.md's open questions); changing it later is a migration like any
+other. Not yet released to any external adopter, so this constant was edited
+in place rather than layered with a follow-up migration.
 """
 
 from alembic import op
@@ -31,7 +35,7 @@ branch_labels = None
 depends_on = None
 
 GRAPH = "echo_memory"
-EMBEDDING_DIM = 1536
+EMBEDDING_DIM = 384
 
 
 def prop(key: str) -> str:
@@ -55,8 +59,8 @@ def upgrade() -> None:
     op.execute(f"SELECT create_vlabel('{GRAPH}', 'Node')")
     op.execute(f"SELECT create_elabel('{GRAPH}', 'FACT')")
 
-    # Node: id (business key), name, type, group_id, aliases
-    op.execute(f'CREATE INDEX node_id_idx ON {GRAPH}."Node" ({prop("id")})')
+    # Node: name, type, group_id, aliases. AGE's own id(n) graphid is the
+    # canonical identifier (see Concrete Schema); no separate id property.
     op.execute(f'CREATE INDEX node_group_idx ON {GRAPH}."Node" ({prop("group_id")})')
 
     # Edge (label FACT): relation_type, fact, confidence, t_valid, t_invalid,

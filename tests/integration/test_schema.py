@@ -2,48 +2,10 @@
 it produces, including the search_path bug caught during PR1's own manual
 testing (plain tables silently landing in ag_catalog instead of public).
 
-Skips automatically if ECHO_MEMORY_DATABASE_URL isn't set or unreachable, so
-CI (which doesn't yet run a Postgres+AGE service, see TODOS.md) stays green;
-run locally with `docker compose up -d` first.
+See conftest.py for the migrated_db fixture and the DB-reachability skip.
 """
 
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-import psycopg
-import pytest
-
 from echo_memory.infra.db import GRAPH_NAME, connect
-
-REPO_ROOT = Path(__file__).parent.parent.parent
-DATABASE_URL = os.environ.get("ECHO_MEMORY_DATABASE_URL")
-
-
-def _reachable(url: str | None) -> bool:
-    if not url:
-        return False
-    try:
-        psycopg.connect(url, connect_timeout=2).close()
-        return True
-    except psycopg.OperationalError:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _reachable(DATABASE_URL),
-    reason="ECHO_MEMORY_DATABASE_URL not set or unreachable; run `docker compose up -d` first",
-)
-
-
-@pytest.fixture
-def migrated_db():
-    env = {**os.environ, "ECHO_MEMORY_DATABASE_URL": DATABASE_URL}
-    alembic = [sys.executable, "-m", "alembic"]
-    subprocess.run([*alembic, "upgrade", "head"], cwd=REPO_ROOT, env=env, check=True)
-    yield DATABASE_URL
-    subprocess.run([*alembic, "downgrade", "base"], cwd=REPO_ROOT, env=env, check=True)
 
 
 def test_plain_tables_land_in_public_schema(migrated_db):
@@ -74,9 +36,9 @@ def test_node_edge_audit_embedding_round_trip(migrated_db):
 
     conn.execute(
         f"""SELECT * FROM cypher('{GRAPH_NAME}', $$
-            CREATE (a:Node {{id: 'n1', name: 'Postgres', type: 'tool',
+            CREATE (a:Node {{name: 'Postgres', type: 'tool',
                               group_id: 'g1', aliases: []}})
-            CREATE (b:Node {{id: 'n2', name: 'AGE decision', type: 'decision',
+            CREATE (b:Node {{name: 'AGE decision', type: 'decision',
                               group_id: 'g1', aliases: []}})
             CREATE (b)-[e:FACT {{relation_type: 'uses', fact: 'uses Postgres',
                                   confidence: 'extracted', t_valid: 1755600000,
@@ -97,7 +59,7 @@ def test_node_edge_audit_embedding_round_trip(migrated_db):
     )
     conn.execute(
         "INSERT INTO public.fact_embedding (edge_id, group_id, embedding) "
-        "VALUES (%s, 'g1', (SELECT array_agg(0.0)::vector(1536) FROM generate_series(1, 1536)))",
+        "VALUES (%s, 'g1', (SELECT array_agg(0.0)::vector(384) FROM generate_series(1, 384)))",
         (edge_id,),
     )
 

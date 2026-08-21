@@ -403,13 +403,19 @@ itself doesn't change; only whether traversal happens via Cypher or SQL joins.
 **Node (AGE vertex, or table row):**
 ```
 node {
-  id, name: string                # canonical entity name
+  name: string                    # canonical entity name
   type: string                    # e.g. "tool", "decision", "preference", "person"
   group_id: string                # tenancy scope, same as edge
   created_at, updated_at: timestamp
   aliases: [string]                # alternate mentions resolved to this node; see below
 }
 ```
+No separate `id` property: AGE's own `id(n)` graphid is the canonical identifier
+(exposed as a string over MCP, per the tool contract). A synthetic `id` property only
+made sense while a plain-table fallback was live, so a plain-table primary key would
+exist independent of AGE. **Dropped after PR0a's spike resolved GO** (see Foundational
+spike): no fallback is being built, so there's nothing left for a separate id to hedge
+against.
 
 **Entity resolution (v1a procedure, the most load-bearing piece of v1a, addressed
 explicitly):** extraction itself (turning raw conversation text into entities and facts)
@@ -614,13 +620,20 @@ start so v1b doesn't need a breaking API change).
 - **Apache AGE maturity/performance**, foundational now, gates v1a's start (reversed
   per Premise 6). Resolved by the PR0a spike before any other work begins, with a named
   fallback (plain relational tables, same schema shape) if it doesn't hold up.
-- ~~Embedding model/provider choice~~, resolved: **a local `sentence-transformers` model**,
-  no API key, matching graphify's precedent (see MCP tool contract's architecture pivot).
-  Swappable to a hosted provider later if local quality proves insufficient. Specific
-  model/dimension still needs picking during PR2 implementation.
+- ~~Embedding model/provider choice~~, resolved: **a local `sentence-transformers`
+  model, `all-MiniLM-L6-v2` (384-dim)**, no API key, matching graphify's precedent (see
+  MCP tool contract's architecture pivot). A placeholder default picked during PR2, not
+  a considered final choice; swappable to a hosted provider later if local quality
+  proves insufficient.
 - **Entity-resolution similarity thresholds** (low=0.75, high=0.92, see Concrete Schema)
   are placeholders with no real usage data behind them yet; revisit once the v1a trial
   produces real ambiguous-match examples.
+- **PR2 known limitation:** entity resolution only checks each entity against nodes
+  already stored, not against other entities in the same `write_episode` call. Two new,
+  near-duplicate names mentioned in one call (confirmed with a real test: "Postgres" +
+  "PostgreSQL" together) both resolve as new and create two nodes, since neither has an
+  embedding in the database yet to compare against. Revisit if this shows up as a real
+  duplicate-node pattern during the v1a trial; see MATHS.local.md §5.
 - RRF fusion weights (pgvector vs. full-text-search, and later vs. PPR) need tuning
   against real queries.
 - **`causal_hint` precision/recall threshold**, the eval set gives directional confidence
