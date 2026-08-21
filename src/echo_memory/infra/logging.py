@@ -63,3 +63,28 @@ def log_write_episode(
             }
         },
     )
+
+
+def log_query_memory(
+    logger: logging.Logger,
+    group_id: str,
+    n_vector_candidates: int,
+    n_lexical_candidates: int,
+    n_results: int,
+    duration_ms: float,
+    error: str | None = None,
+) -> None:
+    """Counts and timing only, never the query text or fact content."""
+    logger.info(
+        "query_memory",
+        extra={
+            "fields": {
+                "group_id": group_id,
+                "n_vector_candidates": n_vector_candidates,
+                "n_lexical_candidates": n_lexical_candidates,
+                "n_results": n_results,
+                "duration_ms": round(duration_ms, 1),
+                "error": error,
+            }
+        },
+    )

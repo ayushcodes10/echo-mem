@@ -115,12 +115,16 @@ def _exact_match(conn, group_id: str, name: str) -> tuple[str, str] | None:
 
 
 def _fuzzy_candidates(conn, group_id: str, embedding: list[float], limit: int = 5) -> list[Candidate]:
+    # <#> (negative inner product), not <=> (cosine distance): embeddings are
+    # L2-normalized on write (LocalEmbedder), so for unit vectors
+    # embedding <#> query == -cosine_similarity, same ranking, cheaper (skips
+    # computing both norms). See MATHS.local.md §1.
     rows = conn.execute(
         """
-        SELECT ne.node_id::text, 1 - (ne.embedding <=> %s::vector) AS similarity
+        SELECT ne.node_id::text, -(ne.embedding <#> %s::vector) AS similarity
         FROM public.node_embedding ne
         WHERE ne.group_id = %s
-        ORDER BY ne.embedding <=> %s::vector
+        ORDER BY ne.embedding <#> %s::vector
         LIMIT %s
         """,
         (embedding, group_id, embedding, limit),

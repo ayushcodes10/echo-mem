@@ -679,8 +679,11 @@ start so v1b doesn't need a breaking API change).
   decayed sum, and "bounded retrieval" isn't bounded without recursive consolidation (§9,
   the design's stated novelty argument rests on this). Full review, with worked numeric
   examples for each: https://claude.ai/code/artifact/c262494d-e5d0-4a43-88bc-aef63df7868e
-- RRF fusion weights (pgvector vs. full-text-search, and later vs. PPR) need tuning
-  against real queries.
+- ~~RRF fusion weights~~, resolved for v1a (PR3): k=60, equal per-ranker weight, fixed
+  list depth of 50, and score floors (cosine similarity ≥ 0.15, `ts_rank` > 0). All still
+  placeholders pending real queries; `k` specifically is low-leverage and not worth
+  retuning first (see MATHS.local.md §3). v1b's third signal (PPR) still needs its own
+  weight/independence question resolved before it joins fusion (see above).
 - **`causal_hint` precision/recall threshold**, the eval set gives directional confidence
   only at 5-10 items; a real number is needed before the `contradicts`-surfacing feature
   (accepted in the CEO plan) is safe to enable, not just "check the eval set."
