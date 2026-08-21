@@ -600,12 +600,24 @@ write_episode(
   entity_resolutions?: [{mention: string, resolved_to: id | "new", rationale?: string}]
 ) -> {
   edges_created: [id],
-  ambiguous_entities: [{mention: string, candidates: [{node_id: id, name: string, similarity: float}]}]
+  ambiguous_entities: [{mention: string, candidates: [{node_id: id, name: string, similarity: float}]}],
+  onboarding_sample?: [{fact_id, fact, confidence, causal_hint, provenance}]
 } | {error: string}
 
-query_memory(scope: "solo" | "shared", query, top_k: int = 10, max 100) -> {facts: [{fact_id, fact, confidence, causal_hint, provenance}]} | {error: string}
+query_memory(scope: "solo" | "shared", query?, top_k: int = 10, max 100, digest: bool = false) -> {facts: [{fact_id, fact, confidence, causal_hint, provenance}]} | {error: string}
 get_audit_log(scope: "solo" | "shared", since?: ISO8601 timestamp) -> {entries: [audit_entry]} | {error: string}
 ```
+
+`digest` (added during PR-FF2, CEO plan scope item 2) skips ranking entirely and
+returns the group's most recently written active facts, newest first; `query` is
+ignored and may be omitted when `digest` is true. It's an opt-in "catch me up"
+convenience, never triggered automatically.
+
+`onboarding_sample` (added during PR-FF2, CEO plan scope item 6) appears on the
+response only for a group's 3rd `write_episode` call ever, populated with that
+group's own digest (same shape as a `query_memory` result's `facts`) so a first-time
+user sees concretely what got remembered, without a separate call. It's a one-time
+nudge, not a recurring field; every other call omits the key entirely.
 
 `fact_id` (added during PR-FF1, see PR Plan) is each fact's edge id, so `echo-memory why
 <fact_id>` can look up a specific fact's audit trail without ambiguous free-text

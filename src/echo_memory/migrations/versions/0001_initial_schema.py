@@ -32,6 +32,14 @@ Model choice is still a placeholder pending real quality tuning (see
 MATHS.local.md's open questions); changing it later is a migration like any
 other. Not yet released to any external adopter, so this constant was edited
 in place rather than layered with a follow-up migration.
+
+group_state (added for PR-FF2's onboarding nudge) is a genuinely new table,
+not "a counter column on the node/tenancy tracking table" as the CEO plan
+assumed: no such table exists in this schema, tenancy is just a group_id
+property scattered across nodes/edges, not a tracked row anywhere. A single
+group_id -> count table is the minimal thing that actually implements the
+feature; noted here since it's a deliberate deviation from the plan's literal
+wording, not an oversight.
 """
 
 from alembic import op
@@ -143,8 +151,16 @@ def upgrade() -> None:
         "USING hnsw (embedding vector_ip_ops)"
     )
 
+    op.execute("""
+        CREATE TABLE public.group_state (
+            group_id TEXT PRIMARY KEY,
+            write_episode_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+
 
 def downgrade() -> None:
+    op.execute("DROP TABLE IF EXISTS public.group_state")
     op.execute("DROP TABLE IF EXISTS public.node_embedding")
     op.execute("DROP TABLE IF EXISTS public.fact_embedding")
     op.execute("DROP TABLE IF EXISTS public.audit_entry")

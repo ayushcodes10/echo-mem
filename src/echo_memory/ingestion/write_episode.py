@@ -9,11 +9,18 @@ import uuid
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.logging import get_logger, log_write_episode
 from echo_memory.ingestion.resolution import resolve_entities
+from echo_memory.retrieval.query_memory import query_memory
 
 MAX_ENTITIES = 50
 MAX_FACTS = 200
 MAX_STRING_LEN = 4000
 VALID_CONFIDENCE = {"extracted", "inferred", "ambiguous"}
+
+# First-use onboarding nudge (CEO plan scope decision #6): after exactly
+# this many write_episode calls for a group_id, attach a live digest sample
+# to the response so a single-user v1a audience notices the digest feature
+# exists. Not "adoption risk mitigation" at this scale, just a nudge.
+ONBOARDING_NUDGE_AT_COUNT = 3
 
 _logger = get_logger("write_episode")
 
@@ -152,6 +159,20 @@ def _create_edge(
     return edge_id
 
 
+def _increment_write_episode_count(conn, group_id: str) -> int:
+    (count,) = conn.execute(
+        """
+        INSERT INTO public.group_state (group_id, write_episode_count)
+        VALUES (%s, 1)
+        ON CONFLICT (group_id) DO UPDATE
+            SET write_episode_count = group_state.write_episode_count + 1
+        RETURNING write_episode_count
+        """,
+        (group_id,),
+    ).fetchone()
+    return count
+
+
 def _write_audit_entry(conn, group_id: str, session_id: str, **fields) -> None:
     columns = ["group_id", "session_id"] + list(fields.keys())
     values = [group_id, session_id] + list(fields.values())
@@ -186,8 +207,11 @@ def write_episode(
     episode_id = str(uuid.uuid4())
     now = int(time.time())
     edges_created: list[str] = []
+    onboarding_sample: dict | None = None
 
     with conn.transaction():
+        call_count = _increment_write_episode_count(conn, group_id)
+
         outcome = resolve_entities(conn, group_id, entities, resolutions, embedder)
 
         entities_by_name = {e["name"]: e for e in entities}
@@ -253,11 +277,15 @@ def write_episode(
                     summary=f"created: {fact['fact']}",
                 )
 
+        if call_count == ONBOARDING_NUDGE_AT_COUNT:
+            digest_result = query_memory(conn, group_id, None, 5, embedder, digest=True)
+            onboarding_sample = digest_result.get("facts")
+
     log_write_episode(
         _logger, group_id, session_id, len(entities), len(facts),
         len(edges_created), len(outcome.ambiguous), (time.perf_counter() - start) * 1000,
     )
-    return {
+    result = {
         "edges_created": edges_created,
         "ambiguous_entities": [
             {
@@ -270,3 +298,6 @@ def write_episode(
             for a in outcome.ambiguous
         ],
     }
+    if onboarding_sample is not None:
+        result["onboarding_sample"] = onboarding_sample
+    return result
