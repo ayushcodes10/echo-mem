@@ -355,3 +355,38 @@ def test_validation_rejects_too_many_entities(migrated_db):
     result = write_episode(conn, "g1", "s1", entities, [], {}, embedder)
     assert "error" in result
     assert "too many entities" in result["error"]
+
+
+def test_low_scoring_true_duplicate_gets_surfaced_not_silently_missed(migrated_db):
+    """Regression test for a real measured gap: "AGE" vs "Apache AGE" score
+    0.497 with the real embedder, well below the threshold this started at
+    (0.75). See resolution.py's module docstring."""
+    conn = connect(migrated_db)
+    embedder = LocalEmbedder()
+
+    write_episode(conn, "g1", "s1", [{"name": "AGE", "type": "tool"}], [], {}, embedder)
+    result = write_episode(
+        conn, "g1", "s2", [{"name": "Apache AGE", "type": "tool"}], [], {}, embedder
+    )
+
+    assert len(result["ambiguous_entities"]) == 1
+    assert result["ambiguous_entities"][0]["mention"] == "Apache AGE"
+    assert result["ambiguous_entities"][0]["candidates"][0]["name"] == "AGE"
+
+
+def test_negation_pair_never_silently_merges_even_at_high_similarity(migrated_db):
+    """Regression test for a real measured risk: "t_valid" vs "t_invalid"
+    score 0.867 with the real embedder, inside what would otherwise be
+    silent-merge territory for a naive threshold. The deterministic guard
+    must force this to ambiguous regardless of the score."""
+    conn = connect(migrated_db)
+    embedder = LocalEmbedder()
+
+    write_episode(conn, "g1", "s1", [{"name": "t_valid", "type": "tool"}], [], {}, embedder)
+    result = write_episode(
+        conn, "g1", "s2", [{"name": "t_invalid", "type": "tool"}], [], {}, embedder
+    )
+
+    assert len(result["ambiguous_entities"]) == 1
+    (node_count,) = conn.execute("SELECT count(*) FROM public.node_embedding").fetchone()
+    assert node_count == 1, "t_invalid must not silently merge into t_valid"

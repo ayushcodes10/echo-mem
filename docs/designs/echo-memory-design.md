@@ -162,15 +162,33 @@ consolidated, and fetched.
 
 ### Storage substrate honesty (why Postgres+AGE, not a new DBMS)
 
-The graph lives in Apache AGE (index-free adjacency, O(1) pointer-chase per hop, not an
-indexed join) from v1a onward, per Premise 6, not plain relational tables with
-traversal bolted on later. AGE itself is gated behind its own maturity spike (PR0a)
-before v1a starts; if that spike fails, the named fallback is plain adjacency-list tables
-(`nodes`, `edges` with foreign keys), which stay fast for this system's actual access
-patterns (indexed 1-2 hop lookups, and bulk group-scoped scans: PPR pulls an entire
-subgraph in one query, builds the graph in application memory, and runs power iteration
-there; it never asks Postgres to traverse hop-by-hop in SQL) but are genuinely slower
-than AGE for deep, arbitrary multi-hop traversal with per-hop filtering. Either way,
+**Corrected after an external review** (see Foundational spike section for the full
+finding): an earlier draft justified pulling AGE forward from v1b into v1a as "index-free
+adjacency, O(1) pointer-chase per hop, not an indexed join." That's wrong. AGE stores
+graph elements as `agtype` (a JSONB-based type) in ordinary Postgres tables; Cypher
+traversals compile to joins over those tables, resolved through indexes, same relational
+storage model as everything else in Postgres. True index-free adjacency (Neo4j's model)
+is a different storage engine, not a query language on top of one. And the property
+wouldn't have mattered anyway: PPR pulls an entire subgraph in one bulk query, builds the
+graph in application memory (`networkx`), and runs power iteration there; it never asks
+Postgres to traverse hop-by-hop in SQL, so the operation the claimed property would have
+accelerated isn't one this system performs.
+
+**The real justification, and it doesn't require reversing PR0a's result:** Cypher is
+genuinely more expressive than recursive CTEs for the ad-hoc, arbitrary-depth traversal
+queries this system writes outside the PPR path (entity resolution's alias lookups,
+`echo-memory why`'s audit trail, future multi-hop query features), and pattern matching
+reads far better than the equivalent SQL. Weighed against real costs: AGE is a young
+extension, `agtype` doesn't compose cleanly with plain btree/GIN indexes (worked around in
+PR1's schema via `properties ->> '"key"'::agtype` expression indexes), and it complicates
+`group_id` partitioning (open question below). **PR0a's actual measured result stands
+independent of this correction**: real Cypher traversal latency (8-13ms for a 10K-edge
+graph, see Foundational spike) was measured directly, not inferred from the
+index-free-adjacency claim, so the empirical go/no-go is unaffected. What changes is only
+the *reason* AGE was worth spiking before v1a rather than after; if that reason (Cypher
+expressiveness for the non-PPR traversal queries) doesn't hold up under scrutiny either,
+the plain-table fallback serves the two named access patterns (indexed 1-2 hop lookups,
+bulk group-scoped scans) at full speed and this reverts to a v1b question. Either way,
 building an entirely new database engine (transactions, durability, crash recovery,
 concurrency control) to avoid this tradeoff would cost 6-12+ months before any of it is
 trustworthy enough to store real data on. That's the same trap already avoided once this
@@ -307,6 +325,15 @@ deployment targets (Linux amd64 cloud VMs) won't hit this emulation tax at all; 
 purely a local-dev-on-Apple-Silicon artifact, worth flagging for `docs/DEVELOPMENT.md`
 once PR1 lands so nobody re-triggers the same false signal.
 
+**Correction after an external review (2026-08-21): the *reason* given for spiking AGE
+before v1a was wrong; the *result* above wasn't.** "Index-free adjacency" doesn't apply
+to AGE (it's `agtype` in ordinary Postgres tables, joins resolved through indexes, not a
+different storage engine), and the property wouldn't have mattered anyway since PPR
+bulk-scans into `networkx` rather than traversing hop-by-hop in SQL. That reasoning error
+doesn't undo the measurement above, which was empirical (real latency numbers, not
+inferred from the claim). See "Storage substrate honesty" for the corrected rationale and
+what would actually justify keeping AGE.
+
 ### v1a, prove the core recall loop (AGE-native storage; no causal_hint, no PPR yet)
 
 **Storage:** PostgreSQL (PostgreSQL License) with **Apache AGE** (Apache-2.0, Apache
@@ -433,9 +460,14 @@ and does **not** call an LLM itself; it returns the mention plus candidate(s) in
 `write_episode`'s response as `ambiguous_entities` and defers those specific facts. The
 calling agent (which can reason about this immediately, in the same turn) resolves them
 by calling `write_episode` again with `entity_resolutions`, per the MCP tool contract.
-**Both threshold values are placeholders pending real usage data** (see MATHS.local.md
-§5 and Open Questions): start at low=0.75, high=0.92, revisit once the v1a trial has
-real ambiguous-match examples to tune against.
+**Both threshold values are placeholders, now grounded in real measurements rather than
+a guess** (see MATHS.local.md §5 and Open Questions): low=0.45, high=0.92, revised after
+an external review measured real cosine similarities against the actual embedder and
+found the original low=0.75 would have silently missed a true duplicate (`AGE` vs
+`Apache AGE`, 0.497). A deterministic guard (never silently auto-merge names differing
+only by a negation affix or version token) was added alongside the thresholds, since
+short technical identifiers don't separate cleanly on similarity alone. Still revisit
+once the v1a trial has real ambiguous-match examples to tune against.
 
 **Edge (AGE edge, or table row):**
 ```
@@ -625,15 +657,28 @@ start so v1b doesn't need a breaking API change).
   MCP tool contract's architecture pivot). A placeholder default picked during PR2, not
   a considered final choice; swappable to a hosted provider later if local quality
   proves insufficient.
-- **Entity-resolution similarity thresholds** (low=0.75, high=0.92, see Concrete Schema)
-  are placeholders with no real usage data behind them yet; revisit once the v1a trial
-  produces real ambiguous-match examples.
+- ~~Entity-resolution similarity thresholds~~, revised: **low=0.45, high=0.92** (see
+  Concrete Schema), grounded in real measurements against the actual embedder after an
+  external review caught the original low=0.75 silently missing a true duplicate. Still
+  placeholders pending real v1a-trial calibration.
 - **PR2 known limitation:** entity resolution only checks each entity against nodes
   already stored, not against other entities in the same `write_episode` call. Two new,
   near-duplicate names mentioned in one call (confirmed with a real test: "Postgres" +
   "PostgreSQL" together) both resolve as new and create two nodes, since neither has an
   embedding in the database yet to compare against. Revisit if this shows up as a real
   duplicate-node pattern during the v1a trial; see MATHS.local.md §5.
+- **External review of MATHS.local.md (2026-08-21), v1b/v1c findings not yet acted on.**
+  §5 (entity resolution) and §8 (AGE rationale) are corrected above; the rest is v1b/v1c
+  scoped and deferred to when those PRs start, not lost: `ts_rank` has no IDF unlike BM25
+  (§2, fixable via `setweight` A/B/D tagging); RRF's PPR seed isn't independent of the
+  vector ranker unless seeded from entity links, not vector top-K (§3/§4); PPR's actual
+  API is `nx.pagerank(G, alpha=.85, personalization=v)`, and it raises
+  `PowerIterationFailedConvergence` uncaught (§4); hub nodes dominate every PPR result
+  regardless of seed unless ranked by lift over plain PageRank (§4); the temperature
+  formula multiplies an undecayed counter by single-timestamp decay instead of a proper
+  decayed sum, and "bounded retrieval" isn't bounded without recursive consolidation (§9,
+  the design's stated novelty argument rests on this). Full review, with worked numeric
+  examples for each: https://claude.ai/code/artifact/c262494d-e5d0-4a43-88bc-aef63df7868e
 - RRF fusion weights (pgvector vs. full-text-search, and later vs. PPR) need tuning
   against real queries.
 - **`causal_hint` precision/recall threshold**, the eval set gives directional confidence
