@@ -89,11 +89,18 @@ of this command with a distinct `ECHO_MEMORY_AGENT_ID`, sharing the same
 ```bash
 echo-memory --scope solo why <fact_id>          # plain-language audit trail for one fact
 echo-memory --scope solo export --out ./export  # markdown dump of a scope's memory
+echo-memory --scope solo graph                  # terminal view of a scope's memory graph
+echo-memory --scope solo graph --watch          # same, live-refreshing every 2s (--interval to change)
 ```
 
 `--scope` defaults to `solo`. `fact_id` is whatever `query_memory` returned for that fact
 (see the MCP tool contract); there's no raw `group_id` argument, `--scope` resolves it the
 same way the server does.
+
+`graph` is a read-only observability aid, not a CEO-plan scope item: it prints each active
+fact as `source --[relation]--> target` plus any nodes with no active facts, so you can see
+what an agent has actually written without a separate `query_memory` call. `--watch` polls
+the database on an interval and clears/reprints, so it reflects new writes as they land.
 
 ## Running tests
 
