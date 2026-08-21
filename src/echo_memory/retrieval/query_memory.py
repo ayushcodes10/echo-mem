@@ -98,6 +98,7 @@ def _fetch_facts(conn, edge_ids: list[str]) -> dict[str, dict]:
     ).fetchall()
     return {
         str(edge_id): {
+            "fact_id": str(edge_id),
             "fact": _agtype_str(fact),
             "confidence": _agtype_str(confidence),
             "causal_hint": _agtype_str(causal_hint),

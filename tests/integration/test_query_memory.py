@@ -132,6 +132,20 @@ def test_provenance_included_in_results(migrated_db):
     assert result["facts"][0]["provenance"]["session_id"] == "sess-abc"
 
 
+def test_fact_id_matches_the_edge_write_episode_created(migrated_db):
+    """fact_id lets echo-memory why <fact_id> look up a specific fact without
+    ambiguous free-text matching (CEO plan item 3)."""
+    conn = connect(migrated_db)
+    embedder = LocalEmbedder()
+    write_result = _write(
+        conn, embedder, "g1", "sess-1", "Decision", "Postgres", "uses", "uses Postgres"
+    )
+
+    result = query_memory(conn, "g1", "Postgres", 10, embedder)
+
+    assert result["facts"][0]["fact_id"] == write_result["edges_created"][0]
+
+
 def test_validation_rejects_empty_query(migrated_db):
     conn = connect(migrated_db)
     embedder = LocalEmbedder()

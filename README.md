@@ -57,9 +57,12 @@ before v1.1 adds the org-wide tenancy the broader vision depends on.
 
 ## Getting started
 
-Not yet ready for use; see [`docs/designs/echo-memory-design.md`](docs/designs/echo-memory-design.md)
-for the current build plan and progress, and [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
-for the local setup once code exists.
+The core recall loop is built and running: `write_episode`, `query_memory`,
+`get_audit_log`, an MCP server wiring them together, and an `echo-memory` CLI (`why`,
+`export`). Still pre-trial (see Status above); see
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for local setup and
+[`docs/designs/echo-memory-design.md`](docs/designs/echo-memory-design.md) for the
+current build plan and progress.
 
 ## Architecture
 

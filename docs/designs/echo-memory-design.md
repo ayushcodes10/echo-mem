@@ -603,9 +603,14 @@ write_episode(
   ambiguous_entities: [{mention: string, candidates: [{node_id: id, name: string, similarity: float}]}]
 } | {error: string}
 
-query_memory(scope: "solo" | "shared", query, top_k: int = 10, max 100) -> {facts: [{fact, confidence, causal_hint, provenance}]} | {error: string}
+query_memory(scope: "solo" | "shared", query, top_k: int = 10, max 100) -> {facts: [{fact_id, fact, confidence, causal_hint, provenance}]} | {error: string}
 get_audit_log(scope: "solo" | "shared", since?: ISO8601 timestamp) -> {entries: [audit_entry]} | {error: string}
 ```
+
+`fact_id` (added during PR-FF1, see PR Plan) is each fact's edge id, so `echo-memory why
+<fact_id>` can look up a specific fact's audit trail without ambiguous free-text
+matching; the CEO plan called for this from the start, the original contract just never
+carried it through.
 
 `entities`/`facts` reference each other by `name`, not node id: node ids don't exist yet
 for genuinely new entities at call time, and the server resolves `source`/`target` names
