@@ -15,12 +15,48 @@ correctly against whichever node was created first. Documented, not silently
 dropped; see MATHS.local.md's open questions."""
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 
-LOW_THRESHOLD = 0.75
+# Measured against the real embedder (all-MiniLM-L6-v2), not guessed: a true
+# duplicate ("AGE" vs "Apache AGE") scored 0.497, well below the 0.75 this
+# started at, and several true non-duplicates ("PR-B3"/"PR-B2" 0.875,
+# "t_valid"/"t_invalid" 0.867) scored well above it. Short technical
+# identifiers don't separate cleanly on cosine similarity alone; see
+# MATHS.local.md §5. LOW_THRESHOLD lowered so real near-misses like the AGE
+# case get surfaced as ambiguous instead of silently missed; HIGH_THRESHOLD
+# left as-is since no measured true-duplicate reached it, so it already
+# behaves conservatively for this kind of short-identifier text. Still
+# placeholders pending real calibration against the v1a trial's data.
+LOW_THRESHOLD = 0.45
 HIGH_THRESHOLD = 0.92
+
+_NEGATION_TOKENS = ("in", "un", "non", "not")
+_TRAILING_VERSION = re.compile(r"\d+[a-z]?$")
+
+
+def _blocked_from_silent_merge(name_a: str, name_b: str) -> bool:
+    """Never silently auto-merge two names that differ only by a negation
+    affix or a trailing version/numeric token: these reliably score high on
+    cosine similarity despite being different entities (t_valid/t_invalid,
+    PR-B3/PR-B2, v1a/v1b, all measured above). A blocked pair still gets
+    surfaced as ambiguous for the calling agent to judge; it just can't
+    resolve silently. Deliberately narrow (negation + version only), not a
+    general antonym detector."""
+    a = re.sub(r"[\s_-]+", "", name_a.lower())
+    b = re.sub(r"[\s_-]+", "", name_b.lower())
+    if a == b:
+        return False
+
+    for neg in _NEGATION_TOKENS:
+        if a == b.replace(neg, "", 1) or b == a.replace(neg, "", 1):
+            return True
+
+    a_stripped = _TRAILING_VERSION.sub("", a)
+    b_stripped = _TRAILING_VERSION.sub("", b)
+    return bool(a_stripped and a_stripped == b_stripped)
 
 
 @dataclass
@@ -152,8 +188,9 @@ def resolve_entities(
         embedding = embedder.embed(name)
         candidates = _fuzzy_candidates(conn, group_id, embedding)
         best = candidates[0] if candidates else None
+        blocked = best is not None and _blocked_from_silent_merge(name, best.name)
 
-        if best is not None and best.similarity >= high_threshold:
+        if best is not None and best.similarity >= high_threshold and not blocked:
             outcome.resolved[name] = best.node_id
             outcome.audit_events.append(
                 {
@@ -162,7 +199,7 @@ def resolve_entities(
                     "append_alias": name,
                 }
             )
-        elif best is not None and best.similarity >= low_threshold:
+        elif best is not None and (best.similarity >= low_threshold or blocked):
             outcome.ambiguous.append(Ambiguous(mention=name, candidates=candidates))
         else:
             outcome.new_entities.add(name)
