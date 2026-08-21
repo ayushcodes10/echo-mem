@@ -16,7 +16,7 @@ git clone git@github.com:ayushcodes10/echo-mem.git
 cd echo-mem
 
 # Start Postgres with pgvector + Apache AGE (built from source on top of
-# pgvector/pgvector:pg16, not the apache/age image — see docker/postgres.Dockerfile
+# pgvector/pgvector:pg16, not the apache/age image; see docker/postgres.Dockerfile
 # and the design doc's Foundational spike section for why)
 docker compose up -d
 
@@ -40,12 +40,30 @@ python -m echo_memory.server
 ```
 
 Runs over stdio (the `mcp` SDK's default transport), not a network listener, so there's
-nothing to bind or expose beyond the local process. Point your MCP client (Claude Code's
-`.mcp.json`, Cursor's MCP config, etc.) at this process. Each client should run its own
+nothing to bind or expose beyond the local process. Each client should run its own
 instance with a distinct `ECHO_MEMORY_AGENT_ID`; see the design doc's "Configuration"
 section for how `scope: "solo" | "shared"` resolves per agent.
 
-Example `.mcp.json` entry:
+### Registering with Claude Code
+
+Recommended: **user scope**, so the server is available across every project you work
+in, not just this repo. The actual wedge use case (cross-tool memory) only shows up
+under real, ambient usage, not usage confined to working on Echo Memory itself.
+
+```bash
+claude mcp add --scope user echo-memory \
+  -e ECHO_MEMORY_USER_ID=your-user-id \
+  -e ECHO_MEMORY_AGENT_ID=claude-code \
+  -e ECHO_MEMORY_DATABASE_URL="postgresql://postgres:postgres@localhost:5433/echo_memory" \
+  -- /path/to/echo-mem/.venv/bin/python -m echo_memory.server
+```
+
+Check it connected: `claude mcp list` (look for `echo-memory ... Connected`). Start a
+*new* Claude Code session afterward; sessions already running when you register won't
+pick it up. Undo with `claude mcp remove echo-memory --scope user`.
+
+For per-repo registration instead (a distinct memory scope for one project, or testing
+without touching your global config), use a project-local `.mcp.json`:
 ```json
 {
   "mcpServers": {
@@ -61,6 +79,10 @@ Example `.mcp.json` entry:
   }
 }
 ```
+
+Either way: each MCP client (Claude Code, Cursor, etc.) should point at its own instance
+of this command with a distinct `ECHO_MEMORY_AGENT_ID`, sharing the same
+`ECHO_MEMORY_DATABASE_URL` so `scope: "shared"` actually pools across them.
 
 ## CLI
 
