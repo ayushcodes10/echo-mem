@@ -5,11 +5,14 @@ design doc's Configuration section for why group_id is never typed or
 constructed directly."""
 
 import argparse
+import os
 import sys
+import time
 from pathlib import Path
 
 from echo_memory.audit.get_audit_log import get_fact_history
 from echo_memory.cli.export import export_group
+from echo_memory.cli.graph import fetch_graph, render_graph
 from echo_memory.cli.why import render_history
 from echo_memory.infra.config import ConfigError, load_config
 from echo_memory.infra.db import connect
@@ -29,6 +32,14 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser = sub.add_parser("export", help="markdown export of a scope's memory")
     export_parser.add_argument("--out", required=True, type=Path, help="output directory")
 
+    graph_parser = sub.add_parser("graph", help="terminal view of a scope's memory graph")
+    graph_parser.add_argument(
+        "--watch", action="store_true", help="refresh live instead of printing once"
+    )
+    graph_parser.add_argument(
+        "--interval", type=float, default=2.0, help="refresh interval in seconds (with --watch)"
+    )
+
     return parser
 
 
@@ -41,8 +52,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    conn = connect(config.database_url)
     group_id = config.group_id(args.scope)
+
+    if args.command == "graph":
+        if args.watch:
+            try:
+                while True:
+                    graph = fetch_graph(connect(config.database_url), group_id)
+                    os.system("clear")
+                    print(render_graph(args.scope, group_id, graph))
+                    print(f"(refreshing every {args.interval}s, ctrl-C to stop)")
+                    time.sleep(args.interval)
+            except KeyboardInterrupt:
+                return 0
+        graph = fetch_graph(connect(config.database_url), group_id)
+        print(render_graph(args.scope, group_id, graph))
+        return 0
+
+    conn = connect(config.database_url)
 
     if args.command == "why":
         result = get_fact_history(conn, group_id, args.fact_id)

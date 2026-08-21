@@ -7,6 +7,7 @@ from fake_embedder import REFERENCE, VectorEmbedder
 from echo_memory import server
 from echo_memory.audit.get_audit_log import get_fact_history
 from echo_memory.cli.export import export_group
+from echo_memory.cli.graph import fetch_graph
 from echo_memory.cli.main import main
 from echo_memory.infra.config import Config
 from echo_memory.infra.db import connect
@@ -95,6 +96,31 @@ def test_main_export_command(migrated_db, tmp_path, capsys, monkeypatch):
     assert exit_code == 0
     assert "Exported 2 nodes, 1 facts" in capsys.readouterr().out
     assert (out_dir / "index.md").exists()
+
+
+def test_fetch_graph_excludes_superseded_facts(migrated_db):
+    config, _ = _seed(migrated_db)
+    conn = connect(migrated_db)
+
+    graph = fetch_graph(conn, config.group_id("shared"))
+
+    assert len(graph["nodes"]) == 2
+    facts = [f["fact"] for f in graph["facts"]]
+    assert facts == ["switched to Postgres for durability"]
+
+
+def test_main_graph_command(migrated_db, capsys, monkeypatch):
+    config, _ = _seed(migrated_db)
+    monkeypatch.setenv("ECHO_MEMORY_USER_ID", config.user_id)
+    monkeypatch.setenv("ECHO_MEMORY_AGENT_ID", config.agent_id)
+    monkeypatch.setenv("ECHO_MEMORY_DATABASE_URL", config.database_url)
+
+    exit_code = main(["--scope", "shared", "graph"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "2 nodes, 1 active facts" in out
+    assert "Decision --[uses]--> Postgres" in out
 
 
 def test_main_missing_env_returns_error_not_exception(monkeypatch, capsys):
