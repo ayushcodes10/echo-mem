@@ -9,6 +9,10 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    env:
+      ECHO_MEMORY_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/echo_memory
+      ECHO_MEMORY_USER_ID: ci
+      ECHO_MEMORY_AGENT_ID: ci
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +27,32 @@ jobs:
 
       - name: Lint (ruff)
         run: ruff check .
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Built from source, not the apache/age image: see docker/postgres.Dockerfile
+      # and the design doc's Foundational spike section for why. Cached across runs
+      # so only the first build after a Dockerfile change pays the compile cost.
+      - name: Build Postgres + pgvector + Apache AGE image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/postgres.Dockerfile
+          tags: echo-mem-db:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start database
+        run: |
+          docker run -d --name echo-mem-db \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=echo_memory \
+            -p 5433:5432 echo-mem-db:ci
+          for i in $(seq 1 30); do
+            docker exec echo-mem-db pg_isready -U postgres && break
+            sleep 2
+          done
 
       - name: Test (pytest, excluding LLM-quality evals)
         run: pytest -m "not eval"

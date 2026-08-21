@@ -1,7 +1,8 @@
 """Shared fixtures for tests that need a real Postgres+AGE+pgvector database.
-Skips automatically if ECHO_MEMORY_DATABASE_URL isn't set or unreachable, so
-CI (which doesn't yet run a Postgres+AGE service, see TODOS.md) stays green;
-run locally with `docker compose up -d` first."""
+Skips automatically if ECHO_MEMORY_DATABASE_URL isn't set or unreachable
+(e.g. a fresh clone before docker compose up); CI builds and starts the
+database itself, see .github/workflows/ci.yml. Run locally with
+`docker compose up -d` first."""
 
 import os
 import subprocess
