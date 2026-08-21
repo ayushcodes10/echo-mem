@@ -68,17 +68,21 @@ def write_episode(
 
 
 @server.tool()
-def query_memory(scope: str, query: str, top_k: int = 10) -> dict:
+def query_memory(scope: str, query: str | None = None, top_k: int = 10, digest: bool = False) -> dict:
     """Recall prior facts relevant to query, from this agent's own memory
     (scope="solo") or the pool shared across this user's agents
     (scope="shared"). Call this at session start or whenever recalling
-    prior context would save the user from re-explaining something."""
+    prior context would save the user from re-explaining something.
+
+    digest=True ignores query and returns the most recently written active
+    facts instead, as an opt-in "catch me up" convenience; call it
+    explicitly at session start if you want one, it's never automatic."""
     try:
         group_id = _state.config.group_id(scope)
     except ConfigError as e:
         return {"error": str(e)}
     with _state.pool.connection() as conn:
-        return _query_memory(conn, group_id, query, top_k, _state.embedder)
+        return _query_memory(conn, group_id, query, top_k, _state.embedder, digest=digest)
 
 
 @server.tool()

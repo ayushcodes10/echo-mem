@@ -34,8 +34,8 @@ class ValidationError(Exception):
     pass
 
 
-def _validate(query: str, top_k: int) -> None:
-    if not query or not query.strip():
+def _validate(query: str | None, top_k: int, digest: bool) -> None:
+    if not digest and (not query or not query.strip()):
         raise ValidationError("query must not be empty")
     if not isinstance(top_k, int) or top_k < 1:
         raise ValidationError(f"top_k must be a positive integer, got {top_k!r}")
@@ -78,6 +78,24 @@ def _lexical_candidates(conn, group_id: str, query: str, limit: int) -> list[str
     return [edge_id for edge_id, score in rows if score > TS_RANK_FLOOR]
 
 
+def _digest_candidates(conn, group_id: str, limit: int) -> list[str]:
+    """No query text to rank against: a digest is "catch me up," not "answer
+    this," so it's the most recently valid active facts, chronological, not
+    relevance-ranked. See the CEO plan's scope decision #2 (session-start
+    context digest, opt-in, no auto-injection)."""
+    rows = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH ()-[e:FACT {{group_id: $gid}}]->()
+            WHERE e.t_invalid IS NULL
+            RETURN id(e)
+            ORDER BY e.t_valid DESC
+            LIMIT $limit
+        $$, %s) AS (edge_id agtype)""",
+        (json.dumps({"gid": group_id, "limit": limit}),),
+    ).fetchall()
+    return [str(edge_id) for (edge_id,) in rows]
+
+
 def _agtype_str(v):
     return str(v).strip('"') if v is not None else None
 
@@ -108,25 +126,35 @@ def _fetch_facts(conn, edge_ids: list[str]) -> dict[str, dict]:
     }
 
 
-def query_memory(conn, group_id: str, query: str, top_k: int, embedder) -> dict:
+def query_memory(
+    conn, group_id: str, query: str | None, top_k: int, embedder, digest: bool = False
+) -> dict:
     """top_k has no default here: DEFAULT_TOP_K=10 is applied at the MCP tool
     schema layer (PR5), which is the natural place to declare it, rather
-    than baking a default into every internal caller of this function."""
+    than baking a default into every internal caller of this function.
+
+    digest=True ignores query (may be None) and returns the most recently
+    valid active facts instead of ranking against a query string: an opt-in
+    "catch me up" convenience for session start, explicitly invoked, never
+    auto-triggered (see the CEO plan's scope decision #2)."""
     start = time.perf_counter()
     try:
-        _validate(query, top_k)
+        _validate(query, top_k, digest)
     except ValidationError as e:
         log_query_memory(
             _logger, group_id, 0, 0, 0, (time.perf_counter() - start) * 1000, error=str(e)
         )
         return {"error": str(e)}
 
-    embedding = embedder.embed(query)
-    vector_ids = _vector_candidates(conn, group_id, embedding, LIST_DEPTH)
-    lexical_ids = _lexical_candidates(conn, group_id, query, LIST_DEPTH)
-
-    fused = reciprocal_rank_fusion([vector_ids, lexical_ids])
-    ranked_ids = sorted(fused, key=fused.get, reverse=True)[:top_k]
+    if digest:
+        ranked_ids = _digest_candidates(conn, group_id, top_k)
+        vector_ids, lexical_ids = [], []
+    else:
+        embedding = embedder.embed(query)
+        vector_ids = _vector_candidates(conn, group_id, embedding, LIST_DEPTH)
+        lexical_ids = _lexical_candidates(conn, group_id, query, LIST_DEPTH)
+        fused = reciprocal_rank_fusion([vector_ids, lexical_ids])
+        ranked_ids = sorted(fused, key=fused.get, reverse=True)[:top_k]
 
     facts_by_id = _fetch_facts(conn, ranked_ids)
     facts = [facts_by_id[edge_id] for edge_id in ranked_ids if edge_id in facts_by_id]

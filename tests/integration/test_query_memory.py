@@ -184,3 +184,49 @@ def test_top_k_caps_result_count(migrated_db):
     result = query_memory(conn, "g1", "Postgres", 2, embedder)
 
     assert len(result["facts"]) == 2
+
+
+def test_digest_returns_most_recent_active_facts_no_query_needed(migrated_db):
+    conn = connect(migrated_db)
+    embedder = LocalEmbedder()
+    _write(conn, embedder, "g1", "s1", "A", "B", "rel1", "first fact")
+    _write(conn, embedder, "g1", "s2", "A", "B", "rel2", "second fact")
+
+    result = query_memory(conn, "g1", None, 10, embedder, digest=True)
+
+    facts = [f["fact"] for f in result["facts"]]
+    assert facts == ["second fact", "first fact"]
+
+
+def test_digest_excludes_superseded_facts(migrated_db):
+    conn = connect(migrated_db)
+    embedder = LocalEmbedder()
+    _write(conn, embedder, "g1", "s1", "A", "B", "uses", "using SQLite")
+    _write(conn, embedder, "g1", "s2", "A", "B", "uses", "switched to Postgres")
+
+    result = query_memory(conn, "g1", None, 10, embedder, digest=True)
+
+    facts = [f["fact"] for f in result["facts"]]
+    assert facts == ["switched to Postgres"]
+
+
+def test_digest_respects_top_k(migrated_db):
+    conn = connect(migrated_db)
+    embedder = LocalEmbedder()
+    for i, rel in enumerate(["r1", "r2", "r3"]):
+        _write(conn, embedder, "g1", "s1", "A", "B", rel, f"fact {i}")
+
+    result = query_memory(conn, "g1", None, 2, embedder, digest=True)
+
+    assert len(result["facts"]) == 2
+
+
+def test_digest_validates_top_k_but_not_query(migrated_db):
+    conn = connect(migrated_db)
+    embedder = LocalEmbedder()
+
+    ok = query_memory(conn, "g1", None, 10, embedder, digest=True)
+    assert "error" not in ok
+
+    bad = query_memory(conn, "g1", None, 0, embedder, digest=True)
+    assert "error" in bad
