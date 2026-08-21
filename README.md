@@ -77,7 +77,10 @@ claude mcp add --scope user echo-memory \
 Start a new Claude Code session and `write_episode`/`query_memory`/`get_audit_log` are
 available across every project, not just this repo. See
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for Cursor/per-repo setup, the
-`echo-memory` CLI, and running tests, and
+`echo-memory` CLI, and running tests; see
+[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for using Echo Memory from an agent
+that doesn't speak MCP (a chatbot, a DevOps agent, a booking agent, or any custom
+tool-calling loop); and see
 [`docs/designs/echo-memory-design.md`](docs/designs/echo-memory-design.md) for the
 current build plan and progress.
 
