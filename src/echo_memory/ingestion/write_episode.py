@@ -73,21 +73,27 @@ def _append_alias(conn, node_id: str, alias: str) -> None:
     )
 
 
-def _find_active_edge(conn, group_id: str, source_id: str, target_id: str, relation_type: str) -> str | None:
+def _find_active_edge(
+    conn, group_id: str, source_id: str, target_id: str, relation_type: str
+) -> tuple[str, str] | None:
+    """Returns (edge_id, fact_text) so a supersession's audit entry can
+    record before_fact, not just its id."""
     row = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             MATCH (a)-[e:FACT {{relation_type: $rel, group_id: $gid}}]->(b)
             WHERE id(a) = $sid AND id(b) = $tid AND e.t_invalid IS NULL
-            RETURN id(e)
+            RETURN id(e), e.fact
             LIMIT 1
-        $$, %s) AS (edge_id agtype)""",
+        $$, %s) AS (edge_id agtype, fact agtype)""",
         (
             json.dumps(
                 {"rel": relation_type, "gid": group_id, "sid": int(source_id), "tid": int(target_id)}
             ),
         ),
     ).fetchone()
-    return str(row[0]) if row else None
+    if row is None:
+        return None
+    return str(row[0]), str(row[1]).strip('"')
 
 
 def _invalidate_edge(conn, edge_id: str, t_invalid: int) -> None:
@@ -215,7 +221,7 @@ def write_episode(
         for fact in ready_facts:
             source_id = name_to_node_id[fact["source"]]
             target_id = name_to_node_id[fact["target"]]
-            existing_edge_id = _find_active_edge(
+            existing_edge = _find_active_edge(
                 conn, group_id, source_id, target_id, fact["relation_type"]
             )
 
@@ -224,15 +230,18 @@ def write_episode(
             )
             edges_created.append(new_edge_id)
 
-            if existing_edge_id is not None:
-                _invalidate_edge(conn, existing_edge_id, now)
+            if existing_edge is not None:
+                old_edge_id, old_fact_text = existing_edge
+                _invalidate_edge(conn, old_edge_id, now)
                 _write_audit_entry(
                     conn,
                     group_id,
                     session_id,
                     mutation_type="fact_superseded",
-                    affected_edge_ids=[existing_edge_id, new_edge_id],
-                    summary=f"superseded by: {fact['fact']}",
+                    affected_edge_ids=[old_edge_id, new_edge_id],
+                    before_fact=old_fact_text,
+                    after_fact=fact["fact"],
+                    summary=f"invalidated {old_fact_text!r}, superseded by {fact['fact']!r}",
                 )
             else:
                 _write_audit_entry(
