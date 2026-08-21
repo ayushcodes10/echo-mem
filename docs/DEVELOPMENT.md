@@ -62,6 +62,17 @@ Example `.mcp.json` entry:
 }
 ```
 
+## CLI
+
+```bash
+echo-memory --scope solo why <fact_id>          # plain-language audit trail for one fact
+echo-memory --scope solo export --out ./export  # markdown dump of a scope's memory
+```
+
+`--scope` defaults to `solo`. `fact_id` is whatever `query_memory` returned for that fact
+(see the MCP tool contract); there's no raw `group_id` argument, `--scope` resolves it the
+same way the server does.
+
 ## Running tests
 
 ```bash

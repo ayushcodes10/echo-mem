@@ -30,6 +30,38 @@ def _parse_since(since: str | None) -> datetime | None:
     return dt
 
 
+_AUDIT_COLUMNS = """
+    "timestamp", mutation_type, affected_edge_ids::text[],
+    affected_node_id::text, before_fact, after_fact, session_id,
+    summary, resolution_detail
+"""
+
+
+def _row_to_entry(row) -> dict:
+    (
+        ts,
+        mutation_type,
+        affected_edge_ids,
+        affected_node_id,
+        before_fact,
+        after_fact,
+        session_id,
+        summary,
+        resolution_detail,
+    ) = row
+    return {
+        "timestamp": ts.isoformat(),
+        "mutation_type": mutation_type,
+        "affected_edge_ids": affected_edge_ids or [],
+        "affected_node_id": affected_node_id,
+        "before_fact": before_fact,
+        "after_fact": after_fact,
+        "session_id": session_id,
+        "summary": summary,
+        "resolution_detail": resolution_detail,
+    }
+
+
 def get_audit_log(conn, group_id: str, since: str | None = None) -> dict:
     start = time.perf_counter()
     try:
@@ -42,10 +74,8 @@ def get_audit_log(conn, group_id: str, since: str | None = None) -> dict:
         return {"error": str(e)}
 
     rows = conn.execute(
-        """
-        SELECT "timestamp", mutation_type, affected_edge_ids::text[],
-               affected_node_id::text, before_fact, after_fact, session_id,
-               summary, resolution_detail
+        f"""
+        SELECT {_AUDIT_COLUMNS}
         FROM public.audit_entry
         WHERE group_id = %s
           AND (%s::timestamptz IS NULL OR "timestamp" >= %s::timestamptz)
@@ -55,30 +85,7 @@ def get_audit_log(conn, group_id: str, since: str | None = None) -> dict:
         (group_id, since_dt, since_dt, MAX_ENTRIES),
     ).fetchall()
 
-    entries = [
-        {
-            "timestamp": ts.isoformat(),
-            "mutation_type": mutation_type,
-            "affected_edge_ids": affected_edge_ids or [],
-            "affected_node_id": affected_node_id,
-            "before_fact": before_fact,
-            "after_fact": after_fact,
-            "session_id": session_id,
-            "summary": summary,
-            "resolution_detail": resolution_detail,
-        }
-        for (
-            ts,
-            mutation_type,
-            affected_edge_ids,
-            affected_node_id,
-            before_fact,
-            after_fact,
-            session_id,
-            summary,
-            resolution_detail,
-        ) in rows
-    ]
+    entries = [_row_to_entry(row) for row in rows]
 
     _logger.info(
         "get_audit_log",
@@ -91,3 +98,21 @@ def get_audit_log(conn, group_id: str, since: str | None = None) -> dict:
         },
     )
     return {"entries": entries}
+
+
+def get_fact_history(conn, group_id: str, fact_id: str) -> dict:
+    """Every audit entry that mentions this fact_id, whether as the subject
+    of a `created`/`entity_resolved` entry or as either side of a
+    `fact_superseded` pair (see the CEO plan's `echo-memory why` spec: reads
+    audit_entry rows for that fact's edge, not a full multi-hop supersession
+    chain across every fact this one ever descended from or led to)."""
+    rows = conn.execute(
+        f"""
+        SELECT {_AUDIT_COLUMNS}
+        FROM public.audit_entry
+        WHERE group_id = %s AND %s = ANY(affected_edge_ids)
+        ORDER BY "timestamp" ASC
+        """,
+        (group_id, fact_id),
+    ).fetchall()
+    return {"entries": [_row_to_entry(row) for row in rows]}
