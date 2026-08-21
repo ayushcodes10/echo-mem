@@ -59,8 +59,25 @@ before v1.1 adds the org-wide tenancy the broader vision depends on.
 
 The core recall loop is built and running: `write_episode`, `query_memory`,
 `get_audit_log`, an MCP server wiring them together, and an `echo-memory` CLI (`why`,
-`export`). Still pre-trial (see Status above); see
-[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for local setup and
+`export`). Full setup is in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md); short version:
+
+```bash
+git clone git@github.com:ayushcodes10/echo-mem.git && cd echo-mem
+docker compose up -d                       # Postgres + pgvector + Apache AGE
+python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
+alembic upgrade head
+
+claude mcp add --scope user echo-memory \
+  -e ECHO_MEMORY_USER_ID=your-user-id \
+  -e ECHO_MEMORY_AGENT_ID=claude-code \
+  -e ECHO_MEMORY_DATABASE_URL="postgresql://postgres:postgres@localhost:5433/echo_memory" \
+  -- "$(pwd)/.venv/bin/python" -m echo_memory.server
+```
+
+Start a new Claude Code session and `write_episode`/`query_memory`/`get_audit_log` are
+available across every project, not just this repo. See
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for Cursor/per-repo setup, the
+`echo-memory` CLI, and running tests, and
 [`docs/designs/echo-memory-design.md`](docs/designs/echo-memory-design.md) for the
 current build plan and progress.
 
