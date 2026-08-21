@@ -25,11 +25,17 @@ class LocalEmbedder:
 
     def _load(self):
         if self._model is None:
+            import logging
+
             from sentence_transformers import SentenceTransformer
 
+            # sentence-transformers logs device/model-load info at INFO by
+            # default; an MCP stdio server's stderr is meant for structured
+            # JSON logs (see infra/logging.py), not this library's own
+            logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
             self._model = SentenceTransformer(self.MODEL_NAME)
         return self._model
 
     def embed(self, text: str) -> list[float]:
         model = self._load()
-        return model.encode(text, normalize_embeddings=True).tolist()
+        return model.encode(text, normalize_embeddings=True, show_progress_bar=False).tolist()

@@ -35,16 +35,32 @@ alembic upgrade head
 
 ## Running the MCP server locally
 
-Not built yet (PR5 in the design doc's PR Plan). Once it exists:
-
 ```bash
 python -m echo_memory.server
 ```
 
-Point your MCP client (Claude Code's `.mcp.json`, Cursor's MCP config, etc.) at this
-process. Each client should run its own instance with a distinct `ECHO_MEMORY_AGENT_ID`;
-see the design doc's "Configuration" section for how `scope: "solo" | "shared"`
-resolves per agent.
+Runs over stdio (the `mcp` SDK's default transport), not a network listener, so there's
+nothing to bind or expose beyond the local process. Point your MCP client (Claude Code's
+`.mcp.json`, Cursor's MCP config, etc.) at this process. Each client should run its own
+instance with a distinct `ECHO_MEMORY_AGENT_ID`; see the design doc's "Configuration"
+section for how `scope: "solo" | "shared"` resolves per agent.
+
+Example `.mcp.json` entry:
+```json
+{
+  "mcpServers": {
+    "echo-memory": {
+      "command": "/path/to/echo-mem/.venv/bin/python",
+      "args": ["-m", "echo_memory.server"],
+      "env": {
+        "ECHO_MEMORY_USER_ID": "your-user-id",
+        "ECHO_MEMORY_AGENT_ID": "claude-code",
+        "ECHO_MEMORY_DATABASE_URL": "postgresql://postgres:postgres@localhost:5433/echo_memory"
+      }
+    }
+  }
+}
+```
 
 ## Running tests
 
