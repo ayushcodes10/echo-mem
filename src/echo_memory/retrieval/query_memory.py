@@ -82,13 +82,17 @@ def _digest_candidates(conn, group_id: str, limit: int) -> list[str]:
     """No query text to rank against: a digest is "catch me up," not "answer
     this," so it's the most recently valid active facts, chronological, not
     relevance-ranked. See the CEO plan's scope decision #2 (session-start
-    context digest, opt-in, no auto-injection)."""
+    context digest, opt-in, no auto-injection).
+
+    t_valid is second-granularity, so two facts written within the same
+    second tie on it; id(e) DESC breaks the tie deterministically by
+    creation order (AGE assigns ids monotonically per label)."""
     rows = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             MATCH ()-[e:FACT {{group_id: $gid}}]->()
             WHERE e.t_invalid IS NULL
             RETURN id(e)
-            ORDER BY e.t_valid DESC
+            ORDER BY e.t_valid DESC, id(e) DESC
             LIMIT $limit
         $$, %s) AS (edge_id agtype)""",
         (json.dumps({"gid": group_id, "limit": limit}),),
