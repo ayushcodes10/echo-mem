@@ -33,6 +33,10 @@ build/
 postgres-data/
 *.pgdata
 
+# echo-memory graph --html snapshots (arbitrary user-chosen output path,
+# this project has no legitimate committed HTML at the repo root)
+/*.html
+
 # IDE / editor
 .vscode/
 .idea/
