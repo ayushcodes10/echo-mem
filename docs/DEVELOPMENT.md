@@ -92,11 +92,19 @@ echo-memory --scope solo export --out ./export  # markdown dump of a scope's mem
 echo-memory --scope solo graph                  # terminal view of a scope's memory graph
 echo-memory --scope solo graph --watch          # same, live-refreshing every 2s (--interval to change)
 echo-memory --scope solo graph --html out.html  # self-contained interactive HTML snapshot, open in a browser
+echo-memory status                              # v1a trial status: which Success Criteria are met so far
 ```
 
 `--scope` defaults to `solo`. `fact_id` is whatever `query_memory` returned for that fact
 (see the MCP tool contract); there's no raw `group_id` argument, `--scope` resolves it the
-same way the server does.
+same way the server does. `status` checks both scopes at once, so it ignores `--scope`.
+
+`status` reports against the design doc's v1a Success Criteria section: whether both
+`solo` and `shared` scopes have real data, whether at least one `entity_resolved` audit
+entry and one fact-mutation audit entry exist. Criterion 3 (a real question where hybrid
+retrieval beats either signal alone) and criterion 6, the actual v1a -> v1b exit
+criteria, need human judgment over real usage and aren't auto-checkable - `status` says
+so explicitly rather than guessing.
 
 `--html` writes a single HTML file with a draggable force-directed graph (nodes colored by
 type, click one to jump to its facts) plus the full fact list grouped by source node. It's

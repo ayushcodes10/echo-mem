@@ -9,6 +9,7 @@ from echo_memory.audit.get_audit_log import get_fact_history
 from echo_memory.cli.export import export_group
 from echo_memory.cli.graph import fetch_graph
 from echo_memory.cli.main import main
+from echo_memory.cli.status import fetch_status
 from echo_memory.infra.config import Config
 from echo_memory.infra.db import connect
 
@@ -137,6 +138,38 @@ def test_main_graph_html_command(migrated_db, capsys, monkeypatch, tmp_path):
     content = out_file.read_text()
     assert "switched to Postgres for durability" in content
     assert "using SQLite for now" not in content
+
+
+def test_fetch_status_reports_only_the_seeded_scope(migrated_db):
+    config, _ = _seed(migrated_db)
+    conn = connect(migrated_db)
+
+    scopes = fetch_status(conn, config)
+
+    assert scopes["shared"]["nodes"] == 2
+    assert scopes["shared"]["active_facts"] == 1
+    assert scopes["shared"]["write_episode_calls"] == 2
+    # _seed's 2nd call reuses both entities by exact name match (entity_resolved x2)
+    # and its new fact supersedes the 1st call's fact_superseded, not created.
+    assert scopes["shared"]["audit_counts"] == {
+        "entity_resolved": 2, "created": 1, "fact_superseded": 1,
+    }
+    assert scopes["solo"]["nodes"] == 0
+    assert scopes["solo"]["write_episode_calls"] == 0
+
+
+def test_main_status_command(migrated_db, capsys, monkeypatch):
+    config, _ = _seed(migrated_db)
+    monkeypatch.setenv("ECHO_MEMORY_USER_ID", config.user_id)
+    monkeypatch.setenv("ECHO_MEMORY_AGENT_ID", config.agent_id)
+    monkeypatch.setenv("ECHO_MEMORY_DATABASE_URL", config.database_url)
+
+    exit_code = main(["status"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "shared (" in out
+    assert "[ ] both solo and shared scopes have real data" in out
 
 
 def test_main_missing_env_returns_error_not_exception(monkeypatch, capsys):
