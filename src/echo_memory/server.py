@@ -67,10 +67,40 @@ def write_episode(
     proactively and immediately when you notice one of these - don't wait
     to be asked, and don't batch it up for later in the conversation. The
     cost of a missed memory (re-explaining something later) is higher than
-    the cost of one extra call. entities/facts must already be extracted by
-    the calling agent (this server never calls an LLM itself); see the
-    design doc's MCP tool contract for the entity_resolutions round-trip
-    when a match is ambiguous."""
+    the cost of one extra call.
+
+    You (the calling agent) extract entities/facts yourself - this server
+    never calls an LLM. Exact shape, every key required unless marked
+    optional:
+
+    entities: [{"name": "Postgres", "type": "tool"}, ...]
+      - name: non-empty string, unique per entity in this call
+      - type: any short string describing what kind of thing this is
+        (e.g. "tool", "person", "decision", "preference") - your choice,
+        not a fixed enum
+
+    facts: [{"source": "Decision", "target": "Postgres", "relation_type": "uses",
+             "fact": "decided to use Postgres for storage", "confidence": "extracted"}, ...]
+      - source/target: must each exactly match a "name" in entities above
+      - relation_type: any short string describing the relationship
+        (e.g. "uses", "prefers", "caused_by") - your choice, not a fixed enum
+      - fact: the actual sentence to remember, plain text
+      - confidence: MUST be exactly one of "extracted" (directly stated),
+        "inferred" (you deduced it), or "ambiguous" (uncertain) - any other
+        value, including numbers or omitting it, is rejected
+
+    entity_resolutions (optional): only needed when a previous call
+    returned ambiguous_entities and you're now confirming which candidate
+    a mention refers to, or that it's new: {"mention name": {"resolved_to":
+    "<node_id from ambiguous_entities>" | "new"}}. Omit entirely on a call
+    with no prior ambiguity to resolve.
+
+    Example call:
+    write_episode(scope="solo", session_id="sess-1",
+      entities=[{"name": "Postgres", "type": "tool"}, {"name": "Decision", "type": "decision"}],
+      facts=[{"source": "Decision", "target": "Postgres", "relation_type": "uses",
+              "fact": "decided to use Postgres for storage", "confidence": "extracted"}])
+    """
     try:
         group_id = _state.config.group_id(scope)
     except ConfigError as e:
