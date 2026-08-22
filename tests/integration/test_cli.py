@@ -123,6 +123,22 @@ def test_main_graph_command(migrated_db, capsys, monkeypatch):
     assert "Decision --[uses]--> Postgres" in out
 
 
+def test_main_graph_html_command(migrated_db, capsys, monkeypatch, tmp_path):
+    config, _ = _seed(migrated_db)
+    monkeypatch.setenv("ECHO_MEMORY_USER_ID", config.user_id)
+    monkeypatch.setenv("ECHO_MEMORY_AGENT_ID", config.agent_id)
+    monkeypatch.setenv("ECHO_MEMORY_DATABASE_URL", config.database_url)
+    out_file = tmp_path / "memory.html"
+
+    exit_code = main(["--scope", "shared", "graph", "--html", str(out_file)])
+
+    assert exit_code == 0
+    assert "2 nodes, 1 active facts" in capsys.readouterr().out
+    content = out_file.read_text()
+    assert "switched to Postgres for durability" in content
+    assert "using SQLite for now" not in content
+
+
 def test_main_missing_env_returns_error_not_exception(monkeypatch, capsys):
     for var in ("ECHO_MEMORY_USER_ID", "ECHO_MEMORY_AGENT_ID", "ECHO_MEMORY_DATABASE_URL"):
         monkeypatch.delenv(var, raising=False)

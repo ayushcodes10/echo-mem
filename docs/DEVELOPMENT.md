@@ -91,11 +91,19 @@ echo-memory --scope solo why <fact_id>          # plain-language audit trail for
 echo-memory --scope solo export --out ./export  # markdown dump of a scope's memory
 echo-memory --scope solo graph                  # terminal view of a scope's memory graph
 echo-memory --scope solo graph --watch          # same, live-refreshing every 2s (--interval to change)
+echo-memory --scope solo graph --html out.html  # self-contained interactive HTML snapshot, open in a browser
 ```
 
 `--scope` defaults to `solo`. `fact_id` is whatever `query_memory` returned for that fact
 (see the MCP tool contract); there's no raw `group_id` argument, `--scope` resolves it the
 same way the server does.
+
+`--html` writes a single HTML file with a draggable force-directed graph (nodes colored by
+type, click one to jump to its facts) plus the full fact list grouped by source node. It's
+a one-time snapshot, not live like `--watch` (`--watch` and `--html` are mutually
+exclusive); open the file directly in a browser, no server needed. Node "type" values are
+free text the calling agent chose, not a fixed enum, so colors are assigned deterministically
+by hashing the type string, not a hardcoded palette per type name.
 
 `graph` is a read-only observability aid, not a CEO-plan scope item: it prints each active
 fact as `source --[relation]--> target` plus any nodes with no active facts, so you can see
