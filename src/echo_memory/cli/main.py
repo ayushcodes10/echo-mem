@@ -14,6 +14,7 @@ from echo_memory.audit.get_audit_log import get_fact_history
 from echo_memory.cli.export import export_group
 from echo_memory.cli.graph import fetch_graph, render_graph
 from echo_memory.cli.graph_html import render_html
+from echo_memory.cli.status import fetch_status, render_status
 from echo_memory.cli.why import render_history
 from echo_memory.infra.config import ConfigError, load_config
 from echo_memory.infra.db import connect
@@ -46,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval", type=float, default=2.0, help="refresh interval in seconds (with --watch)"
     )
 
+    sub.add_parser("status", help="v1a trial status: which Success Criteria are met so far")
+
     return parser
 
 
@@ -57,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+
+    if args.command == "status":
+        scopes = fetch_status(connect(config.database_url), config)
+        print(render_status(scopes))
+        return 0
 
     group_id = config.group_id(args.scope)
 
