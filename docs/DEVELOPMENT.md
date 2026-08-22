@@ -117,10 +117,22 @@ entity-resolution confirmation, and `causal_hint` classification all happen in t
 calling agent, see the design doc's MCP tool contract); the `eval` marker (`pytest -m
 eval`) is reserved for future retrieval-quality evals, not in use yet.
 
-`tests/integration/` applies real migrations against `ECHO_MEMORY_DATABASE_URL` and
-checks the resulting schema; it self-skips if that database isn't reachable, so it
-needs `docker compose up -d` and a real `ECHO_MEMORY_DATABASE_URL` to actually run.
-CI doesn't run it yet (see `TODOS.md`).
+`tests/integration/` applies real migrations against `ECHO_MEMORY_DATABASE_URL` (its
+`migrated_db` fixture runs `alembic upgrade head` before each test and `downgrade base`
+after) and checks the resulting schema; it self-skips if that database isn't reachable.
+CI runs it too now (see `.github/workflows/ci.yml`), against its own throwaway database.
+
+**Point it at the `db-test` service, not `db`**, if you also have `echo-memory`
+registered as a real MCP server (e.g. via `claude mcp add`) pointing at `db`'s database.
+Running the suite against a database a real client is also using will downgrade that
+schema to nothing mid-test-run, from underneath whatever's actually using it - this
+happened once, don't repeat it.
+
+```bash
+docker compose --profile test up -d db-test   # separate container, separate volume, port 5434
+export ECHO_MEMORY_DATABASE_URL="postgresql://postgres:postgres@localhost:5434/echo_memory"
+pytest
+```
 
 ## Database migrations
 

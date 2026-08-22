@@ -17,5 +17,30 @@ services:
       timeout: 3s
       retries: 10
 
+  # Separate from `db`: the test suite's migrated_db fixture runs `alembic
+  # upgrade head` / `downgrade base` around every test. If that pointed at
+  # the same database as a real, running MCP server registration, a test
+  # run and real agent usage racing each other would leave the real
+  # server's schema at base mid-run. Opt-in via `--profile test` so it
+  # doesn't start for anyone who isn't running tests.
+  db-test:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: docker/postgres.Dockerfile
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-echo_memory}
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   postgres-data:
+  postgres-test-data:
