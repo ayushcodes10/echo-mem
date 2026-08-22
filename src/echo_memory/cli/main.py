@@ -13,6 +13,7 @@ from pathlib import Path
 from echo_memory.audit.get_audit_log import get_fact_history
 from echo_memory.cli.export import export_group
 from echo_memory.cli.graph import fetch_graph, render_graph
+from echo_memory.cli.graph_html import render_html
 from echo_memory.cli.why import render_history
 from echo_memory.infra.config import ConfigError, load_config
 from echo_memory.infra.db import connect
@@ -32,9 +33,14 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser = sub.add_parser("export", help="markdown export of a scope's memory")
     export_parser.add_argument("--out", required=True, type=Path, help="output directory")
 
-    graph_parser = sub.add_parser("graph", help="terminal view of a scope's memory graph")
-    graph_parser.add_argument(
-        "--watch", action="store_true", help="refresh live instead of printing once"
+    graph_parser = sub.add_parser("graph", help="view a scope's memory graph")
+    graph_mode = graph_parser.add_mutually_exclusive_group()
+    graph_mode.add_argument(
+        "--watch", action="store_true", help="refresh live in the terminal instead of printing once"
+    )
+    graph_mode.add_argument(
+        "--html", type=Path, metavar="PATH",
+        help="write a self-contained interactive HTML snapshot to PATH instead of printing to the terminal",
     )
     graph_parser.add_argument(
         "--interval", type=float, default=2.0, help="refresh interval in seconds (with --watch)"
@@ -55,6 +61,11 @@ def main(argv: list[str] | None = None) -> int:
     group_id = config.group_id(args.scope)
 
     if args.command == "graph":
+        if args.html:
+            graph = fetch_graph(connect(config.database_url), group_id)
+            args.html.write_text(render_html(args.scope, group_id, graph))
+            print(f"Wrote {args.html} ({len(graph['nodes'])} nodes, {len(graph['facts'])} active facts)")
+            return 0
         if args.watch:
             try:
                 while True:
