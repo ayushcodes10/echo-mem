@@ -97,6 +97,10 @@ echo-memory trial check                         # criterion 6: the gate, and wha
 echo-memory trial start                         # start the 3-week trial clock (--on YYYY-MM-DD to backdate)
 echo-memory trial save "<what>" --from cursor   # log a recalled fact that saved re-explaining something
 echo-memory trial log                           # every trial observation recorded so far
+echo-memory dashboard --serve                   # one live page over every scope and project
+echo-memory dashboard --out memory.html         # ...or a self-contained snapshot file
+echo-memory --scope shared reattribute --list   # which session wrote which project's facts
+echo-memory pending                             # memory files noticed but not yet in the graph
 ```
 
 `--scope` defaults to `solo`. `fact_id` is whatever `query_memory` returned for that fact
@@ -204,3 +208,111 @@ alembic downgrade -1                       # roll back one step
   `lsof -nP -iTCP:5432 -sTCP:LISTEN`. This is exactly why `docker-compose.yml` maps
   the container to host port 5433, not 5432; if you changed that back, change it back
   again, or point `ECHO_MEMORY_DATABASE_URL` at whatever port you actually chose.
+
+
+## Projects
+
+Every fact records the project it was written from, alongside the agent that
+wrote it (`agent_id`) and the session (`provenance.session_id`). The project is
+resolved server-side from the process's working directory - the repo root's
+name, falling back to the directory's name - and is **never** passed in by the
+calling agent, for the same reason `group_id` isn't: a value an agent types is
+a value an agent types inconsistently, and "eigen" / "Eigon" / "eigen-backend"
+across three calls would defeat the grouping entirely.
+
+This works with no per-project setup because each session starts its own MCP
+server process whose cwd is the project directory. `ECHO_MEMORY_PROJECT`
+overrides it for callers where cwd means nothing: the direct Python client
+inside a long-running service, a container whose cwd is `/app`, a chatbot
+serving many tenants from one process.
+
+**Project is not part of `group_id`.** `group_id` is the tenancy boundary;
+making it per-project would partition memory per repo and destroy the
+cross-project recall the system exists for. Project is an attribute *within* a
+scope, and it lives on the edge rather than the node, because a fact is
+authored in one project at one moment while a node like `Postgres` can be
+referenced from several. A node's projects are derived from its edges.
+
+Facts written before migration `0003` are marked `unknown`. Session ids are
+per-install, so the migration doesn't guess:
+
+```bash
+echo-memory --scope shared reattribute --list                        # see what's unattributed
+echo-memory --scope shared reattribute --session <id> --project eigen
+```
+
+## Automatic capture
+
+`write_episode` fires when a model decides to call it. Measured over the first
+two days of the v1a trial that was 4 times, while the agent's own file-based
+memory wrote 7 files in the same window because a hook fired deterministically.
+The capture path already existed; it just wasn't wired to Echo Memory.
+
+`scripts/capture-memory-hook.sh` closes that. Register it as a `PostToolUse`
+hook on `Write|Edit` in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ECHO_MEMORY_USER_ID=you ECHO_MEMORY_AGENT_ID=claude-code ECHO_MEMORY_DATABASE_URL=postgresql://postgres:postgres@localhost:5433/echo_memory ECHO_MEMORY_BIN=/path/to/echo-mem/.venv/bin/echo-memory /path/to/echo-mem/scripts/capture-memory-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook **queues; it does not extract**. Turning prose into entities and facts
+needs a model, and the server never calls one (design doc, MCP tool contract,
+architecture pivot). So `query_memory` returns a `pending_ingest` field at
+session start listing what the graph hasn't heard about, the agent reads those
+files and calls `write_episode`, and then:
+
+```bash
+echo-memory pending                    # what's outstanding
+echo-memory pending --done <path>...   # close them once they're in the graph
+```
+
+The queue stores a digest, not the file's content: it tracks what still needs
+reading, and a second copy of the memory would be one more place for the same
+fact to disagree with itself. Editing a memory file reopens its entry, because
+the file now says something the graph hasn't heard.
+
+The hook never blocks or fails a tool call - a memory-capture side effect has
+no business breaking the edit that triggered it - so every path exits 0.
+
+## Dashboard
+
+```bash
+echo-memory dashboard --serve          # http://127.0.0.1:8787, regenerated per reload
+echo-memory dashboard --out memory.html
+```
+
+One page over both scopes and every project. Nodes are coloured by the project
+that talks about them most, filtered by the project chips and the scope
+segment, searchable by fact text.
+
+Clicking a **node** shows the facts it takes part in, active and superseded,
+plus how it resolved during ingestion. Clicking a **link** shows what that one
+fact carries:
+
+| | |
+|---|---|
+| **what** | the fact text, its `relation_type`, and the confidence the agent stated |
+| **when** | `t_valid`, and `t_invalid` if it has since been superseded |
+| **who** | the agent that wrote it and the session it wrote it in |
+| **where** | the project |
+| **why** | the audit trail: created, superseded from what to what, and the entity-resolution rationale for the nodes at either end |
+
+Only active facts draw a link, since a superseded fact is a relationship the
+graph no longer asserts; it stays reachable from its node's list and from its
+own history. `--serve` regenerates on every request, because a snapshot is
+stale the moment the next episode lands. It binds to localhost only: the page
+is every fact you have ever recorded, across every project.

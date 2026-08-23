@@ -9,6 +9,7 @@ from mcp.server.mcpserver import MCPServer
 from echo_memory.audit.get_audit_log import get_audit_log as _get_audit_log
 from echo_memory.infra.config import Config, ConfigError, load_config
 from echo_memory.infra.pool import make_pool
+from echo_memory.ingestion import capture
 from echo_memory.ingestion.embeddings import Embedder, LocalEmbedder
 from echo_memory.ingestion.write_episode import write_episode as _write_episode
 from echo_memory.retrieval.query_memory import query_memory as _query_memory
@@ -107,7 +108,8 @@ def write_episode(
         return {"error": str(e)}
     with _state.pool.connection() as conn:
         return _write_episode(
-            conn, group_id, session_id, entities, facts, entity_resolutions, _state.embedder
+            conn, group_id, session_id, entities, facts, entity_resolutions, _state.embedder,
+            project=_state.config.project, agent_id=_state.config.agent_id,
         )
 
 
@@ -122,13 +124,31 @@ def query_memory(scope: str, query: str | None = None, top_k: int = 10, digest: 
 
     digest=True ignores query and returns the most recently written active
     facts instead, as an opt-in "catch me up" convenience; call it
-    explicitly at session start if you want one, it's never automatic."""
+    explicitly at session start if you want one, it's never automatic.
+
+    A pending_ingest field appears when memory files have been written that
+    the graph hasn't heard about yet. Read each listed file and call
+    write_episode with the entities and facts it states, then mark it done
+    with `echo-memory pending --done <path>`. The queue exists because
+    extraction needs a model and this server never calls one."""
     try:
         group_id = _state.config.group_id(scope)
     except ConfigError as e:
         return {"error": str(e)}
     with _state.pool.connection() as conn:
-        return _query_memory(conn, group_id, query, top_k, _state.embedder, digest=digest)
+        result = _query_memory(conn, group_id, query, top_k, _state.embedder, digest=digest)
+        queued = capture.pending(conn)
+        if queued:
+            result["pending_ingest"] = {
+                "count": len(queued),
+                "files": [{"path": q["path"], "project": q["project"]} for q in queued[:10]],
+                "instruction": (
+                    "These memory files were written but never recorded as facts. Read each "
+                    "one and call write_episode with what it states, then run "
+                    "`echo-memory pending --done <path>` for each."
+                ),
+            }
+        return result
 
 
 @server.tool()
