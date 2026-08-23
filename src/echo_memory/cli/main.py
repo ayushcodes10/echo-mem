@@ -14,14 +14,19 @@ from pathlib import Path
 import psycopg
 
 from echo_memory.audit.get_audit_log import get_fact_history
+from echo_memory.cli.dashboard import fetch_dashboard
+from echo_memory.cli.dashboard_html import render_dashboard
 from echo_memory.cli.export import export_group
 from echo_memory.cli.graph import fetch_graph, render_graph
 from echo_memory.cli.graph_html import render_html
+from echo_memory.cli.reattribute import reattribute, render_sessions, sessions_by_project
 from echo_memory.cli.status import fetch_status, render_status
 from echo_memory.cli.trial import render_check, render_log, render_recorded, render_start
 from echo_memory.cli.why import render_history
 from echo_memory.infra.config import ConfigError, load_config
 from echo_memory.infra.db import connect
+from echo_memory.infra.project import normalize as normalize_project
+from echo_memory.ingestion import capture
 from echo_memory.trial import check, observations
 
 
@@ -55,8 +60,49 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="v1a trial status: which Success Criteria are met so far")
 
     _add_trial_parser(sub)
+    _add_project_parsers(sub)
 
     return parser
+
+
+def _add_project_parsers(sub) -> None:
+    """Project attribution and the automatic-capture queue. See
+    infra/project.py for why the project is resolved from cwd rather than
+    passed in, and ingestion/capture.py for what the queue is and isn't."""
+    dash = sub.add_parser("dashboard", help="one page over every scope and project")
+    dash.add_argument(
+        "--out", type=Path, metavar="PATH", help="write a self-contained HTML snapshot here"
+    )
+    dash.add_argument(
+        "--serve", action="store_true",
+        help="serve it on localhost instead, regenerating on every reload so it stays live",
+    )
+    dash.add_argument("--port", type=int, default=8787, help="port for --serve (default: 8787)")
+
+    reattr = sub.add_parser(
+        "reattribute", help="set the project on facts written before projects were recorded"
+    )
+    reattr.add_argument(
+        "--list", action="store_true", dest="list_sessions",
+        help="show every session that has written to this scope and its current project",
+    )
+    reattr.add_argument("--session", metavar="ID", help="session whose facts to reattribute")
+    reattr.add_argument("--project", metavar="NAME", help="project to attribute them to")
+
+    notice = sub.add_parser(
+        "notice", help="queue a memory file for ingestion (called by the capture hook)"
+    )
+    notice.add_argument("path", type=Path, help="the memory file that changed")
+    notice.add_argument(
+        "--project", metavar="NAME",
+        help="project it belongs to (default: detected from the file's own path or cwd)",
+    )
+
+    pending = sub.add_parser("pending", help="memory files noticed but not yet in the graph")
+    pending.add_argument("--project", metavar="NAME", help="only this project")
+    pending.add_argument(
+        "--done", nargs="+", metavar="PATH", help="mark these paths as ingested"
+    )
 
 
 def _add_trial_parser(sub) -> None:
@@ -190,6 +236,115 @@ def _run_trial(args, config, conn) -> int:
     return 0
 
 
+def _project_for_memory_file(path: Path, fallback: str) -> str:
+    """A Claude Code memory file lives at
+    ~/.claude/projects/<encoded-project-path>/memory/<name>.md, and the
+    encoded segment is the project's absolute path with separators replaced by
+    dashes. Its last segment is the project directory name, which is what
+    detect_project() would have returned had the write happened there. Falling
+    back to the hook's own cwd would attribute every project's memories to
+    whichever repo the agent happened to be sitting in."""
+    parts = path.resolve().parts
+    if "projects" in parts:
+        encoded = parts[parts.index("projects") + 1 :]
+        if encoded:
+            tail = encoded[0].rstrip("-").split("-")[-1]
+            if tail:
+                return normalize_project(tail)
+    return fallback
+
+
+def _serve_dashboard(config, port: int) -> int:
+    """Regenerates on every request: a snapshot file is stale the moment the
+    next episode lands, and the whole point of a dashboard is that you leave it
+    open."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path not in ("/", "/index.html"):
+                self.send_error(404)
+                return
+            conn = connect(config.database_url)
+            try:
+                body = render_dashboard(fetch_dashboard(conn, config)).encode("utf-8")
+            finally:
+                conn.close()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    # Localhost only, same posture as the MCP server: this page is every fact
+    # the user has ever recorded, across every project.
+    server = HTTPServer(("127.0.0.1", port), Handler)
+    print(f"Echo Memory dashboard on http://127.0.0.1:{port}  (ctrl-C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    return 0
+
+
+def _run_project_command(args, config, conn) -> int:
+    if args.command == "dashboard":
+        if args.serve:
+            return _serve_dashboard(config, args.port)
+        out = args.out or Path("memory-dashboard.html")
+        data = fetch_dashboard(conn, config)
+        out.write_text(render_dashboard(data))
+        n_facts = sum(len(s["facts"]) for s in data["scopes"].values())
+        print(
+            f"Wrote {out} ({n_facts} facts across {len(data['projects'])} projects). "
+            "Use --serve to keep it live instead."
+        )
+        return 0
+
+    if args.command == "reattribute":
+        group_id = config.group_id(args.scope)
+        if args.list_sessions or not (args.session and args.project):
+            print(render_sessions(args.scope, sessions_by_project(conn, group_id)), end="")
+            return 0 if args.list_sessions else 1
+        changed = reattribute(conn, group_id, args.session, args.project)
+        print(f"Reattributed {changed} fact(s) from session {args.session} to {args.project}.")
+        return 0
+
+    if args.command == "notice":
+        if not args.path.exists():
+            print(f"error: no such file: {args.path}", file=sys.stderr)
+            return 1
+        project = args.project or _project_for_memory_file(args.path, config.project)
+        result = capture.notice_file(conn, args.path, project)
+        if result["changed"]:
+            print(f"Queued {args.path} for ingestion ({project}).")
+        else:
+            print(f"Already queued and unchanged: {args.path}")
+        return 0
+
+    if args.command == "pending":
+        if args.done:
+            print(f"Marked {capture.mark_ingested(conn, args.done)} file(s) as ingested.")
+            return 0
+        queued = capture.pending(conn, args.project)
+        if not queued:
+            print("Nothing pending: every noticed memory file is in the graph.")
+            return 0
+        print(f"{len(queued)} memory file(s) noticed but not yet in the graph:")
+        for item in queued:
+            print(f"  [{item['project']}] {item['path']}")
+        print(
+            "\nRead each one and call write_episode with the entities and facts it states, "
+            "then: echo-memory pending --done <path>..."
+        )
+        return 0
+
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -206,6 +361,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "trial":
         return _run_trial(args, config, connect(config.database_url))
+
+    if args.command in ("dashboard", "reattribute", "notice", "pending"):
+        return _run_project_command(args, config, connect(config.database_url))
 
     group_id = config.group_id(args.scope)
 

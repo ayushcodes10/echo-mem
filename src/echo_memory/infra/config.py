@@ -8,6 +8,8 @@ from these values plus the scope ("solo" | "shared") passed on each call.
 import os
 from dataclasses import dataclass
 
+from echo_memory.infra.project import UNKNOWN, detect_project
+
 
 class ConfigError(Exception):
     pass
@@ -18,6 +20,10 @@ class Config:
     user_id: str
     agent_id: str
     database_url: str
+    # Which project this process is writing from. Resolved from cwd, never
+    # passed by the calling agent (see infra/project.py). Defaults to
+    # "unknown" so a Config built by hand - tests, embedders - stays valid.
+    project: str = UNKNOWN
 
     def solo_group_id(self) -> str:
         return f"user:{self.user_id}:agent:{self.agent_id}"
@@ -46,4 +52,5 @@ def load_config(env: dict | None = None) -> Config:
         user_id=env["ECHO_MEMORY_USER_ID"],
         agent_id=env["ECHO_MEMORY_AGENT_ID"],
         database_url=env["ECHO_MEMORY_DATABASE_URL"],
+        project=detect_project(env=env),
     )
