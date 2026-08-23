@@ -8,7 +8,9 @@ from mcp.server.mcpserver import MCPServer
 
 from echo_memory.audit.get_audit_log import get_audit_log as _get_audit_log
 from echo_memory.infra.config import Config, ConfigError, load_config
+from echo_memory.infra.logging import get_logger
 from echo_memory.infra.pool import make_pool
+from echo_memory.ingestion import bootstrap as bootstrap_mod
 from echo_memory.ingestion import capture
 from echo_memory.ingestion.embeddings import Embedder, LocalEmbedder
 from echo_memory.ingestion.write_episode import write_episode as _write_episode
@@ -137,6 +139,7 @@ def query_memory(scope: str, query: str | None = None, top_k: int = 10, digest: 
         return {"error": str(e)}
     with _state.pool.connection() as conn:
         result = _query_memory(conn, group_id, query, top_k, _state.embedder, digest=digest)
+        _bootstrap_once(conn)
         queued = capture.pending(conn)
         if queued:
             result["pending_ingest"] = {
@@ -149,6 +152,32 @@ def query_memory(scope: str, query: str | None = None, top_k: int = 10, digest: 
                 ),
             }
         return result
+
+
+_logger = get_logger("server")
+
+
+def _bootstrap_once(conn) -> None:
+    """First initialisation sweeps the machine for work that already exists.
+
+    A fresh store is empty, but the machine it runs on usually isn't: months of
+    decisions already sit in memory files, company-memory digests and gstack
+    learnings. Waiting for new sessions to slowly refill the graph throws all of
+    that away and makes the user re-explain what they already wrote down.
+
+    Runs at most once (guarded by bootstrap_state), and never fails a query:
+    recall is the caller's actual request, and a discovery problem has no
+    business breaking it."""
+    try:
+        if bootstrap_mod.has_run(conn):
+            return
+        result = bootstrap_mod.run(conn)
+        _logger.info(
+            "bootstrap_discovered",
+            extra={"found": result["found"], "queued": result["queued"]},
+        )
+    except Exception as e:  # noqa: BLE001 - see docstring: never fail a query
+        _logger.warning("bootstrap_failed", extra={"error": str(e)})
 
 
 @server.tool()
