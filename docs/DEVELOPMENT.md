@@ -210,6 +210,39 @@ alembic downgrade -1                       # roll back one step
   again, or point `ECHO_MEMORY_DATABASE_URL` at whatever port you actually chose.
 
 
+## Installing into one project only
+
+The user-scoped registration above is the right default on a personal machine:
+register once, every session in every repo can write. When that isn't what you
+want - a single Claude project, a repo whose memory shouldn't mingle with the
+rest, a Cursor workspace, a shared machine - install per project instead:
+
+```bash
+echo-memory install                 # the current directory, for Claude Code
+echo-memory install ../some-repo --for cursor
+echo-memory install . --for both --project my-name
+```
+
+| target | writes |
+|---|---|
+| `claude` | `.claude/skills/echo-memory/SKILL.md` and a project-scoped `.mcp.json` |
+| `cursor` | `.cursor/mcp.json` and `.cursor/rules/echo-memory.mdc` (`alwaysApply`) |
+
+The skill is the half that matters even where the MCP server is already
+registered globally: the tools being *available* is not the same as an agent
+knowing to call them at the right moments, which is most of what SKILL.md is
+for. Cursor has no skills, so the rule file carries the same guidance.
+
+`ECHO_MEMORY_PROJECT` is pinned in the generated config rather than left to cwd
+detection, because a project-scoped install is a statement about which project
+this is: an agent launched from a subdirectory shouldn't be able to file its
+facts somewhere else.
+
+Existing config is merged, never replaced - `.mcp.json` commonly already holds
+other servers, and a malformed one is refused rather than overwritten. Commit
+the generated files to share the setup with the repo, or gitignore them to keep
+it to yourself.
+
 ## Projects
 
 Every fact records the project it was written from, alongside the agent that

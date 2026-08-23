@@ -75,7 +75,12 @@ claude mcp add --scope user echo-memory \
 ```
 
 Start a new Claude Code session and `write_episode`/`query_memory`/`get_audit_log` are
-available across every project, not just this repo. See
+available across every project, not just this repo.
+
+Prefer it scoped to one project - a single Claude project, a Cursor workspace, a repo
+whose memory shouldn't mingle with the rest? `echo-memory install [path] --for
+claude|cursor|both` writes a project-scoped MCP config plus a skill (or, for Cursor, an
+always-applied rule) telling the agent when to record and when to recall. See
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for Cursor/per-repo setup, the
 `echo-memory` CLI, and running tests; see
 [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for using Echo Memory from an agent

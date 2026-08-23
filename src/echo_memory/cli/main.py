@@ -19,12 +19,14 @@ from echo_memory.cli.dashboard_html import render_dashboard
 from echo_memory.cli.export import export_group
 from echo_memory.cli.graph import fetch_graph, render_graph
 from echo_memory.cli.graph_html import render_html
+from echo_memory.cli.install import install, render_install
 from echo_memory.cli.reattribute import reattribute, render_sessions, sessions_by_project
 from echo_memory.cli.status import fetch_status, render_status
 from echo_memory.cli.trial import render_check, render_log, render_recorded, render_start
 from echo_memory.cli.why import render_history
 from echo_memory.infra.config import ConfigError, load_config
 from echo_memory.infra.db import connect
+from echo_memory.infra.project import detect_project
 from echo_memory.infra.project import normalize as normalize_project
 from echo_memory.ingestion import capture
 from echo_memory.trial import check, observations
@@ -102,6 +104,22 @@ def _add_project_parsers(sub) -> None:
     pending.add_argument("--project", metavar="NAME", help="only this project")
     pending.add_argument(
         "--done", nargs="+", metavar="PATH", help="mark these paths as ingested"
+    )
+
+    inst = sub.add_parser(
+        "install", help="wire Echo Memory into one project instead of every project"
+    )
+    inst.add_argument(
+        "root", nargs="?", type=Path, default=Path("."),
+        help="project directory (default: the current one)",
+    )
+    inst.add_argument(
+        "--for", dest="targets", choices=["claude", "cursor", "both"], default="claude",
+        help="which tool to set up (default: claude)",
+    )
+    inst.add_argument(
+        "--project", metavar="NAME",
+        help="project name to attribute facts to (default: the directory's own name)",
     )
 
 
@@ -361,6 +379,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "trial":
         return _run_trial(args, config, connect(config.database_url))
+
+    if args.command == "install":
+        targets = ("claude", "cursor") if args.targets == "both" else (args.targets,)
+        root = args.root.resolve()
+        if not root.is_dir():
+            print(f"error: not a directory: {root}", file=sys.stderr)
+            return 1
+        project = args.project or detect_project(str(root), env={})
+        try:
+            done = install(root, config, targets, project=project)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print(render_install(root, project, targets, done), end="")
+        return 0
 
     if args.command in ("dashboard", "reattribute", "notice", "pending"):
         return _run_project_command(args, config, connect(config.database_url))
