@@ -192,7 +192,7 @@ def test_cli_pending_lists_then_closes(migrated_db, tmp_path, monkeypatch, capsy
     assert main(["notice", str(memory)]) == 0
     assert main(["pending"]) == 0
     out = capsys.readouterr().out
-    assert "[eigen]" in out, "project should come from the memory file's own path, not cwd"
+    assert "  eigen\n" in out, "project should come from the memory file's own path, not cwd"
 
     assert main(["pending", "--done", str(memory)]) == 0
     assert main(["pending"]) == 0
