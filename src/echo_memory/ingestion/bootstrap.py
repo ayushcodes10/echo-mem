@@ -2,10 +2,10 @@
 
 A fresh Echo Memory store is empty, but the machine it runs on usually isn't.
 By the time anyone installs this there are already months of recorded
-decisions sitting in per-project memory files, company-memory digests, gstack
-learnings and CLAUDE.md files. Starting from zero and waiting for new sessions
-to slowly refill the graph wastes all of it, and means the user re-explains
-things they already wrote down once.
+decisions sitting in per-project memory files, gstack learnings and CLAUDE.md
+files. Starting from zero and waiting for new sessions to slowly refill the
+graph wastes all of it, and means the user re-explains things they already
+wrote down once.
 
 So on first initialisation, sweep every reference store on the machine and
 queue what's there. Each adapter below reads one kind of reference and yields
@@ -19,9 +19,13 @@ sixty documents on it will take more than one turn to work through.
 
 Deliberately NOT swept: raw session transcripts (~/.claude/projects/*.jsonl).
 They're enormous, mostly tool output, and the signal in them has already been
-distilled into the memory files and company-memory digests that ARE swept.
-Queuing thousands of transcripts would bury the documents actually worth
-reading."""
+distilled into the memory files that ARE swept. Queuing thousands of
+transcripts would bury the documents actually worth reading.
+
+An adapter for Claude Code's company-memory digests was removed once that tool
+was uninstalled. Its content was derivative by construction - every entry cited
+the memory file it came from - so the sweep loses nothing the per-project
+memories don't already carry."""
 
 import json
 from pathlib import Path
@@ -35,11 +39,10 @@ from echo_memory.infra.project import (
 from echo_memory.ingestion import capture
 
 CLAUDE_MEMORY = "claude-memory"
-COMPANY_MEMORY = "company-memory"
 GSTACK_LEARNINGS = "gstack-learnings"
 PROJECT_INSTRUCTIONS = "project-instructions"
 
-SOURCES = (CLAUDE_MEMORY, COMPANY_MEMORY, GSTACK_LEARNINGS, PROJECT_INSTRUCTIONS)
+SOURCES = (CLAUDE_MEMORY, GSTACK_LEARNINGS, PROJECT_INSTRUCTIONS)
 
 # MEMORY.md is an index whose every line points at a real memory file that is
 # itself discovered; queuing it would ask the agent to re-read the same facts
@@ -55,28 +58,6 @@ def _claude_memories(home: Path) -> list[dict]:
             if path.name in _SKIP_NAMES:
                 continue
             found.append({"path": path, "project": project, "source": CLAUDE_MEMORY})
-    return found
-
-
-def _project_from_company_file(path: Path) -> str:
-    """Company-memory digests carry an explicit `Path: /abs/path` line, which
-    beats decoding the filename: it's the writer's own statement of what the
-    file describes, not a guess at an ambiguous encoding."""
-    try:
-        for line in path.read_text().splitlines()[:12]:
-            if line.startswith("Path:"):
-                return normalize(Path(line.split(":", 1)[1].strip()).name)
-    except OSError:
-        pass
-    return decode_claude_project_dir(path.stem)
-
-
-def _company_memories(home: Path) -> list[dict]:
-    found = []
-    for path in sorted(home.glob(".claude/company-memory/projects/*.md")):
-        found.append(
-            {"path": path, "project": _project_from_company_file(path), "source": COMPANY_MEMORY}
-        )
     return found
 
 
@@ -109,7 +90,11 @@ def _project_instructions(project_dirs: dict[str, Path]) -> list[dict]:
 def _project_dirs(home: Path) -> dict[str, Path]:
     """Every project directory the reference stores point at. This is what
     "from what all reference it has" resolves to: the stores name the paths,
-    so discovery never has to guess where a user keeps their work."""
+    so discovery never has to guess where a user keeps their work.
+
+    Only Claude Code's encoded project directories name paths now, so a
+    project is discoverable here exactly when it has a directory under
+    ~/.claude/projects that still resolves on disk."""
     dirs: dict[str, Path] = {}
     for encoded in sorted(home.glob(".claude/projects/*")):
         if not encoded.is_dir():
@@ -117,16 +102,6 @@ def _project_dirs(home: Path) -> dict[str, Path]:
         candidate = resolve_claude_project_dir(encoded.name)
         if candidate is not None:
             dirs[normalize(candidate.name)] = candidate
-    for path in sorted(home.glob(".claude/company-memory/projects/*.md")):
-        try:
-            for line in path.read_text().splitlines()[:12]:
-                if line.startswith("Path:"):
-                    directory = Path(line.split(":", 1)[1].strip())
-                    if directory.is_dir():
-                        dirs[normalize(directory.name)] = directory
-                    break
-        except OSError:
-            continue
     return dirs
 
 
@@ -142,8 +117,6 @@ def discover(home: Path | None = None, sources: tuple[str, ...] = SOURCES) -> li
     found: list[dict] = []
     if CLAUDE_MEMORY in sources:
         found += _claude_memories(home)
-    if COMPANY_MEMORY in sources:
-        found += _company_memories(home)
     if GSTACK_LEARNINGS in sources:
         found += _gstack_learnings(home, known)
     if PROJECT_INSTRUCTIONS in sources:
@@ -218,8 +191,8 @@ def render(result: dict) -> str:
             "Found no existing work to import.",
             "",
             (
-                "Looked for per-project memory files, company-memory digests, gstack "
-                "learnings and CLAUDE.md files under your home directory."
+                "Looked for per-project memory files, gstack learnings and CLAUDE.md "
+                "files under your home directory."
             ),
         ]
         return "\n".join(lines) + "\n"
