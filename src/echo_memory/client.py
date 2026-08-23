@@ -42,7 +42,8 @@ class EchoMemory:
             return {"error": str(e)}
         with self._pool.connection() as conn:
             return _write_episode(
-                conn, group_id, session_id, entities, facts, entity_resolutions, self._embedder
+                conn, group_id, session_id, entities, facts, entity_resolutions, self._embedder,
+                project=self._config.project, agent_id=self._config.agent_id,
             )
 
     def query_memory(

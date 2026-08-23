@@ -31,6 +31,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"echo_memory.skill" = ["SKILL.md"]
+
 [tool.pytest.ini_options]
 markers = [
     "eval: retrieval-quality evals against real data (reserved, not in use yet)",
