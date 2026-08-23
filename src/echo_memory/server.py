@@ -161,9 +161,9 @@ def _bootstrap_once(conn) -> None:
     """First initialisation sweeps the machine for work that already exists.
 
     A fresh store is empty, but the machine it runs on usually isn't: months of
-    decisions already sit in memory files, company-memory digests and gstack
-    learnings. Waiting for new sessions to slowly refill the graph throws all of
-    that away and makes the user re-explain what they already wrote down.
+    decisions already sit in per-project memory files, gstack learnings and
+    CLAUDE.md files. Waiting for new sessions to slowly refill the graph throws
+    all of that away and makes the user re-explain what they already wrote down.
 
     Runs at most once (guarded by bootstrap_state), and never fails a query:
     recall is the caller's actual request, and a discovery problem has no
