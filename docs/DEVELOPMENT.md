@@ -93,6 +93,10 @@ echo-memory --scope solo graph                  # terminal view of a scope's mem
 echo-memory --scope solo graph --watch          # same, live-refreshing every 2s (--interval to change)
 echo-memory --scope solo graph --html out.html  # self-contained interactive HTML snapshot, open in a browser
 echo-memory status                              # v1a trial status: which Success Criteria are met so far
+echo-memory trial check                         # criterion 6: the gate, and what's awaiting your judgement
+echo-memory trial start                         # start the 3-week trial clock (--on YYYY-MM-DD to backdate)
+echo-memory trial save "<what>" --from cursor   # log a recalled fact that saved re-explaining something
+echo-memory trial log                           # every trial observation recorded so far
 ```
 
 `--scope` defaults to `solo`. `fact_id` is whatever `query_memory` returned for that fact
@@ -101,10 +105,43 @@ same way the server does. `status` checks both scopes at once, so it ignores `--
 
 `status` reports against the design doc's v1a Success Criteria section: whether both
 `solo` and `shared` scopes have real data, whether at least one `entity_resolved` audit
-entry and one fact-mutation audit entry exist. Criterion 3 (a real question where hybrid
-retrieval beats either signal alone) and criterion 6, the actual v1a -> v1b exit
-criteria, need human judgment over real usage and aren't auto-checkable - `status` says
-so explicitly rather than guessing.
+entry and one fact-mutation audit entry exist, plus criterion 6's tallies (below).
+Criterion 3 (a real question where hybrid retrieval beats either signal alone) is the one
+criterion still with nowhere to record it - `status` says so explicitly rather than
+guessing.
+
+### Criterion 6: the v1a -> v1b gate
+
+Criterion 6 decides whether v1b starts: **3+ real instances where a recalled fact saved
+re-explaining something to a different tool, at most 1 duplicate node, zero incorrectly
+merged entities, over a trial capped at 3 weeks.** Every bar is a human judgement, which
+is why they need recording somewhere rather than being remembered at the end. `trial`
+records them; `status` and `trial check` report them. Nothing here judges anything on its
+own.
+
+```bash
+echo-memory trial start --on 2026-08-21        # the clock, so the 3-week cap is measured
+echo-memory trial check                        # the gate + everything awaiting judgement
+echo-memory trial save "..." --from cursor     # --from is the tool that wrote the fact;
+                                               # --into defaults to ECHO_MEMORY_AGENT_ID
+```
+
+`trial check` surfaces two kinds of open item, each printed with the exact command that
+records a verdict on it:
+
+- **Similar nodes that stayed separate** - one entity possibly split in two. Candidates
+  are pairs scoring above the resolver's own `LOW_THRESHOLD`, i.e. pairs it would have
+  flagged as ambiguous had they met in one call (see `ingestion/resolution.py`'s
+  documented in-batch limitation). Judge with `trial dup <a> <b> "<why>"` or
+  `trial not-dup <a> <b>`.
+- **Entity resolutions not yet reviewed** - two entities possibly merged into one. Judge
+  with `trial merge-ok <audit_id>` or `trial bad-merge <audit_id> "<why>"`. Exact-name
+  matches are excluded by default as near-always correct; `--all` includes them.
+
+A judged pair or reviewed resolution never comes back, and a second contradictory verdict
+on the same one is refused rather than silently overwriting the first. A save where
+`--from` and `--into` are the same tool is recorded but doesn't count toward the bar: the
+criterion is specifically about a *different* tool not needing to be re-told.
 
 `--html` writes a single HTML file with a draggable force-directed graph (nodes colored by
 type, click one to jump to its facts) plus the full fact list grouped by source node. It's

@@ -746,6 +746,17 @@ start so v1b doesn't need a breaking API change).
    merged into one node. If the bars aren't met, revisit the recall mechanism itself
    before starting any v1b work.
 
+   **Recorded, not remembered (added 2026-08-23, two days into the trial).** Each of
+   these three bars is a human judgement, and for the first days of the trial none of
+   them had anywhere to be written down: the gate was decidable only from recollection,
+   which is exactly the failure mode this whole project exists to fix. `echo-memory
+   trial` now records a judgement per bar and `echo-memory status` reports the gate from
+   stored data (see PR-FF3 in the PR plan). The automated half only *surfaces candidates*
+   for the two error bars - node pairs similar enough that the resolver would have
+   flagged them, and every non-exact `entity_resolved` entry - because a resolver that
+   could detect its own splits and bad merges wouldn't have made them. The judgement
+   stays human; only the bookkeeping is automated.
+
 ### v1b (gated on v1a's exit criteria being met)
 1. A small eval set (5-10 real facts) manually checked for `causal_hint` classification
    quality, with a concrete precision/recall threshold set (not just "check the eval
@@ -801,6 +812,7 @@ reviewable PRs matter more than a single large landing)
 | PR5 | MCP server packaging: wire all 3 tools together, localhost-bound only, typed `{error}` contract end-to-end | `mcp-server/` | PR2, PR3, PR4 |
 | PR-FF1 | `echo-memory why`/`export` CLI | `cli/` | PR4 |
 | *(v1a exit-criteria trial begins, real usage against the CEO plan's gated window, no new code)* | | | PR5 **and** PR-FF1 |
+| PR-FF3 | Trial instrumentation: record a judgement against each of criterion 6's three bars, surface duplicate-node and bad-merge candidates for review, report the gate in `echo-memory status`. A deliberate exception to the trial's "no new code": the trial was running with no way to record the very observations that decide its outcome | `trial/`, `cli/`, `migrations/` | PR5, PR-FF1 |
 | PR-FF2 | Onboarding nudge + context digest | `ingestion/`, `retrieval/` (additive) | PR5 |
 | PR-B1 (v1b, gated on v1a exit criteria, Lane A) | `causal_hint` classification at ingestion, a column/property addition via migration, no storage-substrate change needed (AGE was already in place from PR1) | `ingestion/`, `migrations/` | v1a exit criteria met |
 | PR-B2 (Lane B) | PPR via `networkx.personalized_pagerank`, extend RRF to 3 signals | `retrieval/`, `graph/` | v1a exit criteria met |

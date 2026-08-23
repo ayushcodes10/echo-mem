@@ -1,13 +1,16 @@
 """echo-memory status: a report against the v1a design doc's Success
 Criteria (docs/designs/echo-memory-design.md), computed from real
 audit/group_state data rather than a manual query each time someone asks
-how the v1a trial is going. Not a CEO-plan scope item. Criteria 3 (a real
-hybrid-retrieval win) and 6 (the exit criteria: 3+ confirmed recall saves,
-at most 1 duplicate node, zero bad merges) need human judgment over real
-usage and aren't auto-checkable here - this only covers what's mechanically
-verifiable from stored data."""
+how the v1a trial is going. Not a CEO-plan scope item.
+
+Criterion 6 (the v1a -> v1b exit criteria) still can't be *checked*
+automatically, since each of its bars is a human judgement. It is now
+*reported* from stored data, because those judgements have somewhere to live:
+`echo-memory trial` records them (see trial/observations.py). What's left
+genuinely un-auto-checkable is criterion 3, a real hybrid-retrieval win."""
 
 from echo_memory.cli.graph import fetch_graph
+from echo_memory.cli.trial import render_criterion_six
 
 
 def fetch_status(conn, config) -> dict:
@@ -39,7 +42,7 @@ def fetch_status(conn, config) -> dict:
     return scopes
 
 
-def render_status(scopes: dict) -> str:
+def render_status(scopes: dict, criterion_six: dict) -> str:
     lines = ["Echo Memory - v1a trial status", ""]
 
     for scope, s in scopes.items():
@@ -71,11 +74,13 @@ def render_status(scopes: dict) -> str:
     )
     lines.append(f"  [{'x' if has_mutation else ' '}] at least one fact mutation audit entry (criterion 4)")
     lines.append("")
+
+    lines.append("Criterion 6, the v1a -> v1b exit criteria (recorded via `echo-memory trial`):")
+    lines += render_criterion_six(criterion_six)
+    lines.append("")
     lines.append(
-        "Criterion 3 (a real question where hybrid retrieval beats either signal alone) and "
-        "criterion 6, the actual v1a -> v1b exit criteria (3+ confirmed instances where a "
-        "recalled fact saved re-explaining something, at most 1 duplicate node, zero bad "
-        "merges, capped at 3 weeks of trial) need human judgment over real usage - not "
-        "auto-checkable here. See the design doc's Success Criteria section for the full text."
+        "Criterion 3 (a real question where hybrid retrieval beats either signal alone) is "
+        "still a human judgement with nowhere to record it. See the design doc's Success "
+        "Criteria section for the full text."
     )
     return "\n".join(lines) + "\n"
