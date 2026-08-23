@@ -15,6 +15,7 @@ from echo_memory.ingestion import capture
 from echo_memory.ingestion.embeddings import Embedder, LocalEmbedder
 from echo_memory.ingestion.write_episode import write_episode as _write_episode
 from echo_memory.retrieval.query_memory import query_memory as _query_memory
+from echo_memory.trial import observations as _observations
 
 server = MCPServer(
     name="echo-memory",
@@ -178,6 +179,76 @@ def _bootstrap_once(conn) -> None:
         )
     except Exception as e:  # noqa: BLE001 - see docstring: never fail a query
         _logger.warning("bootstrap_failed", extra={"error": str(e)})
+
+
+@server.tool()
+def record_recall_save(
+    scope: str,
+    note: str,
+    written_by: str,
+    recalled_by: str | None = None,
+) -> dict:
+    """Record that a fact you recalled from memory saved the user from
+    re-explaining something to you.
+
+    Call this IN THE SAME TURN, the moment it happens. The trigger is
+    concrete: you called query_memory (or read a memory-derived fact), it
+    answered something the user would otherwise have had to tell you again,
+    and the fact was originally written by a DIFFERENT tool or a past session.
+
+    That last part is the whole point. written_by is the tool that recorded
+    the fact (visible on every query_memory result as agent_id) and
+    recalled_by is you, defaulting to this server's own agent id. If they're
+    the same tool, the save is still recorded but does not count toward the
+    trial's bar - recalling your own note from ten minutes ago is not the
+    thing being measured.
+
+    note should be one sentence naming what it saved re-explaining, written so
+    it still makes sense read cold in six months. Recording the identical note
+    twice is a no-op, so a retry after an error is safe.
+
+    Do NOT call this speculatively, for a fact you wrote this session, or
+    because a recall was merely interesting. It is evidence for a gate that
+    decides real build work; an inflated count is worse than an empty one."""
+    try:
+        group_id = _state.config.group_id(scope)
+    except ConfigError as e:
+        return {"error": str(e)}
+
+    recalled_by = recalled_by or _state.config.agent_id
+    with _state.pool.connection() as conn:
+        try:
+            recorded = _observations.record(
+                conn, group_id, _observations.RECALL_SAVE, note,
+                written_by=written_by, recalled_by=recalled_by,
+            )
+        except _observations.TrialError as e:
+            return {"error": str(e)}
+        counts = _observations.counts(conn, [group_id])
+
+    cross_tool = written_by != recalled_by
+    _logger.info(
+        "recall_save_recorded",
+        extra={
+            "observation_id": recorded["id"], "newly_recorded": recorded["created"],
+            "written_by": written_by, "recalled_by": recalled_by,
+            "cross_tool": cross_tool, "group_id": group_id,
+        },
+    )
+    result = {
+        "recorded": True,
+        "observation_id": recorded["id"],
+        "already_recorded": not recorded["created"],
+        "counts_toward_gate": cross_tool,
+        "cross_tool_saves": counts["cross_tool_saves"],
+        "required": _observations.REQUIRED_SAVES,
+    }
+    if not cross_tool:
+        result["note"] = (
+            f"Recorded, but {written_by} both wrote and recalled this, so it does not count "
+            "toward the trial's cross-tool bar."
+        )
+    return result
 
 
 @server.tool()
