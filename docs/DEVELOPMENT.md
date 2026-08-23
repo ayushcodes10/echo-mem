@@ -278,9 +278,9 @@ echo-memory --scope shared reattribute --session <id> --project eigen
 
 A fresh store is empty; the machine it runs on usually isn't. By the time
 anyone installs this there are already months of recorded decisions sitting in
-per-project memory files, company-memory digests, gstack learnings and
-CLAUDE.md files. Starting from zero throws all of that away and makes you
-re-explain what you already wrote down once.
+per-project memory files, gstack learnings and CLAUDE.md files. Starting from
+zero throws all of that away and makes you re-explain what you already wrote
+down once.
 
 So the first `query_memory` on a fresh store sweeps for it automatically, and
 `echo-memory install` does the same. To run it by hand:
@@ -295,7 +295,6 @@ echo-memory bootstrap --only claude-memory --only gstack-learnings
 | source | where it looks |
 |---|---|
 | `claude-memory` | `~/.claude/projects/<project>/memory/*.md` |
-| `company-memory` | `~/.claude/company-memory/projects/*.md` |
 | `gstack-learnings` | `~/.gstack/projects/<project>/learnings.jsonl` |
 | `project-instructions` | `CLAUDE.md` in each discovered project |
 
@@ -304,8 +303,8 @@ name the paths, so the projects they point at are the projects that get swept.
 
 **Deliberately not swept:** raw session transcripts
 (`~/.claude/projects/*/*.jsonl`). They're enormous, mostly tool output, and
-their signal has already been distilled into the memory files and digests that
-*are* swept. Queuing thousands of transcripts would bury the documents actually
+their signal has already been distilled into the memory files that *are*
+swept. Queuing thousands of transcripts would bury the documents actually
 worth reading.
 
 It runs **once**, guarded by `bootstrap_state`, and it never fails a query:
@@ -313,11 +312,9 @@ recall is what the caller actually asked for, and a discovery problem has no
 business breaking it. `--force` re-sweeps, and re-queues only what genuinely
 changed.
 
-Attribution falls back honestly. A project directory that no longer exists
-can't be resolved from its encoded name, so it keeps the last path segment;
-`~/.claude/company-memory/projects/<work-dir>.md` describes a container rather
-than a project and lands under that container's name. Fix any of it with
-`echo-memory reattribute` after the facts land.
+Attribution falls back honestly: a project directory that no longer exists
+can't be resolved from its encoded name, so it keeps the last path segment.
+Fix any of it with `echo-memory reattribute` after the facts land.
 
 Like the capture hook, **this queues, it does not extract** - see below.
 

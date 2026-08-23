@@ -47,15 +47,6 @@ def test_skips_the_memory_index(tmp_path):
     assert not any(f["path"].name == "MEMORY.md" for f in found)
 
 
-def test_company_digests_are_attributed_from_their_path_line(tmp_path):
-    home, _ = _home(tmp_path)
-
-    found = bootstrap.discover(home)
-
-    digests = {f["project"] for f in found if f["source"] == bootstrap.COMPANY_MEMORY}
-    assert digests == {"eigen", "dugout"}
-
-
 def test_project_instructions_are_found_in_the_project_itself(tmp_path):
     home, work = _home(tmp_path)
     (work / "eigen" / "CLAUDE.md").write_text("# eigen instructions")
@@ -93,6 +84,17 @@ def test_unknown_gstack_project_keeps_its_own_name(tmp_path):
     assert gstack[0]["project"] == "some-other-thing"
 
 
+def test_company_memory_digests_are_no_longer_swept(tmp_path):
+    """The company-memory tool was uninstalled; its digests were derivative of
+    the per-project memory files that are still swept."""
+    home, _ = _home(tmp_path)
+
+    found = bootstrap.discover(home)
+
+    assert not any("company-memory" in str(f["path"]) for f in found)
+    assert "company-memory" not in bootstrap.SOURCES
+
+
 def test_sources_can_be_limited(tmp_path):
     home, _ = _home(tmp_path)
 
@@ -101,14 +103,17 @@ def test_sources_can_be_limited(tmp_path):
     assert {f["source"] for f in found} == {bootstrap.CLAUDE_MEMORY}
 
 
-def test_hand_written_notes_are_ordered_before_generated_digests(tmp_path):
-    home, _ = _home(tmp_path)
+def test_hand_written_notes_are_ordered_before_other_sources(tmp_path):
+    home, work = _home(tmp_path)
+    (work / "eigen" / "CLAUDE.md").write_text("# eigen instructions")
 
     found = bootstrap.discover(home)
 
-    first_digest = next(i for i, f in enumerate(found) if f["source"] == bootstrap.COMPANY_MEMORY)
+    first_other = next(
+        i for i, f in enumerate(found) if f["source"] != bootstrap.CLAUDE_MEMORY
+    )
     last_memory = max(i for i, f in enumerate(found) if f["source"] == bootstrap.CLAUDE_MEMORY)
-    assert last_memory < first_digest
+    assert last_memory < first_other
 
 
 def test_a_path_reachable_two_ways_is_queued_once(tmp_path):
