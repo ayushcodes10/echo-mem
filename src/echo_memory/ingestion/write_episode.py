@@ -8,6 +8,7 @@ import uuid
 
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.logging import get_logger, log_write_episode
+from echo_memory.infra.project import UNKNOWN as PROJECT_UNKNOWN
 from echo_memory.ingestion.resolution import resolve_entities
 from echo_memory.retrieval.query_memory import query_memory
 
@@ -123,6 +124,8 @@ def _create_edge(
     episode_id: str,
     t_valid: int,
     embedder,
+    project: str,
+    agent_id: str,
 ) -> str:
     row = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
@@ -130,6 +133,7 @@ def _create_edge(
             CREATE (a)-[e:FACT {{
                 relation_type: $rel, fact: $fact, confidence: $confidence,
                 t_valid: $t_valid, t_invalid: null, group_id: $gid,
+                project: $project, agent_id: $agent_id,
                 provenance: {{session_id: $session_id, source_episode_id: $episode_id}}
             }}]->(b)
             RETURN id(e)
@@ -146,6 +150,8 @@ def _create_edge(
                     "gid": group_id,
                     "session_id": session_id,
                     "episode_id": episode_id,
+                    "project": project,
+                    "agent_id": agent_id,
                 }
             ),
         ),
@@ -191,6 +197,8 @@ def write_episode(
     facts: list[dict],
     resolutions: dict[str, dict] | None,
     embedder,
+    project: str = PROJECT_UNKNOWN,
+    agent_id: str = PROJECT_UNKNOWN,
 ) -> dict:
     resolutions = resolutions or {}
     start = time.perf_counter()
@@ -250,7 +258,8 @@ def write_episode(
             )
 
             new_edge_id = _create_edge(
-                conn, group_id, source_id, target_id, fact, session_id, episode_id, now, embedder
+                conn, group_id, source_id, target_id, fact, session_id, episode_id, now,
+                embedder, project, agent_id,
             )
             edges_created.append(new_edge_id)
 
