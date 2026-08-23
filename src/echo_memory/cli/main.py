@@ -26,8 +26,8 @@ from echo_memory.cli.trial import render_check, render_log, render_recorded, ren
 from echo_memory.cli.why import render_history
 from echo_memory.infra.config import ConfigError, load_config
 from echo_memory.infra.db import connect
-from echo_memory.infra.project import detect_project
-from echo_memory.infra.project import normalize as normalize_project
+from echo_memory.infra.project import decode_claude_project_dir, detect_project
+from echo_memory.ingestion import bootstrap as bootstrap_mod
 from echo_memory.ingestion import capture
 from echo_memory.trial import check, observations
 
@@ -106,8 +106,24 @@ def _add_project_parsers(sub) -> None:
         "--done", nargs="+", metavar="PATH", help="mark these paths as ingested"
     )
 
+    boot = sub.add_parser(
+        "bootstrap", help="import the work that already exists on this machine"
+    )
+    boot.add_argument(
+        "--force", action="store_true", help="sweep again even if discovery has already run"
+    )
+    boot.add_argument("--dry-run", action="store_true", help="list what would be queued, queue nothing")
+    boot.add_argument(
+        "--only", action="append", choices=list(bootstrap_mod.SOURCES), metavar="SOURCE",
+        help=f"limit to one source; repeatable ({', '.join(bootstrap_mod.SOURCES)})",
+    )
+
     inst = sub.add_parser(
         "install", help="wire Echo Memory into one project instead of every project"
+    )
+    inst.add_argument(
+        "--no-bootstrap", action="store_true",
+        help="skip the first-run sweep for work that already exists on this machine",
     )
     inst.add_argument(
         "root", nargs="?", type=Path, default=Path("."),
@@ -266,9 +282,7 @@ def _project_for_memory_file(path: Path, fallback: str) -> str:
     if "projects" in parts:
         encoded = parts[parts.index("projects") + 1 :]
         if encoded:
-            tail = encoded[0].rstrip("-").split("-")[-1]
-            if tail:
-                return normalize_project(tail)
+            return decode_claude_project_dir(encoded[0])
     return fallback
 
 
@@ -351,9 +365,13 @@ def _run_project_command(args, config, conn) -> int:
         if not queued:
             print("Nothing pending: every noticed memory file is in the graph.")
             return 0
-        print(f"{len(queued)} memory file(s) noticed but not yet in the graph:")
+        print(f"{len(queued)} document(s) noticed but not yet in the graph:")
+        current_project = None
         for item in queued:
-            print(f"  [{item['project']}] {item['path']}")
+            if item["project"] != current_project:
+                current_project = item["project"]
+                print(f"\n  {current_project}")
+            print(f"    ({item['source']}) {item['path']}")
         print(
             "\nRead each one and call write_episode with the entities and facts it states, "
             "then: echo-memory pending --done <path>..."
@@ -380,6 +398,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "trial":
         return _run_trial(args, config, connect(config.database_url))
 
+    if args.command == "bootstrap":
+        conn = connect(config.database_url)
+        sources = tuple(args.only) if args.only else bootstrap_mod.SOURCES
+        if args.dry_run:
+            found = bootstrap_mod.discover(sources=sources)
+            print(f"Would queue {len(found)} document(s):")
+            for item in found:
+                print(f"  [{item['project']}] ({item['source']}) {item['path']}")
+            return 0
+        result = bootstrap_mod.run(conn, sources=sources, force=args.force)
+        print(bootstrap_mod.render(result), end="")
+        return 0
+
     if args.command == "install":
         targets = ("claude", "cursor") if args.targets == "both" else (args.targets,)
         root = args.root.resolve()
@@ -393,6 +424,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 1
         print(render_install(root, project, targets, done), end="")
+        if not args.no_bootstrap:
+            conn = connect(config.database_url)
+            result = bootstrap_mod.run(conn)
+            if not result["skipped"]:
+                print()
+                print(bootstrap_mod.render(result), end="")
         return 0
 
     if args.command in ("dashboard", "reattribute", "notice", "pending"):
