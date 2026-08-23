@@ -194,6 +194,11 @@ def _add_trial_parser(sub) -> None:
         "--all", action="store_true", dest="include_exact",
         help="also review exact-name entity resolutions, excluded by default as near-always correct",
     )
+    check_parser.add_argument(
+        "--all-projects", action="store_true", dest="all_projects",
+        help="also review node pairs spanning unrelated projects, suppressed by default "
+             "because two codebases sharing vocabulary is not a split entity",
+    )
 
     trial.add_parser("log", help="every trial observation recorded so far")
 
@@ -207,7 +212,9 @@ def _run_trial(args, config, conn) -> int:
         return 0
 
     if args.trial_command == "check":
-        report = check.build_report(conn, config, include_exact=args.include_exact)
+        report = check.build_report(
+            conn, config, include_exact=args.include_exact, all_projects=args.all_projects
+        )
         print(render_check(report), end="")
         return 0
 
@@ -238,7 +245,8 @@ def _run_trial(args, config, conn) -> int:
     try:
         if "node_ids" in fields:
             fields["node_ids"] = observations.sort_pair(fields["node_ids"])
-        observation_id = observations.record(conn, group_id, kind, args.note, **fields)
+        recorded = observations.record(conn, group_id, kind, args.note, **fields)
+        observation_id = recorded["id"]
     except observations.TrialError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -258,6 +266,10 @@ def _run_trial(args, config, conn) -> int:
             file=sys.stderr,
         )
         return 1
+
+    if not recorded["created"]:
+        print(f"Already recorded as #{observation_id}; nothing changed.")
+        return 0
 
     print(render_recorded(kind, observation_id, args.note))
     if kind == observations.RECALL_SAVE and args.written_by == (

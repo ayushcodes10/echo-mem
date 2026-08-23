@@ -130,13 +130,43 @@ echo-memory trial save "..." --from cursor     # --from is the tool that wrote t
                                                # --into defaults to ECHO_MEMORY_AGENT_ID
 ```
 
+### Recording a recall save from the agent
+
+The bar that matters is "3+ real instances where a recalled fact saved re-explaining
+something to a different tool". That sat at 0/3 for three days, not because recall was
+broken but because logging one meant noticing, switching to a terminal and typing a CLI
+command. `write_episode` fires dozens of times a day precisely because an agent can call
+it inline, so recall saves now have the same affordance:
+
+```
+record_recall_save(scope="shared", note="...", written_by="cursor")
+```
+
+`written_by` is the tool that recorded the fact (it is on every `query_memory` result as
+`agent_id`); `recalled_by` defaults to the server's own agent id. Both are required -
+without them the "to a different tool" clause cannot be evaluated. A same-tool save is
+recorded but does not count toward the bar. Recording the identical note twice is a
+no-op, so a retry after an error is safe.
+
+**This makes the gate agent-reported rather than human-judged.** That is a deliberate
+tradeoff: the alternative, an agent-proposes/human-confirms flow, keeps the evidentiary
+rigour but reintroduces exactly the friction that produced 0/3. The mitigations are that
+`written_by` is mandatory, same-tool saves never count, an identical retry cannot move
+the counter, and every note stays readable in `echo-memory trial log`. **Read the log
+before declaring the gate met** - the count alone is a self-report from the system under
+test.
+
 `trial check` surfaces two kinds of open item, each printed with the exact command that
 records a verdict on it:
 
 - **Similar nodes that stayed separate** - one entity possibly split in two. Candidates
   are pairs scoring above the resolver's own `LOW_THRESHOLD`, i.e. pairs it would have
   flagged as ambiguous had they met in one call (see `ingestion/resolution.py`'s
-  documented in-batch limitation). Judge with `trial dup <a> <b> "<why>"` or
+  documented in-batch limitation). **Pairs spanning unrelated projects are suppressed by
+  default**: `dugout-be` and `Eigon` scoring 0.6 is two codebases sharing vocabulary, not
+  a split entity. The suppressed count is always printed, and `--all-projects` reviews
+  them. A node referenced from several projects still counts as same-project with either
+  side, since it genuinely belongs to both. Judge with `trial dup <a> <b> "<why>"` or
   `trial not-dup <a> <b>`.
 - **Entity resolutions not yet reviewed** - two entities possibly merged into one. Judge
   with `trial merge-ok <audit_id>` or `trial bad-merge <audit_id> "<why>"`. Exact-name

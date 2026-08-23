@@ -23,6 +23,7 @@ import json
 from datetime import UTC, date, datetime
 
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
+from echo_memory.infra.project import UNKNOWN as UNKNOWN_PROJECT
 from echo_memory.ingestion.resolution import LOW_THRESHOLD
 from echo_memory.trial import observations
 
@@ -53,6 +54,29 @@ def _names_for(conn, node_ids: list[str]) -> dict[str, str]:
     }
 
 
+def _projects_by_node(conn, group_id: str) -> dict[str, set[str]]:
+    """Which projects talk about each node.
+
+    A node has no project of its own - `project` lives on the edge, because a
+    fact is authored in one project while a node like Postgres can be
+    referenced from several (see migration 0003). So a node's projects are
+    derived from the facts it takes part in."""
+    rows = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH (a)-[e:FACT {{group_id: $gid}}]->(b)
+            WHERE e.t_invalid IS NULL
+            RETURN id(a), id(b), e.project
+        $$, %s) AS (source_id agtype, target_id agtype, project agtype)""",
+        (json.dumps({"gid": group_id}),),
+    ).fetchall()
+    by_node: dict[str, set[str]] = {}
+    for source_id, target_id, project in rows:
+        name = _unquote(project) or UNKNOWN_PROJECT
+        by_node.setdefault(str(source_id), set()).add(name)
+        by_node.setdefault(str(target_id), set()).add(name)
+    return by_node
+
+
 def _judged_pairs(conn, group_id: str) -> set[tuple[str, str]]:
     rows = conn.execute(
         """SELECT node_ids FROM public.trial_observation
@@ -63,10 +87,20 @@ def _judged_pairs(conn, group_id: str) -> set[tuple[str, str]]:
 
 
 def duplicate_candidates(
-    conn, group_id: str, threshold: float = LOW_THRESHOLD
+    conn, group_id: str, threshold: float = LOW_THRESHOLD, all_projects: bool = False
 ) -> list[dict]:
     """Node pairs similar enough to be one entity split in two, minus any pair
-    already judged either way. Sorted most-similar first."""
+    already judged either way.
+
+    Same-project pairs come first, because those are the ones that plausibly
+    are one entity: `dugout-be` and `Eigon` scoring 0.6 is two unrelated
+    codebases sharing vocabulary, not a split entity. Cross-project pairs are
+    suppressed by default rather than dropped - `all_projects=True` returns
+    them, and the count is always reported so a suppressed backlog can never
+    read as an empty one.
+
+    This is only possible because migration 0003 put `project` on every fact.
+    Before that the whole list was undifferentiated."""
     rows = conn.execute(
         """
         SELECT a.node_id::text, near.node_id::text, near.similarity
@@ -96,15 +130,26 @@ def duplicate_candidates(
     if not open_pairs:
         return []
 
+    projects = _projects_by_node(conn, group_id)
     names = _names_for(conn, sorted({nid for pair in open_pairs for nid in pair}))
-    return [
-        {
-            "node_ids": list(pair),
-            "names": [names.get(pair[0], "?"), names.get(pair[1], "?")],
-            "similarity": score,
-        }
-        for pair, score in sorted(open_pairs.items(), key=lambda kv: -kv[1])
-    ]
+    candidates = []
+    for pair, score in open_pairs.items():
+        shared = projects.get(pair[0], set()) & projects.get(pair[1], set())
+        candidates.append(
+            {
+                "node_ids": list(pair),
+                "names": [names.get(pair[0], "?"), names.get(pair[1], "?")],
+                "similarity": score,
+                "same_project": bool(shared),
+                "projects": sorted(
+                    projects.get(pair[0], set()) | projects.get(pair[1], set())
+                ),
+            }
+        )
+    if not all_projects:
+        candidates = [c for c in candidates if c["same_project"]]
+    # Same-project first, then most similar within each group.
+    return sorted(candidates, key=lambda c: (not c["same_project"], -c["similarity"]))
 
 
 def unreviewed_resolutions(conn, group_id: str, include_exact: bool = False) -> list[dict]:
@@ -152,7 +197,17 @@ def _elapsed(trial: dict, today: date) -> dict:
     }
 
 
-def build_report(conn, config, today: date | None = None, include_exact: bool = False) -> dict:
+def suppressed_pair_count(conn, group_id: str) -> int:
+    """How many open pairs are hidden because they span unrelated projects.
+    Always reported, so a suppressed backlog never renders as an empty one."""
+    everything = duplicate_candidates(conn, group_id, all_projects=True)
+    return sum(1 for c in everything if not c["same_project"])
+
+
+def build_report(
+    conn, config, today: date | None = None, include_exact: bool = False,
+    all_projects: bool = False,
+) -> dict:
     """Criterion 6 as it stands right now, across both scopes: the trial clock,
     the recorded tallies, and what's still waiting on a human."""
     today = today or datetime.now(UTC).date()
@@ -161,10 +216,14 @@ def build_report(conn, config, today: date | None = None, include_exact: bool = 
     trial = observations.get_trial(conn)
     open_items = {
         scope: {
-            "duplicate_candidates": duplicate_candidates(conn, config.group_id(scope)),
+            "duplicate_candidates": duplicate_candidates(
+                conn, config.group_id(scope), all_projects=all_projects
+            ),
             "unreviewed_resolutions": unreviewed_resolutions(
                 conn, config.group_id(scope), include_exact=include_exact
             ),
+            "suppressed_pairs": 0 if all_projects
+            else suppressed_pair_count(conn, config.group_id(scope)),
         }
         for scope in ("solo", "shared")
     }
@@ -176,6 +235,7 @@ def build_report(conn, config, today: date | None = None, include_exact: bool = 
         "open": open_items,
         "n_open_pairs": sum(len(s["duplicate_candidates"]) for s in open_items.values()),
         "n_unreviewed": sum(len(s["unreviewed_resolutions"]) for s in open_items.values()),
+        "n_suppressed_pairs": sum(s["suppressed_pairs"] for s in open_items.values()),
         "met": {
             "saves": tallies["cross_tool_saves"] >= observations.REQUIRED_SAVES,
             "duplicates": tallies["duplicates"] <= observations.MAX_DUPLICATES,

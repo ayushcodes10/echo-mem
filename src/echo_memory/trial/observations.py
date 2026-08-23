@@ -8,6 +8,8 @@ docs/designs/echo-memory-design.md's Success Criteria, criterion 6."""
 
 from datetime import date
 
+from echo_memory.ingestion.write_episode import MAX_STRING_LEN
+
 RECALL_SAVE = "recall_save"
 DUPLICATE_NODE = "duplicate_node"
 NOT_DUPLICATE = "not_duplicate"
@@ -29,6 +31,12 @@ DEFAULT_CAP_DAYS = 21
 
 class TrialError(Exception):
     pass
+
+
+# Recall-save notes reuse write_episode's cap rather than inventing a second
+# limit. Until now this writer was CLI-only, where nobody pastes a megabyte;
+# an MCP tool hands the column to an agent, and agents paste large things.
+MAX_NOTE_LEN = MAX_STRING_LEN
 
 
 def sort_pair(node_ids: list[str]) -> list[str]:
@@ -70,20 +78,57 @@ def record(
     recalled_by: str | None = None,
     node_ids: list[str] | None = None,
     audit_entry_id: int | None = None,
-) -> int:
+) -> dict:
+    """Record one observation. Returns {"id": int, "created": bool}.
+
+    `created` is False only for a recall save that duplicates one already
+    recorded - an agent retrying after a timeout, or logging the same thing
+    twice in one turn. Every other kind still raises on conflict, because a
+    second verdict on a node pair or a merge review is a real disagreement and
+    silently keeping the first one would hide it."""
     if kind not in KINDS:
         raise TrialError(f"unknown observation kind {kind!r}, expected one of {', '.join(KINDS)}")
-    if not note.strip():
+    note = note.strip()
+    if not note:
         raise TrialError("an observation needs a note: the whole value here is being able to read back why")
+    if len(note) > MAX_NOTE_LEN:
+        raise TrialError(f"note too long: {len(note)} > {MAX_NOTE_LEN} characters")
+    if kind == RECALL_SAVE and not (written_by and recalled_by):
+        # Without both tools the "to a different tool" clause can't be
+        # evaluated, and NULL written_by would also slip past the unique index
+        # that stops double-counting (NULLs are distinct). See migration 0005.
+        raise TrialError(
+            "a recall save needs both written_by and recalled_by: criterion 6 counts an "
+            "instance only when a fact written by one tool saved re-explaining to another"
+        )
+
+    if kind == RECALL_SAVE:
+        row = conn.execute(
+            """INSERT INTO public.trial_observation
+                   (kind, group_id, note, written_by, recalled_by)
+               VALUES (%s, %s, %s, %s, %s)
+               ON CONFLICT (group_id, written_by, note) WHERE kind = 'recall_save'
+                   DO NOTHING
+               RETURNING id""",
+            (kind, group_id, note, written_by, recalled_by),
+        ).fetchone()
+        if row is not None:
+            return {"id": row[0], "created": True}
+        existing = conn.execute(
+            """SELECT id FROM public.trial_observation
+               WHERE kind = 'recall_save' AND group_id = %s AND written_by = %s AND note = %s""",
+            (group_id, written_by, note),
+        ).fetchone()
+        return {"id": existing[0], "created": False}
 
     row = conn.execute(
         """INSERT INTO public.trial_observation
                (kind, group_id, note, written_by, recalled_by, node_ids, audit_entry_id)
            VALUES (%s, %s, %s, %s, %s, %s, %s)
            RETURNING id""",
-        (kind, group_id, note.strip(), written_by, recalled_by, node_ids, audit_entry_id),
+        (kind, group_id, note, written_by, recalled_by, node_ids, audit_entry_id),
     ).fetchone()
-    return row[0]
+    return {"id": row[0], "created": True}
 
 
 def list_observations(conn, group_ids: list[str]) -> list[dict]:
