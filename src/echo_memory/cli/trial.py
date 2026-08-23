@@ -79,6 +79,13 @@ def render_criterion_six(report: dict, indent: str = "  ", show_hint: bool = Tru
             waiting.append(f"{report['n_unreviewed']} entity resolution(s)")
         hint = " - run `echo-memory trial check`" if show_hint else ""
         lines.append(f"{indent}! {' and '.join(waiting)} awaiting review{hint}")
+    if report.get("n_suppressed_pairs"):
+        # Always shown, even when nothing else is waiting: a hidden backlog
+        # that renders as an empty list is worse than a visible one.
+        lines.append(
+            f"{indent}  ({report['n_suppressed_pairs']} more pair(s) span unrelated "
+            "projects, hidden by default - add --all-projects to review them)"
+        )
     return lines
 
 
@@ -100,7 +107,13 @@ def render_check(report: dict) -> str:
             for pair in pairs:
                 a_id, b_id = pair["node_ids"]
                 a_name, b_name = pair["names"]
-                lines.append(f"    {a_name}  <->  {b_name}   similarity {pair['similarity']:.3f}")
+                where = " ".join(pair.get("projects", []))
+                marker = "" if pair.get("same_project", True) else "  [cross-project]"
+                lines.append(
+                    f"    {a_name}  <->  {b_name}   similarity {pair['similarity']:.3f}{marker}"
+                )
+                if where:
+                    lines.append(f"      in: {where}")
                 lines.append(
                     f"      same entity:  echo-memory --scope {scope} trial dup "
                     f'{a_id} {b_id} "<why>"'
@@ -128,7 +141,13 @@ def render_check(report: dict) -> str:
             lines.append("")
 
     if not any_open:
-        lines.append("Nothing awaiting review.")
+        if report.get("n_suppressed_pairs"):
+            lines.append(
+                f"Nothing awaiting review in-project. {report['n_suppressed_pairs']} pair(s) "
+                "span unrelated projects and are hidden; add --all-projects to see them."
+            )
+        else:
+            lines.append("Nothing awaiting review.")
         lines.append("")
 
     lines.append(
