@@ -8,7 +8,7 @@ from mcp.server.mcpserver import MCPServer
 
 from echo_memory.audit.get_audit_log import get_audit_log as _get_audit_log
 from echo_memory.infra.config import Config, ConfigError, load_config
-from echo_memory.infra.logging import get_logger
+from echo_memory.infra.logging import configure_logging, get_logger
 from echo_memory.infra.pool import make_pool
 from echo_memory.ingestion import bootstrap as bootstrap_mod
 from echo_memory.ingestion import capture
@@ -52,6 +52,8 @@ _state = ServerState()
 
 
 def startup(config: Config | None = None, embedder: Embedder | None = None) -> None:
+    # Structured logs to stderr. stdout is the MCP protocol channel.
+    configure_logging()
     _state.config = config or load_config()
     _state.pool = make_pool(_state.config.database_url)
     _state.embedder = embedder or LocalEmbedder()
