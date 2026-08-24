@@ -1,4 +1,4 @@
-"""echo-memory trial: rendering for the v1a exit-criteria instrumentation.
+"""echo-memory trial: the trial subcommand - what it does and how it reads.
 
 Every open item prints the exact command that records a verdict on it. That's
 deliberate: the reason criterion 6 went untracked for the first days of the
@@ -6,7 +6,12 @@ trial isn't that anyone disagreed it mattered, it's that recording a judgement
 had no obvious next keystroke. See trial/check.py for what counts as an open
 item and trial/observations.py for what gets stored."""
 
-from echo_memory.trial import observations
+import sys
+from datetime import UTC, datetime
+
+import psycopg
+
+from echo_memory.trial import check, observations
 
 _KIND_LABELS = {
     observations.RECALL_SAVE: "recall save",
@@ -173,3 +178,82 @@ def render_log(entries: list[dict]) -> str:
         if e["audit_entry_id"]:
             lines.append(f"    audit entry #{e['audit_entry_id']}")
     return "\n".join(lines) + "\n"
+
+
+def run(args, config, conn) -> int:
+    group_id = config.group_id(args.scope)
+
+    if args.trial_command == "start":
+        started_on = args.on or datetime.now(UTC).date()
+        print(render_start(observations.start_trial(conn, started_on, args.cap_days)))
+        return 0
+
+    if args.trial_command == "check":
+        report = check.build_report(
+            conn, config, include_exact=args.include_exact, all_projects=args.all_projects
+        )
+        print(render_check(report), end="")
+        return 0
+
+    if args.trial_command == "log":
+        group_ids = [config.group_id(scope) for scope in ("solo", "shared")]
+        print(render_log(observations.list_observations(conn, group_ids)), end="")
+        return 0
+
+    if args.trial_command == "save":
+        kind = observations.RECALL_SAVE
+        fields = {
+            "written_by": args.written_by,
+            "recalled_by": args.recalled_by or config.agent_id,
+        }
+    elif args.trial_command in ("dup", "not-dup"):
+        kind = (
+            observations.DUPLICATE_NODE
+            if args.trial_command == "dup"
+            else observations.NOT_DUPLICATE
+        )
+        fields = {"node_ids": [args.node_a, args.node_b]}
+    else:
+        kind = (
+            observations.BAD_MERGE if args.trial_command == "bad-merge" else observations.MERGE_OK
+        )
+        fields = {"audit_entry_id": args.audit_entry_id}
+
+    try:
+        if "node_ids" in fields:
+            fields["node_ids"] = observations.sort_pair(fields["node_ids"])
+        recorded = observations.record(conn, group_id, kind, args.note, **fields)
+        observation_id = recorded["id"]
+    except observations.TrialError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except psycopg.errors.UniqueViolation:
+        # The unique indexes exist so a second verdict on the same pair or the
+        # same resolution can't quietly overwrite the first one.
+        print(
+            "error: that pair or resolution already has a recorded verdict "
+            "(see `echo-memory trial log`)",
+            file=sys.stderr,
+        )
+        return 1
+    except psycopg.errors.ForeignKeyViolation:
+        print(
+            f"error: no audit entry #{args.audit_entry_id} "
+            "(ids come from `echo-memory trial check`)",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not recorded["created"]:
+        print(f"Already recorded as #{observation_id}; nothing changed.")
+        return 0
+
+    print(render_recorded(kind, observation_id, args.note))
+    if kind == observations.RECALL_SAVE and args.written_by == (
+        args.recalled_by or config.agent_id
+    ):
+        print(
+            "note: written and recalled by the same tool, so this doesn't count toward "
+            "criterion 6's cross-tool bar."
+        )
+    return 0

@@ -19,8 +19,11 @@ invalidated versions would leave the inspector able to show only the end
 state - the same failure `echo-memory why` exists to fix."""
 
 import json
+from pathlib import Path
 
+from echo_memory.cli.dashboard_html import render_dashboard
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
+from echo_memory.infra.db import connect
 from echo_memory.trial import check
 
 
@@ -153,3 +156,53 @@ def fetch_dashboard(conn, config, today=None) -> dict:
         "criterion_six": check.build_report(conn, config, today=today),
         "user_id": config.user_id,
     }
+
+
+def serve(config, port: int) -> int:
+    """Regenerates on every request: a snapshot file is stale the moment the
+    next episode lands, and the whole point of a dashboard is that you leave it
+    open."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path not in ("/", "/index.html"):
+                self.send_error(404)
+                return
+            conn = connect(config.database_url)
+            try:
+                body = render_dashboard(fetch_dashboard(conn, config)).encode("utf-8")
+            finally:
+                conn.close()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    # Localhost only, same posture as the MCP server: this page is every fact
+    # the user has ever recorded, across every project.
+    server = HTTPServer(("127.0.0.1", port), Handler)
+    print(f"Echo Memory dashboard on http://127.0.0.1:{port}  (ctrl-C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    return 0
+
+
+def run(args, config, conn) -> int:
+    if args.serve:
+        return serve(config, args.port)
+    out = args.out or Path("memory-dashboard.html")
+    data = fetch_dashboard(conn, config)
+    out.write_text(render_dashboard(data))
+    n_facts = sum(len(s["facts"]) for s in data["scopes"].values())
+    print(
+        f"Wrote {out} ({n_facts} facts across {len(data['projects'])} projects). "
+        "Use --serve to keep it live instead."
+    )
+    return 0

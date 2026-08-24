@@ -91,7 +91,7 @@ echo-memory --scope solo why <fact_id>          # plain-language audit trail for
 echo-memory --scope solo export --out ./export  # markdown dump of a scope's memory
 echo-memory --scope solo graph                  # terminal view of a scope's memory graph
 echo-memory --scope solo graph --watch          # same, live-refreshing every 2s (--interval to change)
-echo-memory --scope solo graph --html out.html  # self-contained interactive HTML snapshot, open in a browser
+echo-memory --scope solo graph --html out.html  # alias for `dashboard --out` (every scope, not just --scope)
 echo-memory status                              # v1a trial status: which Success Criteria are met so far
 echo-memory trial check                         # criterion 6: the gate, and what's awaiting your judgement
 echo-memory trial start                         # start the 3-week trial clock (--on YYYY-MM-DD to backdate)
@@ -177,12 +177,10 @@ on the same one is refused rather than silently overwriting the first. A save wh
 `--from` and `--into` are the same tool is recorded but doesn't count toward the bar: the
 criterion is specifically about a *different* tool not needing to be re-told.
 
-`--html` writes a single HTML file with a draggable force-directed graph (nodes colored by
-type, click one to jump to its facts) plus the full fact list grouped by source node. It's
-a one-time snapshot, not live like `--watch` (`--watch` and `--html` are mutually
-exclusive); open the file directly in a browser, no server needed. Node "type" values are
-free text the calling agent chose, not a fixed enum, so colors are assigned deterministically
-by hashing the type string, not a hardcoded palette per type name.
+`--html` is now an alias for `dashboard --out`, kept so a command shipped last week still
+works. Two behaviour changes it prints a note about: it renders **every** scope rather than
+just `--scope`, and it includes superseded facts as history rather than hiding them. Prefer
+`echo-memory dashboard` going forward.
 
 `graph` is a read-only observability aid, not a CEO-plan scope item: it prints each active
 fact as `source --[relation]--> target` plus any nodes with no active facts, so you can see
