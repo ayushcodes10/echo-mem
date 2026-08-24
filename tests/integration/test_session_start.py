@@ -62,15 +62,22 @@ def test_another_projects_facts_are_not_in_this_projects_brief(migrated_db):
     assert brief["n_facts"] == 0
 
 
-def test_an_empty_project_still_says_memory_is_available(migrated_db):
+def test_an_analysed_project_with_no_facts_still_says_memory_is_available(migrated_db):
+    """Once a comprehension pass has run, a project that still has no facts
+    gets the plain availability line rather than being asked to analyse again."""
+    from echo_memory.cli import analyse
+
     config = _seed(migrated_db, project="eigen")
+    conn = connect(migrated_db)
+    analyse.mark_analysed(conn, "brand-new", 0, [])
 
     text = session_start.render_brief(
-        session_start.build_brief(connect(migrated_db), config, "brand-new")
+        session_start.build_brief(conn, config, "brand-new")
     )
 
     assert "nothing recorded yet" in text
     assert "query_memory" in text
+    assert "comprehension pass" not in text
 
 
 def test_the_brief_surfaces_the_pending_queue(migrated_db, tmp_path):
