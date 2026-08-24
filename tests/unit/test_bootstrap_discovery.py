@@ -164,3 +164,31 @@ def test_parse_learnings_skips_malformed_lines(tmp_path):
     path.write_text('{"insight": "one"}\nnot json\n\n{"insight": "two"}\n')
 
     assert [r["insight"] for r in bootstrap.parse_learnings(path)] == ["one", "two"]
+
+
+def test_decoder_recovers_a_directory_name_containing_a_dot(tmp_path):
+    """Claude Code's encoding collapses dots as well as separators, so
+    work/ayushbasral.com and work/ayushbasral-com encode identically. An earlier
+    decoder only rejoined with dashes, found nothing on disk, and silently filed
+    the project as "com"."""
+    dotted = tmp_path / "work" / "ayushbasral.com"
+    dotted.mkdir(parents=True)
+    encoded = str(dotted).replace("/", "-").replace(".", "-")
+
+    assert decode_claude_project_dir(encoded) == "ayushbasral.com"
+
+
+def test_decoder_handles_dots_in_a_parent_directory(tmp_path):
+    nested = tmp_path / "my.stuff" / "repo"
+    nested.mkdir(parents=True)
+    encoded = str(nested).replace("/", "-").replace(".", "-")
+
+    assert decode_claude_project_dir(encoded) == "repo"
+
+
+def test_encoded_segments_splits_on_both_separators():
+    from echo_memory.infra.project import encoded_segments
+
+    assert encoded_segments("ayushbasral.com") == ["ayushbasral", "com"]
+    assert encoded_segments("ayush-trade-bot") == ["ayush", "trade", "bot"]
+    assert encoded_segments("run_app_mobile") == ["run_app_mobile"]

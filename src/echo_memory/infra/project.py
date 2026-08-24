@@ -74,25 +74,49 @@ def detect_project(cwd: str | None = None, env: dict | None = None) -> str:
     return normalize(name) if name else UNKNOWN
 
 
-def _walk(base: Path, parts: list[str], budget: list[int]) -> Path | None:
-    """Greedy longest-match descent with backtracking.
+def encoded_segments(name: str) -> list[str]:
+    """Split a real directory name the way Claude Code's encoding would.
 
-    Longest-first keeps a hyphenated directory intact when one exists
-    (ayush-trade-bot), and backtracking still finds the nested reading when it
-    doesn't (yallahaji/Backend). budget bounds the search: the input is an
-    untrusted directory name, and a pathological one shouldn't be able to spin
-    the filesystem."""
+    The encoding collapses both path separators and dots into dashes, so
+    `work/ayushbasral.com` and `work/ayushbasral/com` and `work/ayushbasral-com`
+    all encode identically. Splitting a real name on the same characters is how
+    a candidate directory is matched back against encoded parts."""
+    return [segment for segment in re.split(r"[-.]", name) if segment]
+
+
+def _walk(base: Path, parts: list[str], budget: list[int]) -> Path | None:
+    """Descend by matching encoded parts against directories that actually
+    exist, longest match first.
+
+    Reading the filesystem beats guessing where the separators were. An earlier
+    version rejoined parts with dashes and tested each split, which could not
+    recover a name containing a dot: `ayushbasral.com` encodes to
+    `...-ayushbasral-com`, no dash-joined candidate exists on disk, and the
+    project silently became "com".
+
+    Longest match first keeps a hyphenated or dotted directory intact when one
+    exists; backtracking still finds the nested reading when it does not.
+    budget bounds the search, since the input is an untrusted directory name."""
     if not parts:
         return base
-    for k in range(len(parts), 0, -1):
-        if budget[0] <= 0:
-            return None
+    if budget[0] <= 0:
+        return None
+    try:
+        children = [child for child in base.iterdir() if child.is_dir()]
+    except OSError:
+        return None
+
+    matches = []
+    for child in children:
+        segments = encoded_segments(child.name)
+        if segments and parts[: len(segments)] == segments:
+            matches.append((len(segments), child))
+
+    for length, child in sorted(matches, key=lambda pair: -pair[0]):
         budget[0] -= 1
-        child = base / "-".join(parts[:k])
-        if child.is_dir():
-            found = _walk(child, parts[k:], budget)
-            if found is not None:
-                return found
+        found = _walk(child, parts[length:], budget)
+        if found is not None:
+            return found
     return None
 
 

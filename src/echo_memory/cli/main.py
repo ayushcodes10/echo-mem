@@ -15,6 +15,7 @@ from echo_memory.audit.get_audit_log import get_fact_history
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import queue as queue_cmd
 from echo_memory.cli import reattribute_cmd
+from echo_memory.cli import session_start as session_start_cmd
 from echo_memory.cli import trial as trial_cmd
 from echo_memory.cli.benchmark import render as render_benchmark
 from echo_memory.cli.benchmark import run as run_benchmark
@@ -104,6 +105,18 @@ def _add_project_parsers(sub) -> None:
     pending.add_argument("--project", metavar="NAME", help="only this project")
     pending.add_argument(
         "--done", nargs="+", metavar="PATH", help="mark these paths as ingested"
+    )
+
+    brief = sub.add_parser(
+        "session-brief",
+        help="what memory knows about this project, for the SessionStart hook",
+    )
+    brief.add_argument(
+        "--hook-json", action="store_true",
+        help="emit Claude Code's SessionStart hook JSON instead of plain text",
+    )
+    brief.add_argument(
+        "--project", metavar="NAME", help="override the detected project"
     )
 
     bench = sub.add_parser(
@@ -242,6 +255,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "trial":
         return trial_cmd.run(args, config, connect(config.database_url))
+
+    if args.command == "session-brief":
+        project = args.project or config.project
+        conn = connect(config.database_url)
+        brief = session_start_cmd.build_brief(conn, config, project)
+        context = session_start_cmd.render_brief(brief)
+        print(session_start_cmd.render_hook_output(context) if args.hook_json else context)
+        return 0
 
     if args.command == "benchmark":
         from echo_memory.ingestion.embeddings import LocalEmbedder
