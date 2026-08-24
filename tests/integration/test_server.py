@@ -116,3 +116,54 @@ def test_different_agents_get_different_solo_scopes(migrated_db):
     result = server.query_memory("solo", "claude-code's fact", 10)
 
     assert result["facts"] == [], "a different agent's solo scope must not see this data"
+
+
+def test_a_database_outage_returns_a_typed_error_not_a_stack_trace(migrated_db, monkeypatch):
+    """PR5 claimed a typed {error} contract end-to-end, but only ConfigError
+    was ever typed: a database failure propagated as a raw exception, so an
+    agent saw a stack trace instead of something it could act on."""
+    import psycopg
+
+    from echo_memory import server
+    from echo_memory.infra.config import Config
+
+    config = Config(user_id="ayush", agent_id="claude-code", database_url=migrated_db)
+    server.startup(config=config, embedder=VectorEmbedder({"anything": REFERENCE}))
+
+    class DeadPool:
+        def connection(self):
+            raise psycopg.OperationalError("connection to server was lost")
+
+    monkeypatch.setattr(server._state, "pool", DeadPool())
+
+    for call in (
+        lambda: server.query_memory("shared", query="anything"),
+        lambda: server.get_audit_log("shared"),
+        lambda: server.record_recall_save("shared", "a save", written_by="cursor"),
+        lambda: server.write_episode("shared", "s", [], []),
+    ):
+        result = call()
+        assert "error" in result, result
+        assert "unavailable" in result["error"]
+
+
+def test_a_programming_error_still_propagates(migrated_db, monkeypatch):
+    """Over-catching would hide a real bug behind an outage story.
+    ProgrammingError is not an OperationalError subclass, so it stays loud."""
+    import psycopg
+    import pytest
+
+    from echo_memory import server
+    from echo_memory.infra.config import Config
+
+    config = Config(user_id="ayush", agent_id="claude-code", database_url=migrated_db)
+    server.startup(config=config, embedder=VectorEmbedder({"anything": REFERENCE}))
+
+    class BuggyPool:
+        def connection(self):
+            raise psycopg.ProgrammingError("syntax error at or near")
+
+    monkeypatch.setattr(server._state, "pool", BuggyPool())
+
+    with pytest.raises(psycopg.ProgrammingError):
+        server.query_memory("shared", query="anything")

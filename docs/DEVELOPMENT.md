@@ -273,6 +273,19 @@ other servers, and a malformed one is refused rather than overwritten. Commit
 the generated files to share the setup with the repo, or gitignore them to keep
 it to yourself.
 
+## Error contract
+
+Every MCP tool returns `{"error": "..."}` rather than raising, for two classes of
+failure: a bad `scope` (`ConfigError`) and a database outage
+(`psycopg.OperationalError`, which covers connection loss, server down, and
+`PoolTimeout` as a subclass). An agent gets something it can act on and relay to
+you, instead of a stack trace.
+
+The catch is deliberately narrow. `ProgrammingError` and `IntegrityError` are
+**not** `OperationalError` subclasses, so a bad query or a violated constraint
+still propagates loudly. Swallowing those into a polite "database unavailable"
+message would hide a real bug behind an outage story.
+
 ## Cost and latency baseline
 
 ```bash
@@ -403,6 +416,33 @@ hook on `Write|Edit` in `~/.claude/settings.json`:
   }
 }
 ```
+
+### PreCompact: catch it before the context goes
+
+`PostToolUse` catches memory files as they're written. It cannot catch what a
+session worked out but never wrote down, and compaction is where that
+disappears. `scripts/precompact-hook.sh` fires immediately before compaction and
+returns `hookSpecificOutput.additionalContext`, which Claude Code injects into
+the model's context — so the reminder reaches the agent at the last moment it
+still has the full conversation:
+
+```json
+{
+  "hooks": {
+    "PreCompact": [
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "/path/to/echo-mem/scripts/precompact-hook.sh" }
+      ]}
+    ]
+  }
+}
+```
+
+It deliberately does **not** touch the database. A hook on the compaction path
+is latency the user waits through, and a reminder that always fires beats a
+richer one that sometimes hangs on a connection — it also keeps working when the
+database is down, which is exactly when you wouldn't want compaction to stall.
+Needs no environment variables for the same reason.
 
 The hook **queues; it does not extract**. Turning prose into entities and facts
 needs a model, and the server never calls one (design doc, MCP tool contract,
