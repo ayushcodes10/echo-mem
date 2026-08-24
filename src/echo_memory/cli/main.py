@@ -12,6 +12,7 @@ from datetime import date
 from pathlib import Path
 
 from echo_memory.audit.get_audit_log import get_fact_history
+from echo_memory.cli import analyse as analyse_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import queue as queue_cmd
 from echo_memory.cli import reattribute_cmd
@@ -105,6 +106,18 @@ def _add_project_parsers(sub) -> None:
     pending.add_argument("--project", metavar="NAME", help="only this project")
     pending.add_argument(
         "--done", nargs="+", metavar="PATH", help="mark these paths as ingested"
+    )
+
+    ana = sub.add_parser(
+        "analyse", help="first-run comprehension pass for an existing project"
+    )
+    ana.add_argument(
+        "--done", action="store_true",
+        help="record that the pass has run, so the session briefing stops asking",
+    )
+    ana.add_argument("--project", metavar="NAME", help="override the detected project")
+    ana.add_argument(
+        "--root", type=Path, help="project directory to read (default: the current one)"
     )
 
     brief = sub.add_parser(
@@ -256,10 +269,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "trial":
         return trial_cmd.run(args, config, connect(config.database_url))
 
+    if args.command == "analyse":
+        project = args.project or config.project
+        root = args.root or Path.cwd()
+        conn = connect(config.database_url)
+        sources = analyse_cmd.find_sources(root)
+        if args.done:
+            group_ids = [config.group_id(sc) for sc in ("solo", "shared")]
+            n = conn.execute(
+                """SELECT count(*) FROM public.audit_entry WHERE group_id = ANY(%s)""",
+                (group_ids,),
+            ).fetchone()[0]
+            analyse_cmd.mark_analysed(conn, project, n, [s["path"] for s in sources])
+            print(f"Recorded a comprehension pass for '{project}'.")
+            return 0
+        if analyse_cmd.has_been_analysed(conn, project):
+            print(f"'{project}' has already had a comprehension pass. Re-run anyway:")
+        print(analyse_cmd.render_instruction(project, sources))
+        return 0
+
     if args.command == "session-brief":
         project = args.project or config.project
         conn = connect(config.database_url)
-        brief = session_start_cmd.build_brief(conn, config, project)
+        brief = session_start_cmd.build_brief(conn, config, project, Path.cwd())
         context = session_start_cmd.render_brief(brief)
         print(session_start_cmd.render_hook_output(context) if args.hook_json else context)
         return 0
