@@ -4,6 +4,7 @@ Runs over stdio by default (mcp.server.mcpserver's MCPServer.run default),
 not a network listener at all, let alone one bound beyond localhost; see
 the design doc's Constraints ("v1 is single-user, local-only")."""
 
+import psycopg
 from mcp.server.mcpserver import MCPServer
 
 from echo_memory.audit.get_audit_log import get_audit_log as _get_audit_log
@@ -111,11 +112,14 @@ def write_episode(
         group_id = _state.config.group_id(scope)
     except ConfigError as e:
         return {"error": str(e)}
-    with _state.pool.connection() as conn:
-        return _write_episode(
-            conn, group_id, session_id, entities, facts, entity_resolutions, _state.embedder,
-            project=_state.config.project, agent_id=_state.config.agent_id,
-        )
+    try:
+        with _state.pool.connection() as conn:
+            return _write_episode(
+                conn, group_id, session_id, entities, facts, entity_resolutions, _state.embedder,
+                project=_state.config.project, agent_id=_state.config.agent_id,
+            )
+    except psycopg.OperationalError as e:
+        return _operational_error(e)
 
 
 @server.tool()
@@ -140,24 +144,44 @@ def query_memory(scope: str, query: str | None = None, top_k: int = 10, digest: 
         group_id = _state.config.group_id(scope)
     except ConfigError as e:
         return {"error": str(e)}
-    with _state.pool.connection() as conn:
-        result = _query_memory(conn, group_id, query, top_k, _state.embedder, digest=digest)
-        _bootstrap_once(conn)
-        queued = capture.pending(conn)
-        if queued:
-            result["pending_ingest"] = {
-                "count": len(queued),
-                "files": [{"path": q["path"], "project": q["project"]} for q in queued[:10]],
-                "instruction": (
-                    "These memory files were written but never recorded as facts. Read each "
-                    "one and call write_episode with what it states, then run "
-                    "`echo-memory pending --done <path>` for each."
-                ),
-            }
-        return result
+    try:
+        with _state.pool.connection() as conn:
+            result = _query_memory(conn, group_id, query, top_k, _state.embedder, digest=digest)
+            _bootstrap_once(conn)
+            queued = capture.pending(conn)
+            if queued:
+                result["pending_ingest"] = {
+                    "count": len(queued),
+                    "files": [{"path": q["path"], "project": q["project"]} for q in queued[:10]],
+                    "instruction": (
+                        "These memory files were written but never recorded as facts. Read "
+                        "each one and call write_episode with what it states, then run "
+                        "`echo-memory pending --done <path>` for each."
+                    ),
+                }
+            return result
+    except psycopg.OperationalError as e:
+        return _operational_error(e)
 
 
 _logger = get_logger("server")
+
+
+def _operational_error(e: psycopg.OperationalError) -> dict:
+    """Turn a database outage into the typed {"error"} shape every tool
+    already uses for ConfigError.
+
+    Deliberately narrow. psycopg.OperationalError covers what is genuinely
+    operational - connection lost, server down, and PoolTimeout, which is a
+    subclass - while ProgrammingError and IntegrityError are NOT subclasses and
+    still propagate. That split matters: swallowing a bad query or a violated
+    constraint into a polite message would hide a real bug behind an outage
+    story, which is the over-catching this exists to avoid.
+
+    The agent gets something it can act on ("the database is unreachable, tell
+    the user") instead of a stack trace it can only relay."""
+    _logger.warning("database_unavailable", extra={"error_type": type(e).__name__})
+    return {"error": f"memory database unavailable: {e}"}
 
 
 def _bootstrap_once(conn) -> None:
@@ -218,15 +242,18 @@ def record_recall_save(
         return {"error": str(e)}
 
     recalled_by = recalled_by or _state.config.agent_id
-    with _state.pool.connection() as conn:
-        try:
-            recorded = _observations.record(
-                conn, group_id, _observations.RECALL_SAVE, note,
-                written_by=written_by, recalled_by=recalled_by,
-            )
-        except _observations.TrialError as e:
-            return {"error": str(e)}
-        counts = _observations.counts(conn, [group_id])
+    try:
+        with _state.pool.connection() as conn:
+            try:
+                recorded = _observations.record(
+                    conn, group_id, _observations.RECALL_SAVE, note,
+                    written_by=written_by, recalled_by=recalled_by,
+                )
+            except _observations.TrialError as e:
+                return {"error": str(e)}
+            counts = _observations.counts(conn, [group_id])
+    except psycopg.OperationalError as e:
+        return _operational_error(e)
 
     cross_tool = written_by != recalled_by
     _logger.info(
@@ -262,8 +289,11 @@ def get_audit_log(scope: str, since: str | None = None) -> dict:
         group_id = _state.config.group_id(scope)
     except ConfigError as e:
         return {"error": str(e)}
-    with _state.pool.connection() as conn:
-        return _get_audit_log(conn, group_id, since)
+    try:
+        with _state.pool.connection() as conn:
+            return _get_audit_log(conn, group_id, since)
+    except psycopg.OperationalError as e:
+        return _operational_error(e)
 
 
 if __name__ == "__main__":
