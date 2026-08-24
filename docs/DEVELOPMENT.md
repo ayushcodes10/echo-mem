@@ -273,6 +273,34 @@ other servers, and a malformed one is refused rather than overwritten. Commit
 the generated files to share the setup with the repo, or gitignore them to keep
 it to yourself.
 
+## Cost and latency baseline
+
+```bash
+echo-memory benchmark              # 5 rounds against a throwaway benchmark group
+echo-memory benchmark --rounds 20
+```
+
+v1a success criterion 5. Writes throwaway probe facts into a dedicated
+`benchmark:scratch` group, never your real memory. Representative local run:
+
+| operation | min | median | max |
+|---|---|---|---|
+| `write_episode` | 12.3ms | 15.1ms | 24.1ms |
+| `query_memory` | 7.8ms | 8.4ms | 30.0ms |
+| query digest | 0.9ms | 0.9ms | 1.4ms |
+| **cold start** (first write in a process) | | **6198ms** | |
+
+**Cold start is reported separately on purpose.** It is the `LocalEmbedder` lazy-loading
+sentence-transformers, and since every session starts its own MCP server process, it is
+paid once per session rather than once per machine. Averaging it into the rest would
+hide a real user-visible latency inside a max column while overstating steady-state cost.
+
+The cost line is the one number here that isn't an estimate: **0 LLM calls per episode,
+0 per query, $0.00 inference cost**, by construction rather than optimisation. Timings
+are a rough local measurement and move with hardware, cache warmth and graph size —
+which is also why nothing in CI asserts on them. The test asserts that a measurement was
+produced and that the call count is zero, both deterministic.
+
 ## Projects
 
 Every fact records the project it was written from, alongside the agent that

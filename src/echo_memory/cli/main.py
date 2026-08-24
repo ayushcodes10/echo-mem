@@ -14,6 +14,8 @@ from pathlib import Path
 import psycopg
 
 from echo_memory.audit.get_audit_log import get_fact_history
+from echo_memory.cli.benchmark import render as render_benchmark
+from echo_memory.cli.benchmark import run as run_benchmark
 from echo_memory.cli.dashboard import fetch_dashboard
 from echo_memory.cli.dashboard_html import render_dashboard
 from echo_memory.cli.export import export_group
@@ -104,6 +106,18 @@ def _add_project_parsers(sub) -> None:
     pending.add_argument("--project", metavar="NAME", help="only this project")
     pending.add_argument(
         "--done", nargs="+", metavar="PATH", help="mark these paths as ingested"
+    )
+
+    bench = sub.add_parser(
+        "benchmark", help="cost and latency baseline for a real ingest + query cycle"
+    )
+    bench.add_argument(
+        "--rounds", type=int, default=5, help="cycles to measure (default: 5)"
+    )
+    bench.add_argument(
+        "--group", metavar="ID", default="benchmark:scratch",
+        help="scope to write throwaway probe facts into (default: a dedicated "
+             "benchmark group, never your real memory)",
     )
 
     boot = sub.add_parser(
@@ -409,6 +423,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "trial":
         return _run_trial(args, config, connect(config.database_url))
+
+    if args.command == "benchmark":
+        from echo_memory.ingestion.embeddings import LocalEmbedder
+
+        conn = connect(config.database_url)
+        if args.rounds < 1:
+            print("error: --rounds must be at least 1", file=sys.stderr)
+            return 1
+        print(render_benchmark(run_benchmark(conn, args.group, LocalEmbedder(), args.rounds)),
+              end="")
+        return 0
 
     if args.command == "bootstrap":
         conn = connect(config.database_url)
