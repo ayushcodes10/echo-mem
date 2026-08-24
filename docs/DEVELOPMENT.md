@@ -101,6 +101,7 @@ echo-memory dashboard --serve                   # one live page over every scope
 echo-memory dashboard --out memory.html         # ...or a self-contained snapshot file
 echo-memory --scope shared reattribute --list   # which session wrote which project's facts
 echo-memory pending                             # memory files noticed but not yet in the graph
+echo-memory session-brief                       # what memory knows about this project
 ```
 
 `--scope` defaults to `solo`. `fact_id` is whatever `query_memory` returned for that fact
@@ -414,6 +415,41 @@ hook on `Write|Edit` in `~/.claude/settings.json`:
   }
 }
 ```
+
+### SessionStart: say memory exists, before anything else happens
+
+This is the one that closes the circle. `write_episode` is discretionary, and
+the "work is queued" nudge used to be delivered inside `query_memory`'s
+response — so an agent only learned memory existed **if it had already used
+memory**. A session that called neither tool heard nothing, silently. Two days
+of real use across multiple projects produced **zero** organic writes.
+
+`SessionStart` is the one moment guaranteed to happen in every session in every
+project, and Claude Code injects `hookSpecificOutput.additionalContext`
+deterministically rather than leaving it for the model to notice — unlike
+instructions in a file, which it can skim past.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "", "hooks": [
+        { "type": "command",
+          "command": "ECHO_MEMORY_USER_ID=you ECHO_MEMORY_AGENT_ID=claude-code ECHO_MEMORY_DATABASE_URL=postgresql://postgres:postgres@localhost:5433/echo_memory ECHO_MEMORY_BIN=/path/to/echo-mem/.venv/bin/echo-memory /path/to/echo-mem/scripts/session-start-hook.sh" }
+      ]}
+    ]
+  }
+}
+```
+
+It injects, scoped to the project the session started in: how many facts memory
+holds for it and the most recent few, anything sitting in the capture queue, and
+when to call `write_episode` / `record_recall_save`. See it yourself with
+`echo-memory session-brief`.
+
+Time-boxed to 5 seconds (`ECHO_MEMORY_BRIEF_TIMEOUT`). Session start is latency
+you wait through before typing: a missing briefing costs one session's recall, a
+hung hook costs the session.
 
 ### PreCompact: catch it before the context goes
 
