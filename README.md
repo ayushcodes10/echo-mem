@@ -29,6 +29,17 @@ that keeps working at long horizons, not just at day one:
 - **Auditable by design.** Every change to memory is logged, with a plain-language reason
   you can read back (`echo-memory why <fact_id>`). Memory that consolidates and edits
   itself is only trustworthy if you can see why.
+- **A write path that costs nothing to run.** Extraction happens in the calling agent,
+  never on the server, so recording a memory makes zero LLM calls. Measured locally with
+  `echo-memory benchmark`: **write 15ms median, query 8ms, digest 1ms, $0.00 inference
+  cost per episode.** The tradeoff is explicit and worth stating: the agent must arrive
+  with entities and facts already extracted, which is more work for the caller and the
+  reason the [MCP tool contract](docs/DEVELOPMENT.md) spells the shape out. The
+  comparison that makes this matter is Zep/Graphiti, the closest architectural match
+  (bi-temporal edges, fact invalidation, episode provenance): its own published
+  description of ingestion is that "every episode triggers multiple LLM calls for
+  extraction, entity resolution, and invalidation" and that "write cost scales with
+  volume". Here it doesn't.
 - **One storage engine, every scale.** Postgres + pgvector + Apache AGE, from a single
   local agent up to an organization-wide shared graph spanning every agent a business
   runs. No forced migration later. (The novel work is the memory structure and algorithm
