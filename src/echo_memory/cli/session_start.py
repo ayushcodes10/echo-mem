@@ -19,7 +19,10 @@ turns out to be relevant, so it pays rent by being brief and specific to the
 project rather than a wall of instructions the model learns to skim."""
 
 import json
+import os
+from pathlib import Path
 
+from echo_memory.cli import analyse
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.ingestion import capture
 from echo_memory.trial import observations
@@ -52,7 +55,7 @@ def _facts_for_project(conn, group_id: str, project: str) -> list[dict]:
     ]
 
 
-def build_brief(conn, config, project: str) -> dict:
+def build_brief(conn, config, project: str, root: Path | None = None) -> dict:
     """Everything the briefing needs, in one place so the renderer stays dumb
     and the whole thing stays testable without a hook harness."""
     facts = _facts_for_project(conn, config.group_id("shared"), project)
@@ -61,8 +64,19 @@ def build_brief(conn, config, project: str) -> dict:
     counts = observations.counts(
         conn, [config.group_id(scope) for scope in ("solo", "shared")]
     )
+    # Ask for a comprehension pass only when the project is genuinely blank and
+    # has not had one. Any fact existing stops the prompt, so an agent that
+    # writes something and forgets to mark it done is not asked again next
+    # session and cannot pile up duplicate passes.
+    root = root or Path(os.getcwd())
+    needs_analysis = not facts and not analyse.has_been_analysed(conn, project)
+    sources = analyse.find_sources(root) if needs_analysis else []
+
     return {
         "project": project,
+        "root": str(root),
+        "needs_analysis": needs_analysis,
+        "analysis_sources": sources,
         "n_facts": len(facts),
         "recent": facts[:RECENT_FACTS],
         "n_pending": len(pending),
@@ -89,6 +103,10 @@ def render_brief(brief: dict) -> str:
         lines.append(
             "Call query_memory before asking the user something they may have already "
             "told a past session or a different tool."
+        )
+    elif brief.get("needs_analysis"):
+        lines.append(
+            analyse.render_instruction(brief["project"], brief["analysis_sources"])
         )
     else:
         lines.append(

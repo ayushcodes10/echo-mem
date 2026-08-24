@@ -451,6 +451,35 @@ Time-boxed to 5 seconds (`ECHO_MEMORY_BRIEF_TIMEOUT`). Session start is latency
 you wait through before typing: a missing briefing costs one session's recall, a
 hung hook costs the session.
 
+### First run in an existing project
+
+A first session in a project that is already months old shouldn't start with a
+blank memory. When the session-start briefing finds a project with **no facts
+and no recorded comprehension pass**, it asks the agent to do one, and names the
+sources worth reading — graphify's `GRAPH_REPORT.md` first when present (it is
+already a synthesis), then README, ARCHITECTURE, DESIGN, CLAUDE.md, docs, and
+recent git history.
+
+```bash
+echo-memory analyse          # see the instruction for this project
+echo-memory analyse --done   # record that the pass ran
+```
+
+The pass asks for **15-60 facts, not an inventory**: what the project is, its
+architecture and boundaries, how it builds and deploys, conventions someone
+would otherwise violate, and the gotchas. "deploys from master, never merge dev"
+is worth keeping; "there is a file called utils.py" is not.
+
+**Structure questions belong to graphify, not here.** That's a deliberate split,
+not an oversight. graphify's graph for eigen is 9,321 nodes against this store's
+115 facts — importing it would bury every recorded decision under file names,
+and the two graphs answer different questions ("where is this code and what
+calls it" versus "why is it like this and what did we decide").
+
+The prompt stops as soon as the project has **any** fact, so an agent that
+writes something and forgets `--done` can't pile up duplicate passes. `--done`
+records it properly for reporting.
+
 ### PreCompact: catch it before the context goes
 
 `PostToolUse` catches memory files as they're written. It cannot catch what a
