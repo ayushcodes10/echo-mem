@@ -1,11 +1,26 @@
-"""Structured server-side logging: one JSON object per line to stdout, no
+"""Structured server-side logging: one JSON object per line to STDERR, no
 raw fact/entity text (see log_write_episode's summary-only fields), so logs
-are safe to ship off-box without also shipping user memory content."""
+are safe to ship off-box without also shipping user memory content.
+
+Stderr, not stdout, and that is load-bearing rather than a style choice: the
+MCP server speaks its protocol over stdout, so a log line written there would
+be framed as a protocol message and corrupt the stream.
+
+Fields may be passed either way. `extra={"fields": {...}}` is the original
+shape; `extra={"k": v}` is the idiom Python's logging docs teach, and every
+call site that reached for it was silently dropping every field it passed,
+because the formatter only ever read `record.fields`. Both now work."""
 
 import json
 import logging
 import sys
 import time
+
+# Everything logging puts on a LogRecord itself. Anything else on the record
+# arrived via extra= and is therefore a field somebody meant to log.
+_STANDARD_RECORD_ATTRS = frozenset(
+    ["args", "asctime", "created", "exc_info", "exc_text", "filename", "funcName", "levelname", "levelno", "lineno", "message", "module", "msecs", "msg", "name", "pathname", "process", "processName", "relativeCreated", "stack_info", "taskName", "thread", "threadName"]
+)
 
 
 class JsonFormatter(logging.Formatter):
@@ -16,14 +31,26 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        extra = getattr(record, "fields", None)
-        if extra:
-            payload.update(extra)
-        return json.dumps(payload)
+        payload.update(
+            {
+                key: value
+                for key, value in record.__dict__.items()
+                if key not in _STANDARD_RECORD_ATTRS and key != "fields"
+            }
+        )
+        nested = getattr(record, "fields", None)
+        if nested:
+            payload.update(nested)
+        return json.dumps(payload, default=str)
 
 
 def configure_logging(level: int = logging.INFO) -> None:
-    handler = logging.StreamHandler(sys.stdout)
+    """Install the JSON formatter on the echo_memory logger tree.
+
+    Call this once at process start. Until PR #8 nothing did, so the formatter
+    was dead code and every server log line fell through to Python's
+    last-resort handler as bare text."""
+    handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger("echo_memory")
     root.setLevel(level)
