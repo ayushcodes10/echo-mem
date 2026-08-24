@@ -124,7 +124,10 @@ def test_main_graph_command(migrated_db, capsys, monkeypatch):
     assert "Decision --[uses]--> Postgres" in out
 
 
-def test_main_graph_html_command(migrated_db, capsys, monkeypatch, tmp_path):
+def test_main_graph_html_now_renders_the_dashboard(migrated_db, capsys, monkeypatch, tmp_path):
+    """--html is kept as an alias for a command shipped last week, but it now
+    writes the dashboard: every scope rather than just --scope, and superseded
+    facts included as history rather than hidden. The note says so."""
     config, _ = _seed(migrated_db)
     monkeypatch.setenv("ECHO_MEMORY_USER_ID", config.user_id)
     monkeypatch.setenv("ECHO_MEMORY_AGENT_ID", config.agent_id)
@@ -134,10 +137,12 @@ def test_main_graph_html_command(migrated_db, capsys, monkeypatch, tmp_path):
     exit_code = main(["--scope", "shared", "graph", "--html", str(out_file)])
 
     assert exit_code == 0
-    assert "2 nodes, 1 active facts" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "facts across" in out
+    assert "renders the full dashboard" in out
     content = out_file.read_text()
     assert "switched to Postgres for durability" in content
-    assert "using SQLite for now" not in content
+    assert "using SQLite for now" in content, "superseded facts are history, not hidden"
 
 
 def test_fetch_status_reports_only_the_seeded_scope(migrated_db):

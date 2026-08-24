@@ -8,29 +8,27 @@ import argparse
 import os
 import sys
 import time
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 
-import psycopg
-
 from echo_memory.audit.get_audit_log import get_fact_history
+from echo_memory.cli import dashboard as dashboard_cmd
+from echo_memory.cli import queue as queue_cmd
+from echo_memory.cli import reattribute_cmd
+from echo_memory.cli import trial as trial_cmd
 from echo_memory.cli.benchmark import render as render_benchmark
 from echo_memory.cli.benchmark import run as run_benchmark
 from echo_memory.cli.dashboard import fetch_dashboard
 from echo_memory.cli.dashboard_html import render_dashboard
 from echo_memory.cli.export import export_group
 from echo_memory.cli.graph import fetch_graph, render_graph
-from echo_memory.cli.graph_html import render_html
 from echo_memory.cli.install import install, render_install
-from echo_memory.cli.reattribute import reattribute, render_sessions, sessions_by_project
 from echo_memory.cli.status import fetch_status, render_status
-from echo_memory.cli.trial import render_check, render_log, render_recorded, render_start
 from echo_memory.cli.why import render_history
 from echo_memory.infra.config import ConfigError, load_config
 from echo_memory.infra.db import connect
-from echo_memory.infra.project import decode_claude_project_dir, detect_project
+from echo_memory.infra.project import detect_project
 from echo_memory.ingestion import bootstrap as bootstrap_mod
-from echo_memory.ingestion import capture
 from echo_memory.trial import check, observations
 
 
@@ -217,194 +215,15 @@ def _add_trial_parser(sub) -> None:
     trial.add_parser("log", help="every trial observation recorded so far")
 
 
-def _run_trial(args, config, conn) -> int:
-    group_id = config.group_id(args.scope)
-
-    if args.trial_command == "start":
-        started_on = args.on or datetime.now(UTC).date()
-        print(render_start(observations.start_trial(conn, started_on, args.cap_days)))
-        return 0
-
-    if args.trial_command == "check":
-        report = check.build_report(
-            conn, config, include_exact=args.include_exact, all_projects=args.all_projects
-        )
-        print(render_check(report), end="")
-        return 0
-
-    if args.trial_command == "log":
-        group_ids = [config.group_id(scope) for scope in ("solo", "shared")]
-        print(render_log(observations.list_observations(conn, group_ids)), end="")
-        return 0
-
-    if args.trial_command == "save":
-        kind = observations.RECALL_SAVE
-        fields = {
-            "written_by": args.written_by,
-            "recalled_by": args.recalled_by or config.agent_id,
-        }
-    elif args.trial_command in ("dup", "not-dup"):
-        kind = (
-            observations.DUPLICATE_NODE
-            if args.trial_command == "dup"
-            else observations.NOT_DUPLICATE
-        )
-        fields = {"node_ids": [args.node_a, args.node_b]}
-    else:
-        kind = (
-            observations.BAD_MERGE if args.trial_command == "bad-merge" else observations.MERGE_OK
-        )
-        fields = {"audit_entry_id": args.audit_entry_id}
-
-    try:
-        if "node_ids" in fields:
-            fields["node_ids"] = observations.sort_pair(fields["node_ids"])
-        recorded = observations.record(conn, group_id, kind, args.note, **fields)
-        observation_id = recorded["id"]
-    except observations.TrialError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    except psycopg.errors.UniqueViolation:
-        # The unique indexes exist so a second verdict on the same pair or the
-        # same resolution can't quietly overwrite the first one.
-        print(
-            "error: that pair or resolution already has a recorded verdict "
-            "(see `echo-memory trial log`)",
-            file=sys.stderr,
-        )
-        return 1
-    except psycopg.errors.ForeignKeyViolation:
-        print(
-            f"error: no audit entry #{args.audit_entry_id} "
-            "(ids come from `echo-memory trial check`)",
-            file=sys.stderr,
-        )
-        return 1
-
-    if not recorded["created"]:
-        print(f"Already recorded as #{observation_id}; nothing changed.")
-        return 0
-
-    print(render_recorded(kind, observation_id, args.note))
-    if kind == observations.RECALL_SAVE and args.written_by == (
-        args.recalled_by or config.agent_id
-    ):
-        print(
-            "note: written and recalled by the same tool, so this doesn't count toward "
-            "criterion 6's cross-tool bar."
-        )
-    return 0
-
-
-def _project_for_memory_file(path: Path, fallback: str) -> str:
-    """A Claude Code memory file lives at
-    ~/.claude/projects/<encoded-project-path>/memory/<name>.md, and the
-    encoded segment is the project's absolute path with separators replaced by
-    dashes. Its last segment is the project directory name, which is what
-    detect_project() would have returned had the write happened there. Falling
-    back to the hook's own cwd would attribute every project's memories to
-    whichever repo the agent happened to be sitting in."""
-    parts = path.resolve().parts
-    if "projects" in parts:
-        encoded = parts[parts.index("projects") + 1 :]
-        if encoded:
-            return decode_claude_project_dir(encoded[0])
-    return fallback
-
-
-def _serve_dashboard(config, port: int) -> int:
-    """Regenerates on every request: a snapshot file is stale the moment the
-    next episode lands, and the whole point of a dashboard is that you leave it
-    open."""
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path not in ("/", "/index.html"):
-                self.send_error(404)
-                return
-            conn = connect(config.database_url)
-            try:
-                body = render_dashboard(fetch_dashboard(conn, config)).encode("utf-8")
-            finally:
-                conn.close()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *_args):
-            pass
-
-    # Localhost only, same posture as the MCP server: this page is every fact
-    # the user has ever recorded, across every project.
-    server = HTTPServer(("127.0.0.1", port), Handler)
-    print(f"Echo Memory dashboard on http://127.0.0.1:{port}  (ctrl-C to stop)")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print()
-    return 0
-
-
-def _run_project_command(args, config, conn) -> int:
-    if args.command == "dashboard":
-        if args.serve:
-            return _serve_dashboard(config, args.port)
-        out = args.out or Path("memory-dashboard.html")
-        data = fetch_dashboard(conn, config)
-        out.write_text(render_dashboard(data))
-        n_facts = sum(len(s["facts"]) for s in data["scopes"].values())
-        print(
-            f"Wrote {out} ({n_facts} facts across {len(data['projects'])} projects). "
-            "Use --serve to keep it live instead."
-        )
-        return 0
-
-    if args.command == "reattribute":
-        group_id = config.group_id(args.scope)
-        if args.list_sessions or not (args.session and args.project):
-            print(render_sessions(args.scope, sessions_by_project(conn, group_id)), end="")
-            return 0 if args.list_sessions else 1
-        changed = reattribute(conn, group_id, args.session, args.project)
-        print(f"Reattributed {changed} fact(s) from session {args.session} to {args.project}.")
-        return 0
-
-    if args.command == "notice":
-        if not args.path.exists():
-            print(f"error: no such file: {args.path}", file=sys.stderr)
-            return 1
-        project = args.project or _project_for_memory_file(args.path, config.project)
-        result = capture.notice_file(conn, args.path, project)
-        if result["changed"]:
-            print(f"Queued {args.path} for ingestion ({project}).")
-        else:
-            print(f"Already queued and unchanged: {args.path}")
-        return 0
-
-    if args.command == "pending":
-        if args.done:
-            print(f"Marked {capture.mark_ingested(conn, args.done)} file(s) as ingested.")
-            return 0
-        queued = capture.pending(conn, args.project)
-        if not queued:
-            print("Nothing pending: every noticed memory file is in the graph.")
-            return 0
-        print(f"{len(queued)} document(s) noticed but not yet in the graph:")
-        current_project = None
-        for item in queued:
-            if item["project"] != current_project:
-                current_project = item["project"]
-                print(f"\n  {current_project}")
-            print(f"    ({item['source']}) {item['path']}")
-        print(
-            "\nRead each one and call write_episode with the entities and facts it states, "
-            "then: echo-memory pending --done <path>..."
-        )
-        return 0
-
-    return 1
+# Each command's logic lives in its own module; main.py wires parsers to them
+# and nothing else. Adding a command should not mean editing a shared dispatch
+# chain, which is how this file grew to hold twelve of them.
+_PROJECT_COMMANDS = {
+    "dashboard": dashboard_cmd.run,
+    "reattribute": reattribute_cmd.run,
+    "notice": queue_cmd.run_notice,
+    "pending": queue_cmd.run_pending,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -422,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "trial":
-        return _run_trial(args, config, connect(config.database_url))
+        return trial_cmd.run(args, config, connect(config.database_url))
 
     if args.command == "benchmark":
         from echo_memory.ingestion.embeddings import LocalEmbedder
@@ -469,16 +288,30 @@ def main(argv: list[str] | None = None) -> int:
                 print(bootstrap_mod.render(result), end="")
         return 0
 
-    if args.command in ("dashboard", "reattribute", "notice", "pending"):
-        return _run_project_command(args, config, connect(config.database_url))
+    if args.command in _PROJECT_COMMANDS:
+        return _PROJECT_COMMANDS[args.command](args, config, connect(config.database_url))
 
     group_id = config.group_id(args.scope)
 
     if args.command == "graph":
         if args.html:
-            graph = fetch_graph(connect(config.database_url), group_id)
-            args.html.write_text(render_html(args.scope, group_id, graph))
-            print(f"Wrote {args.html} ({len(graph['nodes'])} nodes, {len(graph['facts'])} active facts)")
+            # Renders the dashboard, which supersedes the old single-scope
+            # snapshot: every scope, faceted by project, with an inspector that
+            # answers what a fact says, who wrote it, when and why. Kept as an
+            # alias so a command shipped last week still works.
+            conn = connect(config.database_url)
+            data = fetch_dashboard(conn, config)
+            args.html.write_text(render_dashboard(data))
+            n_facts = sum(len(sc["facts"]) for sc in data["scopes"].values())
+            print(
+                f"Wrote {args.html} ({n_facts} facts across "
+                f"{len(data['projects'])} projects)."
+            )
+            print(
+                "Note: --html now renders the full dashboard, so it covers every scope "
+                "rather than just --scope, and includes superseded facts as history. "
+                "`echo-memory dashboard` is the command for this going forward."
+            )
             return 0
         if args.watch:
             try:
