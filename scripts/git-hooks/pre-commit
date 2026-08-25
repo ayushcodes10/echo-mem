@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Refuse commits on the default branch.
+#
+# The rule is "never commit to main; branch, test, open a PR, then merge" and it
+# is not a preference - this repo's GitHub branch protection enforces it on the
+# push. But the push is a late place to find out: by then the commit exists on
+# the local default branch and has to be moved off it, which is fiddly enough to
+# get wrong. This fails at the moment the mistake is made instead.
+#
+# Written after making exactly this mistake twice in one day. Protection caught
+# it both times; the recovery was the annoying part.
+#
+# Enable once per clone:
+#   git config core.hooksPath scripts/git-hooks
+#
+# Bypass deliberately, if you ever genuinely mean it:
+#   git commit --no-verify
+
+branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+case "$branch" in
+  main|master)
+    echo "refusing to commit on '$branch'." >&2
+    echo >&2
+    echo "  branch first:  git checkout -b <name>" >&2
+    echo "  already staged? the branch keeps your staged changes." >&2
+    echo >&2
+    echo "  deliberate exception: git commit --no-verify" >&2
+    exit 1
+    ;;
+esac
+exit 0
