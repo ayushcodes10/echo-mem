@@ -188,6 +188,29 @@ fact as `source --[relation]--> target` plus any nodes with no active facts, so 
 what an agent has actually written without a separate `query_memory` call. `--watch` polls
 the database on an interval and clears/reprints, so it reflects new writes as they land.
 
+## Publishing
+
+The distribution is **`echo-mem`**, not `echo-memory`. That name is already
+taken on PyPI by an unrelated hosted product in this same category (Textstone
+Labs, published 2026-03-29), so `pip install echo-memory` installs theirs. The
+import package stays `echo_memory` — the CLI, the MCP registration command
+(`-m echo_memory.server`) and every existing install reference it, and renaming
+the module would break live configuration to fix a cosmetic mismatch.
+
+PyPI has no name reservation: claiming `echo-mem` means publishing a real
+distribution.
+
+```bash
+pip install -e ".[dev]"
+rm -rf dist && python -m build
+twine check dist/*                          # must pass before uploading
+twine upload --repository testpypi dist/*   # rehearse first
+twine upload dist/*                         # claims the name, permanently
+```
+
+A published name and version can never be reused on PyPI, even after deletion,
+so treat the first upload as one-way.
+
 ## Running tests
 
 ```bash
