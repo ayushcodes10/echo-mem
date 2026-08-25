@@ -5,6 +5,7 @@ not after: see MATHS.local.md §7 for why post-hoc filtering is wrong even
 for a plain ranked list, not just for PPR's probability-mass case in v1b."""
 
 import json
+import re
 import time
 
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
@@ -57,6 +58,70 @@ def _vector_candidates(conn, group_id: str, embedding: list[float], limit: int) 
         (embedding, group_id, embedding, limit),
     ).fetchall()
     return [edge_id for edge_id, score in rows if score >= COSINE_FLOOR]
+
+
+def _any_term_tsquery(terms: list[str]) -> tuple[str, list[str]]:
+    """An OR-of-terms tsquery, built by OR-ing per-term plainto_tsquery calls.
+
+    websearch_to_tsquery ANDs every term, which is right when the query is a
+    deliberate search and wrong when it is a whole sentence somebody typed at
+    an agent: "is chat-module-api dev or prod" requires every one of chat,
+    modul, api, dev and prod to appear in the same fact, and a fact that says
+    exactly the right thing still misses because the hostname tokenises as one
+    token and never yields a bare 'api'. Measured, not assumed - that prompt
+    matched nothing against a fact written to answer it.
+
+    Each term still goes through plainto_tsquery rather than being pasted into
+    a to_tsquery string, so user text is never interpreted as tsquery syntax.
+    That is the rule the design doc's security review set and it survives here:
+    the OR is composed from sanitised pieces, not from raw input."""
+    placeholders = " || ".join(["plainto_tsquery('english', %s)"] * len(terms))
+    return f"({placeholders})", terms
+
+
+# Words too common to carry signal, on top of Postgres's own stopwords. A
+# prompt is full of them and each one drags in unrelated facts.
+_NOISE_TERMS = frozenset(
+    ["the", "a", "an", "is", "are", "was", "were", "be", "do", "does", "did", "can", "could", "should", "would", "will", "what", "why", "how", "when", "where", "who", "which", "this", "that", "these", "those", "and", "or", "not", "for", "from", "with", "about", "into", "you", "your", "we", "our", "it", "its", "me", "my", "please", "help", "need", "want"]
+)
+MAX_TERMS = 12
+
+
+def prompt_terms(prompt: str) -> list[str]:
+    """The words worth searching for in a typed prompt."""
+    seen, terms = set(), []
+    for raw in re.split(r"[^\w.\-/]+", prompt.lower()):
+        word = raw.strip("-./")
+        if len(word) < 3 or word in _NOISE_TERMS or word in seen:
+            continue
+        seen.add(word)
+        terms.append(word)
+    return terms[:MAX_TERMS]
+
+
+def _lexical_any_candidates(conn, group_id: str, query: str, limit: int) -> list[str]:
+    """Lexical retrieval that matches ANY salient term, ranked. Used by the
+    prompt-time recall path; the main query path keeps AND semantics, which is
+    correct for a deliberate query and is what v1a's retrieval was tested on."""
+    terms = prompt_terms(query)
+    if not terms:
+        return []
+    tsquery, params = _any_term_tsquery(terms)
+    rows = conn.execute(
+        f"""
+        SELECT f.id::text,
+               ts_rank(to_tsvector('english', f.properties ->> '"fact"'::agtype),
+                        {tsquery}) AS score
+        FROM {GRAPH}."FACT" f
+        WHERE (f.properties ->> '"group_id"'::agtype) = %s
+          AND (f.properties ->> '"t_invalid"'::agtype) IS NULL
+          AND to_tsvector('english', f.properties ->> '"fact"'::agtype) @@ {tsquery}
+        ORDER BY score DESC
+        LIMIT %s
+        """,
+        (*params, group_id, *params, limit),
+    ).fetchall()
+    return [edge_id for edge_id, score in rows if score > TS_RANK_FLOOR]
 
 
 def _lexical_candidates(conn, group_id: str, query: str, limit: int) -> list[str]:
@@ -131,7 +196,8 @@ def _fetch_facts(conn, edge_ids: list[str]) -> dict[str, dict]:
 
 
 def query_memory(
-    conn, group_id: str, query: str | None, top_k: int, embedder, digest: bool = False
+    conn, group_id: str, query: str | None, top_k: int, embedder,
+    digest: bool = False, lexical_only: bool = False,
 ) -> dict:
     """top_k has no default here: DEFAULT_TOP_K=10 is applied at the MCP tool
     schema layer (PR5), which is the natural place to declare it, rather
@@ -140,7 +206,20 @@ def query_memory(
     digest=True ignores query (may be None) and returns the most recently
     valid active facts instead of ranking against a query string: an opt-in
     "catch me up" convenience for session start, explicitly invoked, never
-    auto-triggered (see the CEO plan's scope decision #2)."""
+    auto-triggered (see the CEO plan's scope decision #2).
+
+    lexical_only=True drops the vector signal and ranks on Postgres full-text
+    search alone. It exists for one caller: the UserPromptSubmit hook, which
+    runs in a fresh process on every prompt and therefore cannot afford to load
+    the embedding model - measured at 6.2 seconds of cold start (see
+    cli/benchmark.py). FTS needs no model, so that path costs milliseconds.
+
+    The tradeoff is real and worth stating: lexical matching finds facts that
+    share words with the prompt and misses ones that only share meaning, which
+    is exactly what the vector signal is for. Recall here is deliberately worse
+    than a full query_memory call. It is the difference between some relevant
+    memory arriving automatically and none arriving at all, not between good
+    retrieval and bad."""
     start = time.perf_counter()
     try:
         _validate(query, top_k, digest)
@@ -153,6 +232,10 @@ def query_memory(
     if digest:
         ranked_ids = _digest_candidates(conn, group_id, top_k)
         vector_ids, lexical_ids = [], []
+    elif lexical_only:
+        vector_ids = []
+        lexical_ids = _lexical_any_candidates(conn, group_id, query, LIST_DEPTH)
+        ranked_ids = lexical_ids[:top_k]
     else:
         embedding = embedder.embed(query)
         vector_ids = _vector_candidates(conn, group_id, embedding, LIST_DEPTH)

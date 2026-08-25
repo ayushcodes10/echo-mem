@@ -16,6 +16,7 @@ from echo_memory.cli import analyse as analyse_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import queue as queue_cmd
 from echo_memory.cli import reattribute_cmd
+from echo_memory.cli import recall as recall_cmd
 from echo_memory.cli import session_start as session_start_cmd
 from echo_memory.cli import trial as trial_cmd
 from echo_memory.cli.benchmark import render as render_benchmark
@@ -107,6 +108,16 @@ def _add_project_parsers(sub) -> None:
     pending.add_argument(
         "--done", nargs="+", metavar="PATH", help="mark these paths as ingested"
     )
+
+    rec = sub.add_parser(
+        "recall", help="facts matching a prompt, for the UserPromptSubmit hook"
+    )
+    rec.add_argument("prompt", nargs="?", default="", help="prompt text (default: stdin)")
+    rec.add_argument(
+        "--hook-json", action="store_true",
+        help="emit UserPromptSubmit hook JSON instead of plain text",
+    )
+    rec.add_argument("--top-k", type=int, default=recall_cmd.DEFAULT_TOP_K)
 
     ana = sub.add_parser(
         "analyse", help="first-run comprehension pass for an existing project"
@@ -268,6 +279,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "trial":
         return trial_cmd.run(args, config, connect(config.database_url))
+
+    if args.command == "recall":
+        prompt = args.prompt or sys.stdin.read()
+        conn = connect(config.database_url)
+        result = recall_cmd.recall_for_prompt(conn, config, prompt, args.top_k)
+        context = recall_cmd.render_context(result)
+        if args.hook_json:
+            # Nothing relevant: stay silent rather than injecting an empty
+            # block into every prompt the user types.
+            if context:
+                print(recall_cmd.render_hook_output(context))
+        else:
+            print(context or "(nothing relevant)")
+        return 0
 
     if args.command == "analyse":
         project = args.project or config.project
