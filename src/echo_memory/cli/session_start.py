@@ -87,48 +87,47 @@ def build_brief(conn, config, project: str, root: Path | None = None) -> dict:
 
 
 def render_brief(brief: dict) -> str:
-    """One paragraph of context. Written as instructions to the agent, because
-    that is who reads it."""
+    """One paragraph of context, instruction first.
+
+    Order matters and was learned the hard way. The first version led with the
+    fact list - roughly 640 characters of evidence before it ever said what to
+    do. On 2026-08-25 it fired alongside three other SessionStart hooks in the
+    same instant, and the session that received it made 31 tool calls without a
+    single memory call. Evidence buried the instruction. Now the instruction
+    goes first and the facts are what backs it up."""
     lines = []
+
+    if brief.get("needs_analysis"):
+        lines.append(analyse.render_instruction(brief["project"], brief["analysis_sources"]))
+        lines.append("")
+
+    lines.append(
+        "Echo Memory is active for this project. Before asking the user anything they may "
+        "have already explained, call query_memory. Record decisions, corrections, "
+        "preferences and hard-won findings with write_episode in the same turn they "
+        "happen. If a recalled fact saved re-explaining something a different tool wrote, "
+        "call record_recall_save."
+    )
+
+    if brief["n_pending"]:
+        where = ", ".join(brief["pending_projects"][:4])
+        lines.append(
+            f"{brief['n_pending']} memory file(s) are queued but not yet recorded as facts "
+            f"({where}). Run `echo-memory pending`, read each, and write_episode what it states."
+        )
+
     if brief["n_facts"]:
         lines.append(
-            f"Echo Memory has {brief['n_facts']} fact(s) recorded for project "
-            f"'{brief['project']}'. Recent:"
+            f"It already holds {brief['n_facts']} fact(s) for '{brief['project']}', including:"
         )
         for fact in brief["recent"]:
             text = fact["fact"]
             if len(text) > FACT_PREVIEW_CHARS:
                 text = text[:FACT_PREVIEW_CHARS].rstrip() + "..."
             lines.append(f"- {fact['source']} --{fact['relation']}--> {fact['target']}: {text}")
-        lines.append(
-            "Call query_memory before asking the user something they may have already "
-            "told a past session or a different tool."
-        )
-    elif brief.get("needs_analysis"):
-        lines.append(
-            analyse.render_instruction(brief["project"], brief["analysis_sources"])
-        )
-    else:
-        lines.append(
-            f"Echo Memory is available and has nothing recorded yet for project "
-            f"'{brief['project']}'. Call query_memory(scope=\"shared\") to check what it "
-            "knows before asking the user to re-explain context."
-        )
+    elif not brief.get("needs_analysis"):
+        lines.append(f"It holds nothing for '{brief['project']}' yet.")
 
-    if brief["n_pending"]:
-        where = ", ".join(brief["pending_projects"][:4])
-        lines.append(
-            f"{brief['n_pending']} memory file(s) are queued but not yet recorded as facts "
-            f"({where}). Run `echo-memory pending` to see them, read each, and call "
-            "write_episode with what it states."
-        )
-
-    lines.append(
-        "Record as they happen, in the same turn: decisions the user states, corrections "
-        "they make, preferences, and non-obvious things that cost real time to work out. "
-        "Use write_episode. If a recalled fact saved the user re-explaining something a "
-        "different tool had told them, call record_recall_save."
-    )
     if brief["cross_tool_saves"] < brief["required_saves"]:
         lines.append(
             f"(Trial: {brief['cross_tool_saves']}/{brief['required_saves']} cross-tool "

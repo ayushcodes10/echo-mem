@@ -42,6 +42,19 @@ def _seed(migrated_db, project="eigen"):
     return config
 
 
+def test_the_instruction_comes_before_the_evidence(migrated_db):
+    """The first version led with ~640 chars of fact text before saying what to
+    do. On 2026-08-25 it fired alongside three other SessionStart hooks and the
+    session made 31 tool calls without one memory call."""
+    config = _seed(migrated_db, project="eigen")
+
+    text = session_start.render_brief(
+        session_start.build_brief(connect(migrated_db), config, "eigen")
+    )
+
+    assert text.index("call query_memory") < text.index("It already holds")
+
+
 def test_the_brief_reports_facts_for_this_project(migrated_db):
     config = _seed(migrated_db, project="eigen")
 
@@ -75,7 +88,7 @@ def test_an_analysed_project_with_no_facts_still_says_memory_is_available(migrat
         session_start.build_brief(conn, config, "brand-new")
     )
 
-    assert "nothing recorded yet" in text
+    assert "holds nothing for 'brand-new' yet" in text
     assert "query_memory" in text
     assert "comprehension pass" not in text
 
@@ -135,7 +148,8 @@ def test_cli_emits_plain_text_by_default(migrated_db, monkeypatch, capsys):
     assert main(["session-brief", "--project", "eigen"]) == 0
 
     out = capsys.readouterr().out
-    assert "Echo Memory has 1 fact(s)" in out
+    assert out.startswith("Echo Memory is active"), "the instruction must lead, not the facts"
+    assert "It already holds 1 fact(s)" in out
     assert not out.startswith("{")
 
 
