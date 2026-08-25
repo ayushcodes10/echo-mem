@@ -416,6 +416,57 @@ hook on `Write|Edit` in `~/.claude/settings.json`:
 }
 ```
 
+### UserPromptSubmit: retrieve against the prompt itself
+
+Every other surface asks the agent to *remember* to call `query_memory`. On
+2026-08-25 a dugout session received the session-start briefing in context, then
+made 31 tool calls without a single memory call. The plumbing was fine;
+remembering was the problem.
+
+`UserPromptSubmit` fires on every prompt and knows what was asked, so memory is
+retrieved against the prompt and injected before the agent acts. There is no
+decision to forget.
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [
+        { "type": "command", "timeout": 10,
+          "command": "ECHO_MEMORY_USER_ID=you ECHO_MEMORY_AGENT_ID=claude-code ECHO_MEMORY_DATABASE_URL=postgresql://postgres:postgres@localhost:5433/echo_memory ECHO_MEMORY_BIN=/path/to/echo-mem/.venv/bin/echo-memory /path/to/echo-mem/scripts/user-prompt-hook.sh" }
+      ]}
+    ]
+  }
+}
+```
+
+Try it directly: `echo-memory recall "is chat-module-api dev or prod"`.
+
+**Lexical-only, and that is a deliberate trade.** The hook runs in a fresh
+process per prompt, and loading the embedding model costs **6.2 seconds** of
+cold start (measured — see the baseline above). Postgres full-text search needs
+no model, so this path is ~0.16s end to end. Recall is genuinely worse than a
+full `query_memory` call, because keyword matching finds facts that share words
+and misses ones that only share meaning. That is the difference between *some*
+relevant memory arriving automatically and *none* arriving at all — not between
+good and bad retrieval. The injected block says so, so the agent knows to call
+`query_memory` for the fuller picture.
+
+**ANY-term matching, not ALL.** `websearch_to_tsquery` ANDs every term, which is
+right for a deliberate search and wrong for a typed sentence: *"is
+chat-module-api dev or prod"* requires `chat`, `modul`, `api`, `dev` and `prod`
+all to appear in one fact, and a fact written to answer exactly that question
+still misses because the hostname tokenises as a single token. Measured, not
+assumed. The prompt path ORs per-term `plainto_tsquery` calls instead — each
+term still sanitised, never pasted into a `to_tsquery` string, per the design
+doc's security review. The main `query_memory` path keeps AND semantics, which
+is what v1a's retrieval was tested on.
+
+**Silent when nothing matches**, because this injects into every prompt and a
+hook that always speaks becomes noise the model learns to skim. Prompts under 12
+characters are skipped: "yes", "go on", "fix it" match everything and mean
+nothing.
+
 ### SessionStart: say memory exists, before anything else happens
 
 This is the one that closes the circle. `write_episode` is discretionary, and
@@ -442,9 +493,10 @@ instructions in a file, which it can skim past.
 }
 ```
 
-It injects, scoped to the project the session started in: how many facts memory
-holds for it and the most recent few, anything sitting in the capture queue, and
-when to call `write_episode` / `record_recall_save`. See it yourself with
+It injects, scoped to the project the session started in. **The instruction
+comes first and the facts back it up** — the first version led with ~640
+characters of fact text before ever saying what to do, and on 2026-08-25 it
+fired alongside three other SessionStart hooks and was ignored. See it with
 `echo-memory session-brief`.
 
 Time-boxed to 5 seconds (`ECHO_MEMORY_BRIEF_TIMEOUT`). Session start is latency
