@@ -617,9 +617,30 @@ no business breaking the edit that triggered it - so every path exits 0.
 ## Dashboard
 
 ```bash
-echo-memory dashboard --serve          # http://127.0.0.1:8787, regenerated per reload
-echo-memory dashboard --out memory.html
+echo-memory dashboard --serve --open   # http://127.0.0.1:8787, opens your browser
+echo-memory dashboard --out memory.html --open
 ```
+
+### Always on
+
+A dashboard is only useful if looking at it is free. Remembering a command, an
+env block and a venv path is enough friction that you stop glancing at it, and a
+graph you don't glance at may as well not exist.
+
+```bash
+./scripts/install-dashboard-service.sh      # macOS LaunchAgent, starts on login
+```
+
+The page then just lives at **http://127.0.0.1:8787** — bookmark it. Restarts on
+crash but not on a clean exit, so a down Postgres doesn't spin a relaunch loop.
+Logs to `~/Library/Logs/com.echomem.dashboard.log`.
+
+```bash
+launchctl bootout gui/$(id -u)/com.echomem.dashboard    # uninstall
+rm ~/Library/LaunchAgents/com.echomem.dashboard.plist
+```
+
+Localhost only, like the server itself.
 
 One page over both scopes and every project. Nodes are coloured by the project
 that talks about them most, filtered by the project chips and the scope
@@ -648,6 +669,20 @@ The sidebar lists clusters largest-first, named after each one's most-connected
 node, with counts. Click to toggle one off. Layout anchors each cluster to its
 own position and pushes harder between clusters than within one, so islands
 read as gaps rather than as thinner regions of the same blob.
+
+**Hubs don't spread their label.** A node connected far above the graph's norm
+(at least 8 edges, and at least 4x the mean) keeps its place but stops donating
+its community, so it can't pull unrelated clusters into one. Measured on the
+real store: an `Ayush` node created during a portfolio backfill had degree 19 and
+welded sixteen unrelated projects into a single 27-node blob. Dropping hubs from
+the graph entirely over-corrects — 22 communities became 79, mostly debris,
+because hubs also hold together things that genuinely belong together. Letting
+them receive a label but not spread one un-welds the blob: 27 becomes 15 and the
+largest clusters balance out at 15/13/12/12.
+
+Known limit, stated rather than hidden: the rule is about **degree**. A node
+joining two groups by one edge each still merges them. That's a bridge, and
+separating on bridges needs articulation-point detection, a different algorithm.
 
 Label propagation rather than Louvain, hand-written rather than `networkx`: the
 algorithm is thirty lines, this graph is hundreds of nodes rather than millions,

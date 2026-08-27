@@ -137,3 +137,83 @@ def test_a_hub_joining_two_groups_merges_them():
     result = communities.detect(nodes, edges)
 
     assert len(set(result["components"].values())) == 1
+
+
+def test_a_hub_no_longer_welds_two_groups_together():
+    """The real store had exactly this: an 'Ayush' node with degree 19, joined
+    to many members of many projects, welding sixteen unrelated ones into a
+    single 27-node blob."""
+    nodes = {"hub": "Hub"}
+    edges = []
+    for side in ("a", "b"):
+        for i in range(9):
+            nodes[f"{side}{i}"] = f"{side.upper()}{i}"
+        edges += [(f"{side}{i}", f"{side}{i + 1}") for i in range(8)]
+        # A hub is joined to many members of each group, not just one.
+        edges += [("hub", f"{side}{i}") for i in range(6)]
+
+    result = communities.detect(nodes, edges)
+
+    assert "hub" in result["hubs"]
+    assert result["of_node"]["a8"] != result["of_node"]["b8"], (
+        "the far ends of two groups must not share a community through the hub"
+    )
+
+
+def test_a_low_degree_bridge_is_not_treated_as_a_hub():
+    """A known limit, stated rather than hidden: the rule is about degree, so a
+    node joining two groups by one edge each still merges them. That is a
+    bridge, and separating on bridges would need articulation-point detection,
+    which is a different algorithm than this one."""
+    nodes = {"bridge": "Bridge"}
+    edges = []
+    for side in ("a", "b"):
+        for i in range(6):
+            nodes[f"{side}{i}"] = f"{side.upper()}{i}"
+        edges += [(f"{side}{i}", f"{side}{i + 1}") for i in range(5)]
+        edges.append(("bridge", f"{side}0"))
+
+    result = communities.detect(nodes, edges)
+
+    assert "bridge" not in result["hubs"]
+    assert len(set(result["components"].values())) == 1
+
+
+def test_a_hub_still_gets_a_community_of_its_own(migrated_db=None):
+    nodes = {"hub": "Hub", **{f"n{i}": f"N{i}" for i in range(12)}}
+    edges = [("hub", f"n{i}") for i in range(12)]
+
+    result = communities.detect(nodes, edges)
+
+    assert "hub" in result["of_node"], "a hub is still placed, never dropped"
+    assert result["components"]["hub"] == result["components"]["n0"]
+
+
+def test_a_node_whose_only_neighbour_is_a_hub_is_not_stranded():
+    nodes = {"hub": "Hub", "lonely": "Lonely", **{f"n{i}": f"N{i}" for i in range(12)}}
+    edges = [("hub", f"n{i}") for i in range(12)] + [("hub", "lonely")]
+
+    result = communities.detect(nodes, edges)
+
+    assert result["of_node"]["lonely"] is not None
+
+
+def test_an_ordinary_graph_has_no_hubs():
+    """The threshold is relative to mean degree, so a small even graph should
+    not have an ordinary node called a hub."""
+    nodes = {str(i): f"n{i}" for i in range(10)}
+    edges = [(str(i), str(i + 1)) for i in range(9)]
+
+    assert communities.detect(nodes, edges)["hubs"] == []
+
+
+def test_hub_detection_scales_with_the_graph():
+    """A fixed threshold would call every well-connected node in a large graph
+    a hub. Degree 9 is a hub among chains, ordinary among stars."""
+    degree = {"a": 9, **{str(i): 1 for i in range(40)}}
+    sparse = communities.hubs(degree, list(degree))
+
+    dense = communities.hubs({k: 9 for k in degree}, list(degree))
+
+    assert "a" in sparse
+    assert dense == set(), "when everything has degree 9, nothing is exceptional"

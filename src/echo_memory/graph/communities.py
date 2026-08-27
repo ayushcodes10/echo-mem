@@ -28,6 +28,24 @@ from collections import Counter, defaultdict
 MAX_PASSES = 40
 SEED = 7
 
+# A node is a hub when it is far better connected than the graph's norm. Hubs
+# keep their place in the graph but stop *donating* their label, so they can no
+# longer pull two unrelated clusters into one.
+#
+# Measured on the real store: an `Ayush` node created during a portfolio
+# backfill had degree 19 and welded sixteen unrelated projects into a single
+# 27-node blob. Dropping hubs from the graph entirely over-corrects (22
+# communities became 79, mostly debris, because hubs also hold together things
+# that genuinely belong together). Letting them receive a label but not spread
+# one keeps the graph intact and un-welds the blob: 27 becomes 15, and the
+# largest clusters balance out.
+#
+# Relative to mean degree rather than a fixed number, so the rule still means
+# something on a graph ten times this size. The floor stops a tiny sparse graph
+# from calling an ordinary 3-edge node a hub.
+HUB_MIN_DEGREE = 8
+HUB_DEGREE_FACTOR = 4.0
+
 
 def _adjacency(edges: list[tuple[str, str]]) -> dict[str, set[str]]:
     adjacency: dict[str, set[str]] = defaultdict(set)
@@ -62,9 +80,24 @@ def connected_components(node_ids: list[str], edges: list[tuple[str, str]]) -> d
     return {node: index[find(node)] for node in node_ids}
 
 
-def label_propagation(node_ids: list[str], edges: list[tuple[str, str]]) -> dict[str, str]:
+def hubs(degree: dict, node_ids: list[str]) -> set[str]:
+    """Nodes connected far above the graph's norm. See HUB_MIN_DEGREE."""
+    if not node_ids:
+        return set()
+    mean = sum(degree.get(n, 0) for n in node_ids) / len(node_ids)
+    cut = max(HUB_MIN_DEGREE, HUB_DEGREE_FACTOR * mean)
+    return {n for n in node_ids if degree.get(n, 0) >= cut}
+
+
+def label_propagation(
+    node_ids: list[str], edges: list[tuple[str, str]], hub_set: set[str] | None = None
+) -> dict[str, str]:
     """Assign each node a community label: iteratively adopt whichever label is
-    most common among your neighbours, ties broken deterministically."""
+    most common among your neighbours, ties broken deterministically.
+
+    Hubs are skipped as label *sources*. A node with a hub for its only
+    neighbour still follows the hub, so nothing is stranded."""
+    hub_set = hub_set or set()
     adjacency = _adjacency(edges)
     labels = {node: node for node in node_ids}
     order = sorted(node_ids)
@@ -77,7 +110,11 @@ def label_propagation(node_ids: list[str], edges: list[tuple[str, str]]) -> dict
             neighbours = adjacency.get(node)
             if not neighbours:
                 continue
-            counts = Counter(labels[n] for n in neighbours if n in labels)
+            donors = [n for n in neighbours if n in labels and n not in hub_set]
+            if not donors:
+                # Every neighbour is a hub: follow them rather than be stranded.
+                donors = [n for n in neighbours if n in labels]
+            counts = Counter(labels[n] for n in donors)
             if not counts:
                 continue
             top = max(counts.values())
@@ -107,7 +144,8 @@ def detect(nodes: dict[str, str], edges: list[tuple[str, str]]) -> dict:
         degree[source] += 1
         degree[target] += 1
 
-    labels = label_propagation(node_ids, edges)
+    hub_set = hubs(degree, node_ids)
+    labels = label_propagation(node_ids, edges, hub_set)
     components = connected_components(node_ids, edges)
 
     members: dict[str, list[str]] = defaultdict(list)
@@ -131,6 +169,7 @@ def detect(nodes: dict[str, str], edges: list[tuple[str, str]]) -> dict:
 
     rank = {c["id"]: i for i, c in enumerate(communities)}
     return {
+        "hubs": sorted(hub_set),
         "of_node": {node: rank[label] for node, label in labels.items()},
         "communities": [{**c, "index": rank[c["id"]]} for c in communities],
         "components": components,
