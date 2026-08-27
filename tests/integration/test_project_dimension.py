@@ -247,3 +247,41 @@ def test_rendered_dashboard_includes_the_cluster_sidebar(migrated_db):
     assert 'id="clusterList"' in html
     assert "CLUSTERS" in html
     assert 'data-mode="community"' in html, "cluster/project colour toggle must be present"
+
+
+def test_dashboard_is_a_single_self_contained_page(migrated_db):
+    """No external hosts beyond the font stylesheet: this file gets opened from
+    disk and sent around, so it cannot depend on anything being reachable."""
+    import re
+
+    config = _seed(migrated_db)
+
+    html = render_dashboard(fetch_dashboard(connect(migrated_db), config))
+
+    hosts = set(re.findall(r"https?://([a-z.]+)", html))
+    assert hosts <= {"fonts.googleapis.com", "fonts.gstatic.com"}, hosts
+    assert html.count("<script") == 2, "one data block, one app script"
+
+
+def test_dashboard_leaves_no_unreplaced_placeholders(migrated_db):
+    config = _seed(migrated_db)
+
+    html = render_dashboard(fetch_dashboard(connect(migrated_db), config))
+
+    for token in ("__DATA_JSON__", "__TITLE__", "__USER__", "__BODY__"):
+        assert token not in html, token
+
+
+def test_dashboard_escapes_a_script_tag_inside_a_fact(migrated_db):
+    """A fact containing </script> must not be able to close the data block.
+
+    A bare `<script` left inside the JSON string is harmless - it is the
+    closing tag that ends the block, so that is what has to be escaped."""
+    config = _seed(migrated_db)
+    data = fetch_dashboard(connect(migrated_db), config)
+    data["scopes"]["shared"]["facts"][0]["fact"] = "danger </script><script>alert(1)</script>"
+
+    html = render_dashboard(data)
+
+    assert html.count("</script>") == 2, "only the two real closing tags"
+    assert "<\\/script>" in html, "the fact's closing tags must be escaped"
