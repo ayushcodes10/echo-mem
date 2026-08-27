@@ -178,6 +178,19 @@ on the same one is refused rather than silently overwriting the first. A save wh
 `--from` and `--into` are the same tool is recorded but doesn't count toward the bar: the
 criterion is specifically about a *different* tool not needing to be re-told.
 
+The page is graph-first: the canvas is full-bleed and every control floats over
+it. An earlier version put the graph in a column between a cluster list and an
+inspector, and the thing you came to look at got half the screen.
+
+Labels appear for hubs, on hover and on selection — not for every node at once,
+which is illegible at this density and was the main reason the earlier view read
+as noise. Selecting a node dims everything outside its neighbourhood; selecting a
+link dims everything except that one fact.
+
+It commits to dark. A dense graph of luminous nodes reads far better on
+near-black, and a washed-out light variant would be a worse view of the same
+data rather than an equal one.
+
 `--html` is now an alias for `dashboard --out`, kept so a command shipped last week still
 works. Two behaviour changes it prints a note about: it renders **every** scope rather than
 just `--scope`, and it includes superseded facts as history rather than hiding them. Prefer
