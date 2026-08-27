@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 
 from echo_memory.cli.dashboard_html import render_dashboard
+from echo_memory.graph import communities
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.db import connect
 from echo_memory.trial import check
@@ -144,6 +145,19 @@ def fetch_dashboard(conn, config, today=None) -> dict:
             "audit_by_node": by_node,
         }
 
+    # Communities come from the edges, not from the project label: two facts in
+    # one repo can be about different things, and one idea can span repos. Run
+    # across both scopes together so a cluster is not split by which scope
+    # happened to hold it.
+    all_nodes, all_edges = {}, []
+    for scope_data in scopes.values():
+        for node in scope_data["nodes"]:
+            all_nodes[node["id"]] = node["name"]
+        for fact in scope_data["facts"]:
+            if fact["t_invalid"] is None:
+                all_edges.append((fact["source_id"], fact["target_id"]))
+    clusters = communities.detect(all_nodes, all_edges)
+
     projects = sorted(
         {f["project"] for s in scopes.values() for f in s["facts"]},
         key=lambda p: (p == "unknown", p),
@@ -151,6 +165,7 @@ def fetch_dashboard(conn, config, today=None) -> dict:
     agents = sorted({f["agent_id"] for s in scopes.values() for f in s["facts"]})
     return {
         "scopes": scopes,
+        "clusters": clusters,
         "projects": projects,
         "agents": agents,
         "criterion_six": check.build_report(conn, config, today=today),
