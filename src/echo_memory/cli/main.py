@@ -83,6 +83,10 @@ def _add_project_parsers(sub) -> None:
         help="serve it on localhost instead, regenerating on every reload so it stays live",
     )
     dash.add_argument("--port", type=int, default=8787, help="port for --serve (default: 8787)")
+    dash.add_argument(
+        "--open", action="store_true", dest="open_browser",
+        help="open the page in your browser once it is ready",
+    )
 
     reattr = sub.add_parser(
         "reattribute", help="set the project on facts written before projects were recorded"

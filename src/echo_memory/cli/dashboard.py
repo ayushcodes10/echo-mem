@@ -173,7 +173,22 @@ def fetch_dashboard(conn, config, today=None) -> dict:
     }
 
 
-def serve(config, port: int) -> int:
+def _open_browser(url: str) -> None:
+    """Best-effort. A browser that refuses to open is not a reason for the
+    server not to run - the URL is printed either way."""
+    import subprocess
+    import sys as _sys
+
+    opener = "open" if _sys.platform == "darwin" else "xdg-open"
+    try:
+        subprocess.Popen(
+            [opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def serve(config, port: int, open_browser: bool = False) -> int:
     """Regenerates on every request: a snapshot file is stale the moment the
     next episode lands, and the whole point of a dashboard is that you leave it
     open."""
@@ -201,7 +216,10 @@ def serve(config, port: int) -> int:
     # Localhost only, same posture as the MCP server: this page is every fact
     # the user has ever recorded, across every project.
     server = HTTPServer(("127.0.0.1", port), Handler)
-    print(f"Echo Memory dashboard on http://127.0.0.1:{port}  (ctrl-C to stop)")
+    url = f"http://127.0.0.1:{port}"
+    print(f"Echo Memory dashboard on {url}  (ctrl-C to stop)")
+    if open_browser:
+        _open_browser(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -211,7 +229,7 @@ def serve(config, port: int) -> int:
 
 def run(args, config, conn) -> int:
     if args.serve:
-        return serve(config, args.port)
+        return serve(config, args.port, getattr(args, "open_browser", False))
     out = args.out or Path("memory-dashboard.html")
     data = fetch_dashboard(conn, config)
     out.write_text(render_dashboard(data))
@@ -220,4 +238,6 @@ def run(args, config, conn) -> int:
         f"Wrote {out} ({n_facts} facts across {len(data['projects'])} projects). "
         "Use --serve to keep it live instead."
     )
+    if getattr(args, "open_browser", False):
+        _open_browser(out.resolve().as_uri())
     return 0
