@@ -95,7 +95,27 @@ _TEMPLATE = r"""<!doctype html>
     position: absolute; left: 1rem; bottom: 1rem; color: var(--muted);
     font-size: .72rem; pointer-events: none; max-width: 22rem; line-height: 1.5;
   }
-  aside {
+  #clusters {
+    width: 240px; flex: none; border-left: 1px solid var(--line);
+    background: var(--surface); overflow-y: auto; padding: 1rem .9rem 2rem;
+  }
+  #clusters h2 {
+    font-size: .68rem; letter-spacing: .1em; color: var(--muted);
+    margin: 0 0 .7rem; font-weight: 600;
+  }
+  #clusters label.all { display: flex; gap: .5rem; align-items: center; font-size: .78rem; color: var(--ink-soft); margin-bottom: .6rem; cursor: pointer; }
+  #clusterList { list-style: none; margin: 0; padding: 0; }
+  #clusterList li {
+    display: flex; align-items: center; gap: .5rem; padding: .22rem 0;
+    font-size: .79rem; cursor: pointer; color: var(--ink-soft);
+  }
+  #clusterList li:hover { color: var(--ink); }
+  #clusterList li.off { opacity: .38; }
+  #clusterList .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  #clusterList .label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #clusterList .count { color: var(--muted); font-family: 'IBM Plex Mono', monospace; font-size: .72rem; }
+  @media (max-width: 1100px) { #clusters { display: none; } }
+  aside#inspector {
     width: 390px; flex: none; border-left: 1px solid var(--line);
     background: var(--surface); overflow-y: auto; padding: 1.1rem 1.15rem 2rem;
   }
@@ -159,6 +179,10 @@ _TEMPLATE = r"""<!doctype html>
     <button data-scope="solo" aria-pressed="false">solo</button>
     <button data-scope="shared" aria-pressed="false">shared</button>
   </div>
+  <div class="seg" id="colorSeg">
+    <button data-mode="community" aria-pressed="true">by cluster</button>
+    <button data-mode="project" aria-pressed="false">by project</button>
+  </div>
   <div class="chips" id="projectChips"></div>
   <div class="spacer"></div>
   <input type="search" id="search" placeholder="filter facts&hellip;" autocomplete="off">
@@ -168,6 +192,11 @@ _TEMPLATE = r"""<!doctype html>
     <canvas id="graph"></canvas>
     <div class="hint">Drag to pan &middot; scroll to zoom &middot; drag a node to pin it &middot; click a <strong>node</strong> for its facts, click a <strong>link</strong> for what that one fact carries</div>
   </div>
+  <aside id="clusters">
+    <h2>CLUSTERS</h2>
+    <label class="all"><input type="checkbox" id="allClusters" checked> Select all</label>
+    <ul id="clusterList"></ul>
+  </aside>
   <aside id="inspector"></aside>
 </main>
 <script id="data" type="application/json">__DATA_JSON__</script>
@@ -185,12 +214,29 @@ _TEMPLATE = r"""<!doctype html>
     Object.assign(auditByNode, s.audit_by_node);
   }
   const nodeById = Object.fromEntries(nodes.map(n => [n.id, n]));
+  const CLUSTERS = DATA.clusters || { of_node: {}, communities: [], components: {} };
+  const clusterOf = CLUSTERS.of_node || {};
+  const clusterById = Object.fromEntries((CLUSTERS.communities || []).map(c => [c.index, c]));
   const factById = Object.fromEntries(facts.map(f => [f.id, f]));
 
   /* Palette assigned by hashing the project name: project values are free
      text an operator chooses, so a hardcoded per-name palette would be wrong
      the first time someone adds a project. */
   const PALETTE = ["#A9631F","#4E7B45","#3C6E8F","#8B4A6B","#9B3B2E","#6B5B95","#357A74","#8A6D1F"];
+  /* Community colour by index rather than by hashing a name: adjacent indices
+     get well-separated hues, so the largest clusters - the ones a reader is
+     actually trying to tell apart - never come out near-identical. */
+  function colorForCluster(i) {
+    if (i === undefined || i === null) return "var(--muted)";
+    const hue = (i * 137.508) % 360;               // golden angle
+    const light = i % 2 ? 62 : 52;
+    return `hsl(${hue.toFixed(1)} 62% ${light}%)`;
+  }
+  function colorForNode(id) {
+    return state.colorBy === "project"
+      ? colorForProject(dominantProject(id))
+      : colorForCluster(clusterOf[id]);
+  }
   function colorForProject(p) {
     if (p === "unknown") return "var(--muted)";
     let h = 0;
@@ -221,12 +267,45 @@ _TEMPLATE = r"""<!doctype html>
 
   /* ---------- filter state ---------- */
   const state = {
+    colorBy: "community",
+    hiddenClusters: new Set(),
     scope: "all",
     projects: new Set(DATA.projects),
     query: "",
     selNode: null,
     selEdge: null,
   };
+
+  const clusterListEl = document.getElementById("clusterList");
+  function paintClusterList() {
+    clusterListEl.innerHTML = (CLUSTERS.communities || []).map(c => `
+      <li data-cluster="${c.index}" class="${state.hiddenClusters.has(c.index) ? "off" : ""}">
+        <span class="swatch" style="background:${colorForCluster(c.index)}"></span>
+        <span class="label" title="${esc(c.name)}">${esc(c.name)}</span>
+        <span class="count">${c.size}</span>
+      </li>`).join("");
+  }
+  clusterListEl.addEventListener("click", e => {
+    const li = e.target.closest("li[data-cluster]");
+    if (!li) return;
+    const idx = Number(li.dataset.cluster);
+    if (state.hiddenClusters.has(idx)) state.hiddenClusters.delete(idx);
+    else state.hiddenClusters.add(idx);
+    document.getElementById("allClusters").checked = state.hiddenClusters.size === 0;
+    paintClusterList(); applyFilter();
+  });
+  document.getElementById("allClusters").addEventListener("change", e => {
+    state.hiddenClusters = e.target.checked
+      ? new Set()
+      : new Set((CLUSTERS.communities || []).map(c => c.index));
+    paintClusterList(); applyFilter();
+  });
+  document.getElementById("colorSeg").addEventListener("click", e => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    state.colorBy = b.dataset.mode;
+    [...e.currentTarget.children].forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  });
 
   const chipsEl = document.getElementById("projectChips");
   chipsEl.innerHTML = DATA.projects.map(p =>
@@ -256,6 +335,10 @@ _TEMPLATE = r"""<!doctype html>
   function factVisible(f) {
     if (state.scope !== "all" && f.scope !== state.scope) return false;
     if (!state.projects.has(f.project)) return false;
+    if (state.hiddenClusters.size) {
+      const a = clusterOf[f.source_id], b = clusterOf[f.target_id];
+      if (state.hiddenClusters.has(a) && state.hiddenClusters.has(b)) return false;
+    }
     if (state.query) {
       const hay = `${f.fact} ${f.relation_type} ${f.source_name} ${f.target_name} ${f.project} ${f.agent_id}`.toLowerCase();
       if (!hay.includes(state.query)) return false;
@@ -300,18 +383,39 @@ _TEMPLATE = r"""<!doctype html>
     canvas.width = W * DPR; canvas.height = H * DPR;
   }
 
+  /* Each community gets its own anchor on a ring, and its members are pulled
+     gently toward it. Without this the whole graph collapses into one blob
+     around the centre and unrelated memories sit on top of each other; with
+     it, clusters occupy their own territory and the islands are visible at a
+     glance - which is the entire point of detecting them. */
+  function clusterAnchor(idx, W, H) {
+    const total = Math.max((CLUSTERS.communities || []).length, 1);
+    const angle = (idx / total) * Math.PI * 2;
+    const radius = Math.min(W, H) * 0.33;
+    return { x: W / 2 + Math.cos(angle) * radius, y: H / 2 + Math.sin(angle) * radius };
+  }
+
   function step() {
     const cx = W / 2, cy = H / 2;
     const live = sim.filter(s => liveNodeIds.has(s.id));
     for (let i = 0; i < live.length; i++) {
       const a = live[i];
-      a.vx += (cx - a.x) * 0.0022; a.vy += (cy - a.y) * 0.0022;
+      const ci = clusterOf[a.id];
+      if (ci !== undefined && state.colorBy === "community") {
+        const anchor = clusterAnchor(ci, W, H);
+        a.vx += (anchor.x - a.x) * 0.006; a.vy += (anchor.y - a.y) * 0.006;
+      } else {
+        a.vx += (cx - a.x) * 0.0022; a.vy += (cy - a.y) * 0.0022;
+      }
       for (let j = 0; j < live.length; j++) {
         if (i === j) continue;
         const b = live[j];
         const dx = a.x - b.x, dy = a.y - b.y;
         const d2 = Math.max(dx * dx + dy * dy, 1);
-        const f = 1900 / d2;
+        // Push harder between clusters than within one, so boundaries read as
+        // gaps rather than as slightly thinner regions of the same mass.
+        const apart = clusterOf[a.id] !== clusterOf[b.id] ? 2.4 : 1;
+        const f = (1900 * apart) / d2;
         const d = Math.sqrt(d2);
         a.vx += (dx / d) * f; a.vy += (dy / d) * f;
       }
@@ -365,7 +469,7 @@ _TEMPLATE = r"""<!doctype html>
       ctx.globalAlpha = dim ? 0.12 : 1;
       ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y);
       ctx.strokeStyle = selected || hoverEdge === f.id ? accent
-        : (near && touched) ? colorForProject(f.project) : lineCol;
+        : (near && touched) ? colorForNode(f.source_id) : lineCol;
       ctx.lineWidth = selected ? 3 : hoverEdge === f.id ? 2.4 : 1.1;
       ctx.stroke();
       if (selected || hoverEdge === f.id) {
@@ -393,7 +497,7 @@ _TEMPLATE = r"""<!doctype html>
         ctx.fillStyle = resolveVar("var(--accent-glow)"); ctx.fill();
       }
       ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = colorForProject(dominantProject(s.id)); ctx.fill();
+      ctx.fillStyle = colorForNode(s.id); ctx.fill();
       if (n.scope === "solo") {
         ctx.strokeStyle = resolveVar("var(--surface)"); ctx.lineWidth = 2; ctx.stroke();
       }
@@ -632,6 +736,7 @@ _TEMPLATE = r"""<!doctype html>
     s.x = W / 2 + (Math.random() - 0.5) * 260;
     s.y = H / 2 + (Math.random() - 0.5) * 260;
   }
+  paintClusterList();
   applyFilter();
   for (let i = 0; i < 220; i++) step();
   tick();

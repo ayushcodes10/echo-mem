@@ -222,3 +222,28 @@ def test_cli_reattribute_without_arguments_lists_and_fails(migrated_db, monkeypa
 
     assert exit_code == 1
     assert "session sess-1" in capsys.readouterr().out
+
+
+def test_dashboard_payload_carries_detected_clusters(migrated_db):
+    """Clusters come from the edges, not the project label - two facts in one
+    repo can be about different things, and one idea can span repos."""
+    config = _seed(migrated_db)
+
+    data = fetch_dashboard(connect(migrated_db), config)
+
+    clusters = data["clusters"]
+    assert clusters["communities"], "expected at least one detected cluster"
+    assert set(clusters["of_node"]) <= {
+        n["id"] for s in data["scopes"].values() for n in s["nodes"]
+    }
+    assert all("name" in c and "size" in c and "index" in c for c in clusters["communities"])
+
+
+def test_rendered_dashboard_includes_the_cluster_sidebar(migrated_db):
+    config = _seed(migrated_db)
+
+    html = render_dashboard(fetch_dashboard(connect(migrated_db), config))
+
+    assert 'id="clusterList"' in html
+    assert "CLUSTERS" in html
+    assert 'data-mode="community"' in html, "cluster/project colour toggle must be present"

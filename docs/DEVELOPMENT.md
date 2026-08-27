@@ -612,6 +612,36 @@ One page over both scopes and every project. Nodes are coloured by the project
 that talks about them most, filtered by the project chips and the scope
 segment, searchable by fact text.
 
+### Clusters: separating unrelated memory
+
+Nodes are coloured by **detected cluster**, not by project. Project is metadata
+— it says where a fact was written, not what it belongs with. Two facts in one
+repo can be about entirely different things, and one idea can span repos.
+
+Clusters come from the edges, via label propagation over the whole store. On
+the real graph that separates `Trade-Ush` from `dugout-be` without being told
+they're unrelated, and splits eigen into the product and its self-healing loop —
+something a project label cannot do, because both are "eigen".
+
+Three levels of separation, weakest to strongest:
+
+| | |
+|---|---|
+| **cluster** | densely connected facts — related memory |
+| **component** | no path at all between them — genuinely unrelated memory |
+| **project** | where it was written; available as a colour toggle |
+
+The sidebar lists clusters largest-first, named after each one's most-connected
+node, with counts. Click to toggle one off. Layout anchors each cluster to its
+own position and pushes harder between clusters than within one, so islands
+read as gaps rather than as thinner regions of the same blob.
+
+Label propagation rather than Louvain, hand-written rather than `networkx`: the
+algorithm is thirty lines, this graph is hundreds of nodes rather than millions,
+and `networkx` is a v1b dependency (PR-B2) the v1a gate hasn't cleared.
+Deterministic by construction — a graph that reshuffled its colours on every
+render would be unreadable.
+
 Clicking a **node** shows the facts it takes part in, active and superseded,
 plus how it resolved during ingestion. Clicking a **link** shows what that one
 fact carries:
