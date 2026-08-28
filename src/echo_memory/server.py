@@ -223,7 +223,7 @@ def record_recall_save(
     and the fact was originally written by a DIFFERENT tool or a past session.
 
     That last part is the whole point. written_by is the tool that recorded
-    the fact (visible on every query_memory result as agent_id) and
+    the fact: read it from `provenance.agent_id` on any query_memory result.
     recalled_by is you, defaulting to this server's own agent id. If they're
     the same tool, the save is still recorded but does not count toward the
     trial's bar - recalling your own note from ten minutes ago is not the

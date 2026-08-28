@@ -2,10 +2,16 @@
 that keeps it from trampling a project's existing config."""
 
 import json
+from pathlib import Path
 
 import pytest
 
-from echo_memory.cli.install import _strip_frontmatter, install, skill_text
+from echo_memory.cli.install import (
+    _merge_json,
+    _strip_frontmatter,
+    install,
+    skill_text,
+)
 from echo_memory.infra.config import Config
 
 CONFIG = Config(
@@ -139,3 +145,46 @@ def test_project_name_defaults_to_the_directory(tmp_path):
 
 def test_strip_frontmatter_leaves_body_untouched_when_absent():
     assert _strip_frontmatter("# Title\n\nbody") == "# Title\n\nbody"
+
+
+def test_each_client_announces_its_own_agent_id(tmp_path):
+    """Until 2026-08-28 every client got `config.agent_id`, so Claude Code and
+    Cursor both wrote facts tagged claude-code. That made the v1a cross-tool
+    criterion (`written_by != recalled_by`) unsatisfiable no matter how well
+    recall worked - there was only ever one writer in the data."""
+    project = tmp_path / "repo"
+    project.mkdir()
+
+    install(project, CONFIG, ("claude", "cursor"), project="repo")
+
+    claude = json.loads((project / ".mcp.json").read_text())
+    cursor = json.loads((project / ".cursor" / "mcp.json").read_text())
+    claude_id = claude["mcpServers"]["echo-memory"]["env"]["ECHO_MEMORY_AGENT_ID"]
+    cursor_id = cursor["mcpServers"]["echo-memory"]["env"]["ECHO_MEMORY_AGENT_ID"]
+
+    assert claude_id == "claude-code"
+    assert cursor_id == "cursor"
+    assert claude_id != cursor_id, "cross-tool recall is undetectable if clients share an id"
+
+
+def test_a_config_is_never_left_truncated(tmp_path, monkeypatch):
+    """write_text truncates before it writes. These helpers also write
+    machine-global files under no version control, where a half-written
+    ~/.claude.json costs the user every MCP server they have."""
+    target = tmp_path / "mcp.json"
+    target.write_text('{"mcpServers": {"other": {"command": "keep-me"}}}')
+
+    real_write = Path.write_text
+
+    def explode(self, text, *a, **kw):
+        if self.name.endswith(".tmp"):
+            raise KeyboardInterrupt("killed mid-write")
+        return real_write(self, text, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", explode)
+    with pytest.raises(KeyboardInterrupt):
+        _merge_json(target, ("mcpServers", "echo-memory"), {"command": "x"})
+    monkeypatch.undo()
+
+    assert json.loads(target.read_text())["mcpServers"]["other"]["command"] == "keep-me"
+    assert not list(tmp_path.glob(".*echo-mem.tmp")), "temp file left behind"

@@ -12,6 +12,31 @@ genuinely un-auto-checkable is criterion 3, a real hybrid-retrieval win."""
 from echo_memory.cli.graph import fetch_graph
 from echo_memory.cli.trial import render_criterion_six
 
+GRAPH = "echo_memory"
+
+
+def writers(conn, group_id: str) -> dict[str, int]:
+    """Facts written per agent id.
+
+    The totals above this say nothing about *who* wrote. Once several clients
+    are wired, a tool that was registered but has never written is
+    indistinguishable from one writing normally - and that is precisely the
+    failure this store spent three weeks in: criterion 6 read 0/3 the whole
+    time, and nobody could tell whether the recall loop was failing or whether
+    only one agent had ever written a fact. It was the latter."""
+    rows = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH ()-[e:FACT]->()
+            WHERE e.group_id = '{group_id}'
+            RETURN e.agent_id
+        $$) AS (agent_id agtype)"""
+    ).fetchall()
+    counts: dict[str, int] = {}
+    for (agent_id,) in rows:
+        name = str(agent_id).strip('"')
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
 
 def fetch_status(conn, config) -> dict:
     scopes = {}
@@ -38,6 +63,7 @@ def fetch_status(conn, config) -> dict:
             "active_facts": len(graph["facts"]),
             "write_episode_calls": row[0] if row else 0,
             "audit_counts": audit_counts,
+            "writers": writers(conn, group_id),
         }
     return scopes
 
@@ -56,6 +82,18 @@ def render_status(scopes: dict, criterion_six: dict) -> str:
             lines.append(f"  audit: {parts}")
         else:
             lines.append("  audit: (none yet)")
+
+        by_agent = s.get("writers") or {}
+        if by_agent:
+            ranked = sorted(by_agent.items(), key=lambda kv: (-kv[1], kv[0]))
+            written = ", ".join(f"{agent}={n}" for agent, n in ranked)
+            lines.append(f"  written by: {written}")
+            if len(ranked) == 1:
+                lines.append(
+                    f"  ! only {ranked[0][0]} has ever written here, so a cross-tool "
+                    "recall save is not yet possible - run `echo-memory install` for a "
+                    "second client"
+                )
         lines.append("")
 
     both_have_data = all(s["nodes"] > 0 for s in scopes.values())

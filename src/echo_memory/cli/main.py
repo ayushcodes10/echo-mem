@@ -14,8 +14,8 @@ from pathlib import Path
 from echo_memory.audit.get_audit_log import get_fact_history
 from echo_memory.cli import analyse as analyse_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
+from echo_memory.cli import initdb, reattribute_cmd
 from echo_memory.cli import queue as queue_cmd
-from echo_memory.cli import reattribute_cmd
 from echo_memory.cli import recall as recall_cmd
 from echo_memory.cli import session_start as session_start_cmd
 from echo_memory.cli import trial as trial_cmd
@@ -169,6 +169,14 @@ def _add_project_parsers(sub) -> None:
     boot.add_argument(
         "--only", action="append", choices=list(bootstrap_mod.SOURCES), metavar="SOURCE",
         help=f"limit to one source; repeatable ({', '.join(bootstrap_mod.SOURCES)})",
+    )
+
+    initdb_parser = sub.add_parser(
+        "init-db", help="create or upgrade the schema (works from a pip install)"
+    )
+    initdb_parser.add_argument(
+        "--check", action="store_true",
+        help="report the schema version instead of changing anything",
     )
 
     inst = sub.add_parser(
@@ -347,6 +355,21 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         result = bootstrap_mod.run(conn, sources=sources, force=args.force)
         print(bootstrap_mod.render(result), end="")
+        return 0
+
+    if args.command == "init-db":
+        try:
+            if args.check:
+                initdb.current(config.database_url)
+            else:
+                initdb.upgrade(config.database_url)
+                print("Schema is at head. Echo Memory is ready to use.")
+        except Exception as e:
+            hint = initdb.explain(e)
+            if hint is None:
+                raise
+            print(f"error: {hint}", file=sys.stderr)
+            return 1
         return 0
 
     if args.command == "install":
