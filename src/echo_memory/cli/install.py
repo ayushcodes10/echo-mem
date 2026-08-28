@@ -25,6 +25,7 @@ holds other servers, and clobbering a project's MCP config to add one entry
 would be a rude way to install anything."""
 
 import json
+import os
 import sys
 from importlib import resources
 from pathlib import Path
@@ -39,17 +40,38 @@ def skill_text() -> str:
     return resources.files("echo_memory.skill").joinpath("SKILL.md").read_text()
 
 
-def _server_entry(config, project: str) -> dict:
+# The agent id each client announces itself as. Until 2026-08-28 every client
+# was handed `config.agent_id`, so Claude Code and Cursor both wrote facts
+# tagged `claude-code` - which made the v1a cross-tool criterion
+# (`written_by != recalled_by`) impossible to satisfy no matter how well recall
+# worked, because there was only ever one writer in the data. The command that
+# exists to enable cross-tool memory was the thing preventing it from being
+# observed.
+CLIENT_AGENT_IDS = {
+    "claude": "claude-code",
+    "claude-desktop": "claude-desktop",
+    "cursor": "cursor",
+    "windsurf": "windsurf",
+    "zed": "zed",
+    "vscode": "vscode",
+}
+
+
+def _server_entry(config, project: str, agent_id: str | None = None) -> dict:
     """ECHO_MEMORY_PROJECT is pinned explicitly rather than left to cwd
     detection: a project-scoped install is a statement about which project this
     is, and an agent launched from a subdirectory or a different shell
-    shouldn't be able to file its facts somewhere else."""
+    shouldn't be able to file its facts somewhere else.
+
+    `agent_id` identifies the *client*, not the user's shell. Passing None
+    falls back to `config.agent_id`, which is only correct when the caller has
+    no better information."""
     return {
         "command": sys.executable,
         "args": ["-m", "echo_memory.server"],
         "env": {
             "ECHO_MEMORY_USER_ID": config.user_id,
-            "ECHO_MEMORY_AGENT_ID": config.agent_id,
+            "ECHO_MEMORY_AGENT_ID": agent_id or config.agent_id,
             "ECHO_MEMORY_DATABASE_URL": config.database_url,
             "ECHO_MEMORY_PROJECT": project,
         },
@@ -65,6 +87,8 @@ def _merge_json(path: Path, key_path: tuple[str, ...], value: dict) -> str:
             existing = json.loads(path.read_text())
         except ValueError as e:
             raise ValueError(f"{path} is not valid JSON, refusing to overwrite it: {e}") from e
+        except PermissionError as e:
+            raise PermissionError(f"cannot read {path}: {e}") from e
 
     cursor = existing
     for key in key_path[:-1]:
@@ -75,8 +99,26 @@ def _merge_json(path: Path, key_path: tuple[str, ...], value: dict) -> str:
     cursor[key_path[-1]] = value
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(existing, indent=2) + "\n")
+    _atomic_write(path, json.dumps(existing, indent=2) + "\n")
     return "updated" if was is not None else "created"
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a temp file in the same directory, then os.replace onto the
+    target - which is atomic on POSIX and Windows.
+
+    A plain write_text truncates before it writes, so a process killed between
+    the two leaves a zero-length config. Under a project-scoped install that is
+    a `git checkout` away. These same helpers now write machine-global files
+    like ~/.claude.json, which are under no version control at all, and a
+    truncated one costs the user every MCP server they have in every project."""
+    tmp = path.with_name(f".{path.name}.echo-mem.tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 CURSOR_RULE = """---
@@ -104,12 +146,14 @@ def install(root: Path, config, targets: tuple[str, ...], project: str | None = 
         done.append(f"{state}  {skill_path.relative_to(root)}")
 
         mcp = root / ".mcp.json"
-        state = _merge_json(mcp, ("mcpServers", SERVER_KEY), _server_entry(config, project))
+        entry = _server_entry(config, project, CLIENT_AGENT_IDS["claude"])
+        state = _merge_json(mcp, ("mcpServers", SERVER_KEY), entry)
         done.append(f"{state}  {mcp.relative_to(root)}")
 
     if "cursor" in targets:
         mcp = root / ".cursor" / "mcp.json"
-        state = _merge_json(mcp, ("mcpServers", SERVER_KEY), _server_entry(config, project))
+        entry = _server_entry(config, project, CLIENT_AGENT_IDS["cursor"])
+        state = _merge_json(mcp, ("mcpServers", SERVER_KEY), entry)
         done.append(f"{state}  {mcp.relative_to(root)}")
 
         # Cursor has no skills; a project rule with alwaysApply is the nearest

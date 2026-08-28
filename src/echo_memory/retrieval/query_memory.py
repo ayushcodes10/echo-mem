@@ -170,17 +170,28 @@ def _agtype_str(v):
 
 
 def _fetch_facts(conn, edge_ids: list[str]) -> dict[str, dict]:
-    """Batch-fetch fact/confidence/causal_hint/provenance for a set of edge
-    ids via one Cypher UNWIND query, not N+1 lookups."""
+    """Batch-fetch fact/confidence/causal_hint/provenance/agent_id/project for a
+    set of edge ids via one Cypher UNWIND query, not N+1 lookups.
+
+    `agent_id` is returned because `record_recall_save` asks the caller for
+    `written_by`, and until 2026-08-28 the only documented source for that value
+    was "visible on every query_memory result as agent_id" - a field this
+    function did not return. An agent following the instruction found nothing
+    and had to guess or skip, which is one of three reasons the v1a cross-tool
+    criterion had never once been satisfied. It has been on the edge and indexed
+    (`fact_group_agent_idx`) since migration 0003; only the read path was
+    missing."""
     if not edge_ids:
         return {}
     rows = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             UNWIND $ids AS eid
             MATCH ()-[e:FACT]->() WHERE id(e) = eid
-            RETURN id(e), e.fact, e.confidence, e.causal_hint, e.provenance
+            RETURN id(e), e.fact, e.confidence, e.causal_hint, e.provenance,
+                   e.agent_id, e.project
         $$, %s) AS (edge_id agtype, fact agtype, confidence agtype,
-                     causal_hint agtype, provenance agtype)""",
+                     causal_hint agtype, provenance agtype, agent_id agtype,
+                     project agtype)""",
         (json.dumps({"ids": [int(i) for i in edge_ids]}),),
     ).fetchall()
     return {
@@ -189,10 +200,22 @@ def _fetch_facts(conn, edge_ids: list[str]) -> dict[str, dict]:
             "fact": _agtype_str(fact),
             "confidence": _agtype_str(confidence),
             "causal_hint": _agtype_str(causal_hint),
-            "provenance": json.loads(str(provenance)) if provenance is not None else None,
+            "provenance": _provenance(provenance, agent_id, project),
         }
-        for edge_id, fact, confidence, causal_hint, provenance in rows
+        for edge_id, fact, confidence, causal_hint, provenance, agent_id, project in rows
     }
+
+
+def _provenance(raw, agent_id, project) -> dict | None:
+    """Attribution belongs inside `provenance` rather than beside it: session and
+    episode already live there, and a caller asking "where did this come from?"
+    should find every part of the answer in one place."""
+    out = json.loads(str(raw)) if raw is not None else {}
+    if not isinstance(out, dict):
+        out = {"episode": out}
+    out["agent_id"] = _agtype_str(agent_id)
+    out["project"] = _agtype_str(project)
+    return out
 
 
 def query_memory(
