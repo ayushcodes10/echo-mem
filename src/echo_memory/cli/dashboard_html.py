@@ -288,7 +288,14 @@ _TEMPLATE = r"""<!doctype html>
       "</b> facts</span><span><b>" + (CL.communities || []).length +
       "</b> clusters</span><span><b>" + shown.size + "</b> projects</span>";
   }
-  const radius = id => 4 + Math.min(deg[id] || 0, 10) * 1.35;
+  // Below this many nodes every node is labelled; above it only hubs are.
+  const LABEL_ALL_BELOW = 45;
+  /* A sparse graph is mostly degree-1 nodes, which the degree term renders as
+     specks. Scale the floor up when there is room to spare. */
+  const radius = id => {
+    const base = liveIds.size <= LABEL_ALL_BELOW ? 6.5 : 4;
+    return base + Math.min(deg[id] || 0, 10) * 1.35;
+  };
 
   const canvas = document.getElementById("graph"), ctx = canvas.getContext("2d");
   let W = 0, H = 0, DPR = 1;
@@ -301,9 +308,14 @@ _TEMPLATE = r"""<!doctype html>
   /* Anchor each cluster to its own territory. Without this everything collapses
      toward the centre and unrelated memories sit on top of each other; the
      islands are the whole point of detecting clusters. */
+  /* Ring radius grows with cluster count. A fixed radius throws two clusters to
+     opposite edges of the screen with a void between them, which reads as a
+     rendering fault rather than as separation. */
   function anchor(i) {
     const total = Math.max((CL.communities || []).length, 1);
-    const a = (i / total) * Math.PI * 2, r = Math.min(W, H) * 0.34;
+    const a = (i / total) * Math.PI * 2;
+    const spread = Math.min(1, 0.28 + total * 0.11);
+    const r = Math.min(W, H) * 0.34 * spread;
     return { x: W / 2 + Math.cos(a) * r, y: H / 2 + Math.sin(a) * r };
   }
   function step() {
@@ -353,6 +365,9 @@ _TEMPLATE = r"""<!doctype html>
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     ctx.clearRect(0, 0, W, H);
     const near = neighbourhood();
+    // Labels drawn this frame, so a later one can decline to overlap an
+    // earlier one. Two names on top of each other are worse than one name.
+    const placed = [];
     for (const f of live) {
       const a = simById[f.source_id], b = simById[f.target_id];
       if (!a || !b) continue;
@@ -407,14 +422,27 @@ _TEMPLATE = r"""<!doctype html>
       /* Label hubs, hovered and selected nodes only. Labelling every node at
          once is illegible and was the main reason the earlier view read as
          noise. */
+      /* Labelling every node at 150+ is illegible, but withholding labels on a
+         small graph makes it unreadable in the other direction - a new store
+         has a dozen nodes, all of degree 1, and would render entirely
+         anonymous. Below the threshold, name everything. */
       const isHub = (deg[s.id] || 0) >= 4;
-      if (!dim && (isSel || isHov || (isHub && view.k > 0.7) || view.k > 1.55)) {
-        ctx.globalAlpha = isSel || isHov ? 1 : 0.72;
+      const smallGraph = liveIds.size <= LABEL_ALL_BELOW;
+      if (!dim && (isSel || isHov || smallGraph || (isHub && view.k > 0.7) || view.k > 1.55)) {
         ctx.font = (isSel || isHov ? "600 " : "500 ") + "11.5px Inter, sans-serif";
-        ctx.textAlign = "center"; ctx.textBaseline = "top";
-        ctx.lineWidth = 3; ctx.strokeStyle = "rgba(7,9,12,.9)";
-        ctx.strokeText(n.name, p.x, p.y + r + 6);
-        ctx.fillStyle = "#D6DDE8"; ctx.fillText(n.name, p.x, p.y + r + 6);
+        const tw = ctx.measureText(n.name).width;
+        const box = { x: p.x - tw / 2, y: p.y + r + 5, w: tw, h: 14 };
+        const clash = placed.some(o =>
+          box.x < o.x + o.w && box.x + box.w > o.x && box.y < o.y + o.h && box.y + box.h > o.y);
+        // Selection and hover always win: those you asked for.
+        if (!clash || isSel || isHov) {
+          placed.push(box);
+          ctx.globalAlpha = isSel || isHov ? 1 : 0.72;
+          ctx.textAlign = "center"; ctx.textBaseline = "top";
+          ctx.lineWidth = 3; ctx.strokeStyle = "rgba(7,9,12,.9)";
+          ctx.strokeText(n.name, p.x, p.y + r + 6);
+          ctx.fillStyle = "#D6DDE8"; ctx.fillText(n.name, p.x, p.y + r + 6);
+        }
       }
       ctx.globalAlpha = 1;
     }
