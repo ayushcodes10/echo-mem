@@ -145,3 +145,22 @@ def test_cli_emits_hook_json_when_something_matches(migrated_db, monkeypatch, ca
     payload = json.loads(capsys.readouterr().out)
     assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
     assert "dugout-dev-alb" in payload["hookSpecificOutput"]["additionalContext"]
+
+
+def test_recalled_facts_carry_the_agent_that_wrote_them(migrated_db):
+    """`record_recall_save` asks the caller for `written_by`, and its docstring
+    names query_memory as the source. Until 2026-08-28 that field was not in the
+    response: provenance carried session_id and source_episode_id only. An agent
+    following the instruction found nothing, which is one of three reasons the
+    cross-tool criterion had never been satisfied once."""
+    config = _seed(migrated_db)
+
+    result = recall.recall_for_prompt(
+        connect(migrated_db), config, "is chat-module-api dev or prod"
+    )
+
+    assert result["facts"], "seeded fact should be retrievable"
+    provenance = result["facts"][0]["provenance"]
+    assert provenance["agent_id"] == "claude-code"
+    assert provenance["project"] == "dugout"
+    assert "session_id" in provenance, "existing provenance keys must survive"
