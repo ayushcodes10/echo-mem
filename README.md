@@ -100,6 +100,76 @@ tool-calling loop); and see
 [`docs/designs/echo-memory-design.md`](docs/designs/echo-memory-design.md) for the
 current build plan and progress.
 
+## The graph
+
+Memory is a graph, not a list of notes. Entities are nodes; a fact is an **edge**
+between two of them. That is the whole data model, and everything below follows
+from it.
+
+![The memory graph](docs/images/graph-overview.png)
+
+Three projects here. `checkout-api`, `mobile-app` and `data-pipeline` were
+recorded in separate sessions and never told about each other, yet the picture
+already separates them — because separation is a property of the edges, not a
+label anyone applied.
+
+**Clusters come from structure.** Densely connected facts are grouped by label
+propagation over the edges, and each cluster is named after its most-connected
+node. That is why `data-pipeline` sits apart on the left: nothing it knows
+touches payments. It is also why `checkout-api` and `mobile-app` share a cluster
+despite being different codebases — they genuinely do share an idea, and the
+graph found it rather than being told.
+
+**Components are the stronger claim.** Two nodes in different components have no
+path between them at all, which is the strongest statement this graph can make
+that two memories are unrelated.
+
+**Projects are a facet, not the structure.** Every fact records the project it
+was written from, and you can colour by it, but project says *where a fact was
+written*, not *what it belongs with*.
+
+### Click a node: everything it takes part in
+
+![A node selected](docs/images/graph-node-selected.png)
+
+`idempotency keys` is the concept that joined those two codebases. The panel
+shows it referenced from **checkout-api twice and mobile-app once**, the three
+facts it appears in, and how the node itself resolved — each mention matched an
+existing node by exact name rather than creating a duplicate.
+
+Nobody wrote "these projects are related." Two sessions independently recorded a
+fact about idempotency keys, entity resolution matched them to one node, and the
+relationship exists as a consequence.
+
+### Click a link: why memory believes it
+
+![A fact selected](docs/images/graph-fact-selected.png)
+
+This is what a knowledge graph gives you that a code map cannot. Selecting the
+edge answers, for that single fact:
+
+| | |
+|---|---|
+| **what** | the sentence, its `relation_type`, and how confidently it was stated |
+| **when** | when it became valid, and when it was superseded if it has been |
+| **who** | which agent wrote it, in which session |
+| **where** | which project it came from |
+| **why** | the audit trail — created, superseded from what to what, and the entity-resolution rationale for the nodes at either end |
+
+A superseded fact is never deleted. It stops being drawn, because the graph no
+longer asserts that relationship, but it stays reachable from its node and keeps
+its full history. `echo-memory why <fact_id>` prints the same trail in a terminal.
+
+### Seeing your own
+
+```bash
+echo-memory dashboard --serve --open
+```
+
+The images above come from a synthetic dataset (`scripts/demo-seed.py`) rather
+than a real store, for the obvious reason: a real memory graph is full of
+hostnames, account numbers and client names.
+
 ## Architecture
 
 - **Storage:** PostgreSQL with the `pgvector` and Apache AGE extensions
