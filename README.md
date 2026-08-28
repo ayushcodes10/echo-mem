@@ -176,12 +176,13 @@ hostnames, account numbers and client names.
 - **Retrieval:** hybrid vector + full-text search (v1a), with Personalized PageRank via
   `networkx` added in v1b for multi-hop associative retrieval
 - **Interface:** [Model Context Protocol](https://modelcontextprotocol.io) server:
-  `write_episode`, `query_memory`, `get_audit_log`
+  `write_episode`, `query_memory`, `record_recall_save`, `get_audit_log`
 
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Issues and PRs welcome; please read the design
-docs first so proposals fit the staged build plan.
+docs first so proposals fit the staged build plan. A first pull request is asked to sign
+the [Contributor License Agreement](CLA.md) — once, in the PR thread.
 
 ## License
 
