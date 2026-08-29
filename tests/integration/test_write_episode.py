@@ -390,3 +390,30 @@ def test_negation_pair_never_silently_merges_even_at_high_similarity(migrated_db
     assert len(result["ambiguous_entities"]) == 1
     (node_count,) = conn.execute("SELECT count(*) FROM public.node_embedding").fetchone()
     assert node_count == 1, "t_invalid must not silently merge into t_valid"
+
+
+def test_superseding_a_fact_is_reported_to_the_agent(migrated_db):
+    """Supersession is the commonest contradiction and it already happened
+    silently: _find_active_edge invalidated the predecessor, wrote an audit
+    entry, and told the caller nothing. An agent that just overwrote what it
+    recorded last week had no way to know it had."""
+    conn = connect(migrated_db)
+    embedder = LocalEmbedder()
+    ents = [{"name": "api", "type": "service"}, {"name": "prod", "type": "env"}]
+
+    def episode(session, text):
+        return write_episode(
+            conn, "g1", session, ents,
+            [{"source": "api", "target": "prod", "relation_type": "runs_on",
+              "fact": text, "confidence": "extracted"}],
+            {}, embedder,
+        )
+
+    first = episode("sess-1", "api runs on prod")
+    second = episode("sess-2", "api runs on staging")
+
+    assert first["superseded"] == [], "nothing to supersede on the first write"
+    assert len(second["superseded"]) == 1
+    assert second["superseded"][0]["replaced"] == "api runs on prod"
+    assert second["superseded"][0]["with"] == "api runs on staging"
+    assert second["superseded"][0]["fact_id"]

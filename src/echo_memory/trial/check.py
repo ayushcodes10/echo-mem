@@ -210,13 +210,13 @@ def unattributed_facts(conn, group_ids: list[str]) -> int:
     Found live on 2026-08-29: migration 0007 had shipped but was never applied
     to the trial database, leaving 58 such facts. Each one would have counted
     toward the cross-tool bar it exists to be excluded from."""
-    quoted = ", ".join(f"'{g}'" for g in group_ids)
     row = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             MATCH ()-[e:FACT]->()
-            WHERE e.agent_id = '{UNKNOWN_PROJECT}' AND e.group_id IN [{quoted}]
+            WHERE e.agent_id = $unknown AND e.group_id IN $gids
             RETURN count(e)
-        $$) AS (n agtype)"""
+        $$, %s) AS (n agtype)""",
+        (json.dumps({"unknown": UNKNOWN_PROJECT, "gids": list(group_ids)}),),
     ).fetchone()
     return int(str(row[0])) if row and row[0] is not None else 0
 
