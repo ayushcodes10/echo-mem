@@ -111,12 +111,23 @@ def _same_target(existing: dict, proposed: dict) -> bool:
     reflexively. What must not change silently is which database and which user.
     """
     a, b = existing.get("env", {}), proposed.get("env", {})
-    def store(env):
-        return (
-            env.get("ECHO_MEMORY_USER_ID"),
-            env.get("ECHO_MEMORY_DATABASE_URL_FILE") or env.get("ECHO_MEMORY_DATABASE_URL"),
-        )
-    return store(a) == store(b)
+
+    def url(env: dict) -> str | None:
+        """The connection string, resolving a *_FILE reference to its contents.
+
+        Comparing the file path against an inline URL would make every migration
+        from inline to indirected look like a repoint to a different database -
+        which is exactly what happened the first time this ran against a real
+        machine, on the very case the docstring above predicted."""
+        path = env.get("ECHO_MEMORY_DATABASE_URL_FILE")
+        if path:
+            try:
+                return Path(path).expanduser().read_text().strip()
+            except OSError:
+                return None
+        return env.get("ECHO_MEMORY_DATABASE_URL")
+
+    return (a.get("ECHO_MEMORY_USER_ID"), url(a)) == (b.get("ECHO_MEMORY_USER_ID"), url(b))
 
 
 def plan(config, home: Path | None = None) -> list[dict]:
