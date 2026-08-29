@@ -26,6 +26,7 @@ from echo_memory.cli.dashboard_html import render_dashboard
 from echo_memory.cli.export import export_group
 from echo_memory.cli.graph import fetch_graph, render_graph
 from echo_memory.cli.install import install, render_install
+from echo_memory.cli.skill import render_skill
 from echo_memory.cli.status import fetch_status, render_status
 from echo_memory.cli.why import render_history
 from echo_memory.infra.config import ConfigError, load_config
@@ -169,6 +170,16 @@ def _add_project_parsers(sub) -> None:
     boot.add_argument(
         "--only", action="append", choices=list(bootstrap_mod.SOURCES), metavar="SOURCE",
         help=f"limit to one source; repeatable ({', '.join(bootstrap_mod.SOURCES)})",
+    )
+
+    skill_parser = sub.add_parser(
+        "skill",
+        help="print the usage instructions, for a client that has no config file",
+    )
+    skill_parser.add_argument(
+        "--for", dest="client", choices=["claude-desktop", "generic"],
+        default="claude-desktop",
+        help="who the instructions are addressed to (default: claude-desktop)",
     )
 
     adopt_parser = sub.add_parser(
@@ -367,6 +378,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         result = bootstrap_mod.run(conn, sources=sources, force=args.force)
         print(bootstrap_mod.render(result), end="")
+        return 0
+
+    if args.command == "skill":
+        print(render_skill(args.client), end="")
         return 0
 
     if args.command == "adopt":
