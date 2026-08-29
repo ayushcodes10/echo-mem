@@ -9,6 +9,8 @@ automatically, since each of its bars is a human judgement. It is now
 `echo-memory trial` records them (see trial/observations.py). What's left
 genuinely un-auto-checkable is criterion 3, a real hybrid-retrieval win."""
 
+import json
+
 from echo_memory.cli.graph import fetch_graph
 from echo_memory.cli.trial import render_criterion_six
 
@@ -27,9 +29,10 @@ def writers(conn, group_id: str) -> dict[str, int]:
     rows = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             MATCH ()-[e:FACT]->()
-            WHERE e.group_id = '{group_id}'
+            WHERE e.group_id = $gid
             RETURN e.agent_id
-        $$) AS (agent_id agtype)"""
+        $$, %s) AS (agent_id agtype)""",
+        (json.dumps({"gid": group_id}),),
     ).fetchall()
     counts: dict[str, int] = {}
     for (agent_id,) in rows:

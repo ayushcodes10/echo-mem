@@ -80,11 +80,18 @@ def render_context(result: dict) -> str:
         text = fact["fact"]
         if len(text) > FACT_PREVIEW_CHARS:
             text = text[:FACT_PREVIEW_CHARS].rstrip() + "..."
-        lines.append(f"- {text}")
+        # Attribution has to travel with the fact. This hook fires on every
+        # prompt and is where a save becomes recognisable at all, yet it used to
+        # emit bare text while instructing the agent to report who wrote it -
+        # asking for a value the payload never carried.
+        prov = fact.get("provenance") or {}
+        author, fact_id = prov.get("agent_id"), fact.get("fact_id")
+        tag = f" [written by {author}, fact_id {fact_id}]" if author and fact_id else ""
+        lines.append(f"- {text}{tag}")
     lines.append(
         "If one of these saved the user re-explaining something a different tool told "
-        "them, call record_recall_save. Call query_memory for the fuller picture - this "
-        "is a keyword match, not a semantic one."
+        "them, call record_recall_save with that fact's fact_id. Call query_memory for "
+        "the fuller picture - this is a keyword match, not a semantic one."
     )
     return "\n".join(lines)
 

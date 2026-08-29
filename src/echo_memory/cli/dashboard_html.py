@@ -40,7 +40,7 @@ _TEMPLATE = r"""<!doctype html>
 <style>
   :root {
     --bg:#07090C; --bg2:#0B0E13; --panel:rgba(18,22,29,.82); --line:rgba(255,255,255,.07);
-    --line2:rgba(255,255,255,.12); --ink:#E8ECF3; --ink2:#AEB7C4; --muted:#6B7482;
+    --line2:rgba(255,255,255,.12); --ink:#E8ECF3; --ink2:#AEB7C4; --muted:#8A93A1;
     --accent:#6EA8FF; --ok:#58C08E; --warn:#E0A458; --bad:#E0685F; --radius:14px;
     --shadow:0 1px 0 rgba(255,255,255,.04) inset, 0 18px 50px -20px rgba(0,0,0,.9);
   }
@@ -270,6 +270,7 @@ _TEMPLATE = r"""<!doctype html>
   let live = [], liveIds = new Set(), deg = {};
 
   function applyFilter() {
+    wake();
     live = facts.filter(f => visible(f) && f.t_invalid === null);
     liveIds = new Set(); deg = {};
     for (const f of live) {
@@ -447,7 +448,30 @@ _TEMPLATE = r"""<!doctype html>
       ctx.globalAlpha = 1;
     }
   }
-  function tick() { step(); draw(); requestAnimationFrame(tick); }
+  // The simulation used to run forever. step() is O(n^2) over live nodes, so a
+  // dashboard left open burned a core and drained a battery long after the
+  // layout had visibly settled. Cool below a kinetic-energy floor, wake on
+  // interaction, and under prefers-reduced-motion never animate at all.
+  const STILL = 0.02;
+  let running = false;
+  const reduceMotion = window.matchMedia
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function energy() {
+    let e = 0;
+    for (const s of sim) { if (liveIds.has(s.id)) e += s.vx * s.vx + s.vy * s.vy; }
+    return e;
+  }
+  function tick() {
+    step();
+    draw();
+    if (energy() < STILL) { running = false; return; }
+    requestAnimationFrame(tick);
+  }
+  function wake() {
+    if (reduceMotion) { draw(); return; }
+    if (!running) { running = true; requestAnimationFrame(tick); }
+  }
 
   function hitNode(px, py) {
     for (let i = sim.length - 1; i >= 0; i--) {
@@ -474,6 +498,7 @@ _TEMPLATE = r"""<!doctype html>
 
   let dragNode = null, panning = null;
   canvas.addEventListener("pointerdown", e => {
+    wake();
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     const hit = hitNode(px, py);
     if (hit) { dragNode = simById[hit]; dragNode.pinned = true; }
@@ -481,6 +506,7 @@ _TEMPLATE = r"""<!doctype html>
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener("pointermove", e => {
+    wake();
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     if (dragNode) { const w = toWorld(px, py); dragNode.x = w.x; dragNode.y = w.y; return; }
     if (panning) { view.x = panning.vx + (px - panning.px); view.y = panning.vy + (py - panning.py); return; }
@@ -500,6 +526,7 @@ _TEMPLATE = r"""<!doctype html>
     state.selNode = null; state.selEdge = null; render();
   });
   canvas.addEventListener("wheel", e => {
+    wake();
     e.preventDefault();
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     const before = toWorld(px, py);
@@ -614,7 +641,7 @@ _TEMPLATE = r"""<!doctype html>
   for (const s of sim) { s.x = W / 2 + (Math.random() - .5) * 300; s.y = H / 2 + (Math.random() - .5) * 300; }
   applyFilter();
   for (let i = 0; i < 240; i++) step();
-  tick();
+  wake();
 })();
 
 </script>

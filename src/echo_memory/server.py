@@ -4,6 +4,8 @@ Runs over stdio by default (mcp.server.mcpserver's MCPServer.run default),
 not a network listener at all, let alone one bound beyond localhost; see
 the design doc's Constraints ("v1 is single-user, local-only")."""
 
+import json
+
 import psycopg
 from mcp.server.mcpserver import MCPServer
 
@@ -218,12 +220,17 @@ def _author_of(conn, group_id: str, fact_id: str) -> str | None:
         edge_id = int(fact_id)
     except (TypeError, ValueError):
         return None
+    # Parameters, not interpolation. `query_memory._any_term_tsquery` already
+    # refuses to paste caller text into a query and cites the design doc's
+    # security review for it; group_id embeds user_id and agent_id, both of
+    # which `adopt` is about to write into machine-global config files.
     row = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             MATCH ()-[e:FACT]->()
-            WHERE id(e) = {edge_id} AND e.group_id = '{group_id}'
+            WHERE id(e) = $edge_id AND e.group_id = $gid
             RETURN e.agent_id
-        $$) AS (agent_id agtype)"""
+        $$, %s) AS (agent_id agtype)""",
+        (json.dumps({"edge_id": edge_id, "gid": group_id}),),
     ).fetchone()
     return str(row[0]).strip('"') if row and row[0] is not None else None
 
