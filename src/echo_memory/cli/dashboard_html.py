@@ -139,7 +139,7 @@ _TEMPLATE = r"""<!doctype html>
   #hint kbd{font-family:'IBM Plex Mono',monospace;font-size:10px;padding:1px 5px;
     border:1px solid var(--line2);border-radius:4px;color:var(--ink2)}
   @media (max-width:1180px){#clusters,#gate{display:none}}
-  @media (max-width:860px){#inspector{left:14px;right:14px;width:auto}.stats{display:none}}
+  @media (max-width:860px){#inspector{left:14px;right:14px;width:auto}.stats span:not(:last-child){display:none}}
 </style>
 </head>
 <body>
@@ -287,7 +287,16 @@ _TEMPLATE = r"""<!doctype html>
     document.getElementById("stats").innerHTML =
       "<span><b>" + liveIds.size + "</b> nodes</span><span><b>" + live.length +
       "</b> facts</span><span><b>" + (CL.communities || []).length +
-      "</b> clusters</span><span><b>" + shown.size + "</b> projects</span>";
+      "</b> clusters</span><span><b>" + shown.size + "</b> projects</span>" +
+      // The write path never calls a model. Stated as a count of episodes
+      // rather than an amount of money: the dollar figure shrinks with
+      // adoption, and at this volume it argues against the product. The
+      // property holds identically at 45 episodes and at 45,000.
+      (DATA.episodes
+        ? '<span title="This write path never calls a language model."><b>' +
+          DATA.inference_calls + "</b> inference calls in " + DATA.episodes +
+          " episodes</span>"
+        : "");
   }
   // Below this many nodes every node is labelled; above it only hubs are.
   const LABEL_ALL_BELOW = 45;
