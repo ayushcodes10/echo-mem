@@ -185,6 +185,22 @@ hostnames, account numbers and client names.
 - **Interface:** [Model Context Protocol](https://modelcontextprotocol.io) server:
   `write_episode`, `query_memory`, `record_recall_save`, `get_audit_log`
 
+## Is the graph in good shape?
+
+```
+echo-memory health
+```
+
+A score, what is strong, what needs attention, and what to do about each. It
+exists to be run when you have no question - a store can look healthy by every
+number this CLI reports while most of its facts came from a bulk import, the
+last real write was a week ago, and only one of several wired agents has ever
+written anything. `--json` for machine-readable output.
+
+Nothing in it is gated. The paid tiers sell hosting and the things that only
+exist when several people share a graph; diagnostics about your own data are not
+a thing to withhold from the person whose data it is.
+
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Issues and PRs welcome; please read the design

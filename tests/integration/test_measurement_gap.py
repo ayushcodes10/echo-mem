@@ -358,3 +358,31 @@ def test_status_names_a_client_that_is_wired_but_has_never_written(migrated_db, 
     text = status.render_status(scopes, check.build_report(connect(migrated_db), config))
 
     assert "wired but has never written: cursor" in text
+
+
+def test_health_reads_a_real_store_end_to_end(migrated_db):
+    """collect() touches the graph, the audit log, the trial report and the
+    adopt registry. Four sources is four chances for a shape mismatch that no
+    unit test on a dict literal would catch."""
+    from echo_memory.cli import health
+
+    config = _startup(
+        migrated_db, agent_id="claude-code",
+        vectors={"other": ORTHOGONAL, "a fact": REFERENCE},
+    )
+    server.write_episode(
+        "shared", "s1",
+        [{"name": "anything", "type": "thing"}, {"name": "other", "type": "thing"}],
+        [{"source": "anything", "target": "other", "relation_type": "relates_to",
+          "fact": "a fact", "confidence": "extracted"}],
+    )
+
+    report = health.collect(connect(migrated_db), config)
+
+    assert report["facts"] == 1
+    assert report["organic_writes"] == 1
+    assert report["imported_writes"] == 0
+    assert report["writers"] == {"claude-code": 1}
+    assert report["unattributed_facts"] == 0
+    assert 0 <= health.score(report) <= 100
+    assert "knowledge health" in health.render(report)
