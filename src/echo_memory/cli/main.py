@@ -26,6 +26,7 @@ from echo_memory.cli.dashboard_html import render_dashboard
 from echo_memory.cli.export import export_group
 from echo_memory.cli.graph import fetch_graph, render_graph
 from echo_memory.cli.install import install, render_install
+from echo_memory.cli.skill import package as package_skill
 from echo_memory.cli.skill import render_skill
 from echo_memory.cli.status import fetch_status, render_status
 from echo_memory.cli.why import render_history
@@ -180,6 +181,10 @@ def _add_project_parsers(sub) -> None:
         "--for", dest="client", choices=["claude-desktop", "generic"],
         default="claude-desktop",
         help="who the instructions are addressed to (default: claude-desktop)",
+    )
+    skill_parser.add_argument(
+        "--package", metavar="PATH", type=Path,
+        help="write an uploadable skill zip here instead of printing the text",
     )
 
     adopt_parser = sub.add_parser(
@@ -381,6 +386,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "skill":
+        if args.package is not None:
+            written = package_skill(args.package)
+            print(f"Wrote {written}")
+            print("Claude Desktop: Settings > Capabilities > Skills > Upload skill.")
+            return 0
         print(render_skill(args.client), end="")
         return 0
 

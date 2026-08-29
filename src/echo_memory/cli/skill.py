@@ -16,6 +16,9 @@ the problem."
 So this prints the text rather than writing a file. Paste it once into a Claude
 Desktop Project and every conversation in that project carries it."""
 
+import zipfile
+from pathlib import Path
+
 from echo_memory.cli.install import skill_text
 
 _HEADER = """\
@@ -46,3 +49,20 @@ def render_skill(client: str = "claude-desktop") -> str:
     if not body.endswith("\n"):
         body += "\n"
     return _HEADER + body + _FOOTER
+
+
+def package(destination: Path) -> Path:
+    """Write an uploadable skill archive, and return where it landed.
+
+    Claude Desktop takes a skill as a zip containing a directory with a
+    SKILL.md at its root. Built on demand rather than committed: the source of
+    truth is the SKILL.md that ships inside the package, and a zip checked into
+    git is a binary that cannot be diffed and goes stale the first time the
+    instructions change without anyone noticing."""
+    destination = destination.expanduser()
+    if destination.is_dir():
+        destination = destination / "echo-memory-skill.zip"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("echo-memory/SKILL.md", skill_text())
+    return destination

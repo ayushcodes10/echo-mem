@@ -33,3 +33,38 @@ def test_it_says_how_to_check_it_worked():
 
 def test_generic_is_the_bare_text_with_no_paste_furniture():
     assert not render_skill("generic").startswith("Paste")
+
+
+def test_package_writes_an_uploadable_archive(tmp_path):
+    """Claude Desktop takes a skill as a zip containing a directory with
+    SKILL.md at its root."""
+    import zipfile
+
+    from echo_memory.cli.install import skill_text
+    from echo_memory.cli.skill import package
+
+    written = package(tmp_path)
+
+    assert written.name == "echo-memory-skill.zip"
+    with zipfile.ZipFile(written) as archive:
+        assert archive.namelist() == ["echo-memory/SKILL.md"]
+        assert archive.read("echo-memory/SKILL.md").decode() == skill_text()
+
+
+def test_package_accepts_an_explicit_filename(tmp_path):
+    from echo_memory.cli.skill import package
+
+    assert package(tmp_path / "sub" / "mine.zip").name == "mine.zip"
+
+
+def test_the_packaged_skill_carries_the_frontmatter_a_skill_needs(tmp_path):
+    """Without name and description in the frontmatter, an uploaded skill has
+    nothing to match against and is never surfaced."""
+    import zipfile
+
+    from echo_memory.cli.skill import package
+
+    with zipfile.ZipFile(package(tmp_path)) as archive:
+        text = archive.read("echo-memory/SKILL.md").decode()
+    assert text.startswith("---\nname: echo-memory\n")
+    assert "description:" in text.split("---")[1]
