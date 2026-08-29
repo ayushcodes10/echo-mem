@@ -66,15 +66,28 @@ def _server_entry(config, project: str, agent_id: str | None = None) -> dict:
     `agent_id` identifies the *client*, not the user's shell. Passing None
     falls back to `config.agent_id`, which is only correct when the caller has
     no better information."""
+    env = {
+        "ECHO_MEMORY_USER_ID": config.user_id,
+        "ECHO_MEMORY_AGENT_ID": agent_id or config.agent_id,
+        "ECHO_MEMORY_PROJECT": project,
+        # Every client shares one private store even though each reports a
+        # different agent_id. Without this, giving clients distinct ids - the
+        # whole point of doing so - would fork `solo` into one invisible store
+        # per client. See Config.solo_key.
+        "ECHO_MEMORY_SOLO_KEY": config.solo_key or config.agent_id,
+    }
+    # Point at the credential rather than embedding it, when one is configured.
+    # These files are committable and several sync to a cloud backup; the URL
+    # carries a password.
+    url_file = os.environ.get("ECHO_MEMORY_DATABASE_URL_FILE")
+    if url_file:
+        env["ECHO_MEMORY_DATABASE_URL_FILE"] = url_file
+    else:
+        env["ECHO_MEMORY_DATABASE_URL"] = config.database_url
     return {
         "command": sys.executable,
         "args": ["-m", "echo_memory.server"],
-        "env": {
-            "ECHO_MEMORY_USER_ID": config.user_id,
-            "ECHO_MEMORY_AGENT_ID": agent_id or config.agent_id,
-            "ECHO_MEMORY_DATABASE_URL": config.database_url,
-            "ECHO_MEMORY_PROJECT": project,
-        },
+        "env": env,
     }
 
 
@@ -187,9 +200,15 @@ def render_install(root: Path, project: str, targets: tuple[str, ...], done: lis
     lines += [
         "",
         (
-            "Every fact written from here is attributed to this project. Commit these "
-            "files to share the setup with the repo, or add them to .gitignore to keep "
-            "it to yourself."
+            "Every fact written from here is attributed to this project. "
+            + (
+                "These files reference the connection string by path, not by value, "
+                "so they carry no credential and are safe to commit."
+                if os.environ.get("ECHO_MEMORY_DATABASE_URL_FILE")
+                else "These files contain your database URL, password included - "
+                "gitignore them, or set ECHO_MEMORY_DATABASE_URL_FILE to keep the "
+                "credential out of them."
+            )
         ),
     ]
     if "claude" in targets:
