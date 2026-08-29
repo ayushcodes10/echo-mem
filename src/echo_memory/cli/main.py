@@ -5,6 +5,7 @@ design doc's Configuration section for why group_id is never typed or
 constructed directly."""
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -12,7 +13,7 @@ from datetime import date
 from pathlib import Path
 
 from echo_memory.audit.get_audit_log import get_fact_history
-from echo_memory.cli import adopt, initdb, reattribute_cmd
+from echo_memory.cli import adopt, health, initdb, reattribute_cmd
 from echo_memory.cli import analyse as analyse_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import queue as queue_cmd
@@ -171,6 +172,13 @@ def _add_project_parsers(sub) -> None:
     boot.add_argument(
         "--only", action="append", choices=list(bootstrap_mod.SOURCES), metavar="SOURCE",
         help=f"limit to one source; repeatable ({', '.join(bootstrap_mod.SOURCES)})",
+    )
+
+    health_parser = sub.add_parser(
+        "health", help="whether this graph is in good shape, and what to do about it"
+    )
+    health_parser.add_argument(
+        "--json", action="store_true", help="machine-readable output"
     )
 
     skill_parser = sub.add_parser(
@@ -383,6 +391,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         result = bootstrap_mod.run(conn, sources=sources, force=args.force)
         print(bootstrap_mod.render(result), end="")
+        return 0
+
+    if args.command == "health":
+        conn = connect(config.database_url)
+        report = health.collect(conn, config)
+        if args.json:
+            print(json.dumps({**report, "score": health.score(report)}, indent=2))
+        else:
+            print(health.render(report), end="")
         return 0
 
     if args.command == "skill":
