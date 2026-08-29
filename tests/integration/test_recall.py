@@ -164,3 +164,21 @@ def test_recalled_facts_carry_the_agent_that_wrote_them(migrated_db):
     assert provenance["agent_id"] == "claude-code"
     assert provenance["project"] == "dugout"
     assert "session_id" in provenance, "existing provenance keys must survive"
+
+
+def test_injected_facts_carry_their_author_and_fact_id(migrated_db):
+    """The hook fires on every prompt and is where a save becomes recognisable.
+    It used to emit bare fact text while instructing the agent to call
+    record_recall_save - which now requires a fact_id the payload never carried,
+    naming an author it never showed."""
+    config = _seed(migrated_db)
+
+    text = recall.render_context(
+        recall.recall_for_prompt(
+            connect(migrated_db), config, "is chat-module-api dev or prod"
+        )
+    )
+
+    assert "written by claude-code" in text
+    assert "fact_id" in text
+    assert "record_recall_save with that fact's fact_id" in text

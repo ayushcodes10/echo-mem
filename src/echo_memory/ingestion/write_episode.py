@@ -215,6 +215,13 @@ def write_episode(
     episode_id = str(uuid.uuid4())
     now = int(time.time())
     edges_created: list[str] = []
+    # Supersession is the commonest contradiction and it already happens here:
+    # a fact with the same (source, relation_type, target) invalidates its
+    # predecessor and writes an audit entry. The response never said so, so the
+    # agent that just overwrote something it wrote last week had no way to know.
+    # Reporting it costs nothing and is higher-frequency than anything a
+    # dedicated contradiction detector would find.
+    superseded: list[dict] = []
     onboarding_sample: dict | None = None
 
     with conn.transaction():
@@ -266,6 +273,11 @@ def write_episode(
             if existing_edge is not None:
                 old_edge_id, old_fact_text = existing_edge
                 _invalidate_edge(conn, old_edge_id, now)
+                superseded.append({
+                    "fact_id": old_edge_id,
+                    "replaced": old_fact_text,
+                    "with": fact["fact"],
+                })
                 _write_audit_entry(
                     conn,
                     group_id,
@@ -296,6 +308,7 @@ def write_episode(
     )
     result = {
         "edges_created": edges_created,
+        "superseded": superseded,
         "ambiguous_entities": [
             {
                 "mention": a.mention,
