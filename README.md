@@ -91,8 +91,9 @@ Start a new Claude Code session and `write_episode`/`query_memory`/`record_recal
 **Wiring a second tool? Give it its own `ECHO_MEMORY_AGENT_ID`.** Cursor should say
 `cursor`, Claude Desktop `claude-desktop`. Memory is shared either way, but a fact
 records which tool learned it, and two tools claiming the same id makes cross-tool
-recall impossible to see afterwards. `echo-memory install --for both` sets them
-correctly without you having to remember.
+recall impossible to see afterwards. `echo-memory adopt` wires every MCP client on the
+machine at once, each with its own id, and shows you the diff before writing
+anything. `echo-memory install --for both` does the same for one project.
 
 Prefer it scoped to one project - a single Claude project, a Cursor workspace, a repo
 whose memory shouldn't mingle with the rest? `echo-memory install [path] --for

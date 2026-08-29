@@ -163,11 +163,21 @@ def fetch_dashboard(conn, config, today=None) -> dict:
         key=lambda p: (p == "unknown", p),
     )
     agents = sorted({f["agent_id"] for s in scopes.values() for f in s["facts"]})
+    row = conn.execute("SELECT coalesce(sum(write_episode_count), 0) FROM public.group_state").fetchone()
+    episodes = int(row[0]) if row else 0
     return {
         "scopes": scopes,
         "clusters": clusters,
         "projects": projects,
         "agents": agents,
+        # Episodes, not facts: inference cost in an LLM-extraction memory layer
+        # is per-episode, so "160 facts, 0 inference calls" would imply 160
+        # avoided when the defensible number is the episode count. And a count
+        # rather than a dollar figure, because the amount shrinks with adoption
+        # while the property - this write path never calls a model - holds at
+        # any volume.
+        "episodes": episodes,
+        "inference_calls": 0,
         "criterion_six": check.build_report(conn, config, today=today),
         "user_id": config.user_id,
     }
