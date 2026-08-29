@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import psycopg
 
+from echo_memory.infra.project import UNKNOWN as UNKNOWN_PROJECT
 from echo_memory.trial import check, observations
 
 _KIND_LABELS = {
@@ -67,6 +68,15 @@ def render_criterion_six(report: dict, indent: str = "  ", show_hint: bool = Tru
         f"{indent}[{'x' if met['saves'] else ' '}] {counts['cross_tool_saves']}"
         f"/{observations.REQUIRED_SAVES} recall saves to a different tool{saves_note}"
     )
+    # An unmet bar has to name its cause. A reader who sees 3/3 saves and an
+    # unticked box would otherwise assume a display bug rather than a store
+    # that cannot yet evidence what the bar measures.
+    if report.get("unattributed_facts"):
+        lines.append(
+            f"{indent}    ! {report['unattributed_facts']} fact(s) still carry "
+            f"agent_id '{UNKNOWN_PROJECT}', so a cross-tool save cannot be evidenced "
+            "- run `alembic upgrade head`"
+        )
     lines.append(
         f"{indent}[{'x' if met['duplicates'] else ' '}] {counts['duplicates']} "
         f"confirmed duplicate nodes (at most {observations.MAX_DUPLICATES} allowed)"

@@ -9,8 +9,10 @@ from mcp.server.mcpserver import MCPServer
 
 from echo_memory.audit.get_audit_log import get_audit_log as _get_audit_log
 from echo_memory.infra.config import Config, ConfigError, load_config
+from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.logging import configure_logging, get_logger
 from echo_memory.infra.pool import make_pool
+from echo_memory.infra.project import UNKNOWN as UNKNOWN_AGENT
 from echo_memory.ingestion import bootstrap as bootstrap_mod
 from echo_memory.ingestion import capture
 from echo_memory.ingestion.embeddings import Embedder, LocalEmbedder
@@ -207,11 +209,30 @@ def _bootstrap_once(conn) -> None:
         _logger.warning("bootstrap_failed", extra={"error": str(e)})
 
 
+def _author_of(conn, group_id: str, fact_id: str) -> str | None:
+    """The `agent_id` on a fact edge, or None if no such fact is in this scope.
+
+    Scoped by group_id on purpose: a fact_id from another tenant must not be
+    citable as evidence here, and an unscoped lookup would let one."""
+    try:
+        edge_id = int(fact_id)
+    except (TypeError, ValueError):
+        return None
+    row = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH ()-[e:FACT]->()
+            WHERE id(e) = {edge_id} AND e.group_id = '{group_id}'
+            RETURN e.agent_id
+        $$) AS (agent_id agtype)"""
+    ).fetchone()
+    return str(row[0]).strip('"') if row and row[0] is not None else None
+
+
 @server.tool()
 def record_recall_save(
     scope: str,
+    fact_id: str,
     note: str,
-    written_by: str,
     recalled_by: str | None = None,
 ) -> dict:
     """Record that a fact you recalled from memory saved the user from
@@ -222,12 +243,21 @@ def record_recall_save(
     answered something the user would otherwise have had to tell you again,
     and the fact was originally written by a DIFFERENT tool or a past session.
 
-    That last part is the whole point. written_by is the tool that recorded
-    the fact: read it from `provenance.agent_id` on any query_memory result.
-    recalled_by is you, defaulting to this server's own agent id. If they're
-    the same tool, the save is still recorded but does not count toward the
-    trial's bar - recalling your own note from ten minutes ago is not the
-    thing being measured.
+    That last part is the whole point, and it is why this takes `fact_id`
+    rather than a `written_by` string. Pass the `fact_id` of the fact that
+    helped - every query_memory result carries one. The server reads that
+    edge's own `agent_id` and uses it as `written_by`; the caller does not get
+    to assert who wrote a fact.
+
+    Until 2026-08-29 `written_by` was free text supplied by the caller. Nothing
+    checked the fact existed, so the number gating v1a was a string typed by
+    the model being graded. A fact_id is checkable, so the reading is
+    admissible.
+
+    recalled_by is you, defaulting to this server's own agent id. If the fact's
+    author and you are the same tool, the save is still recorded but does not
+    count toward the trial's bar - recalling your own note from ten minutes ago
+    is not the thing being measured.
 
     note should be one sentence naming what it saved re-explaining, written so
     it still makes sense read cold in six months. Recording the identical note
@@ -244,6 +274,18 @@ def record_recall_save(
     recalled_by = recalled_by or _state.config.agent_id
     try:
         with _state.pool.connection() as conn:
+            written_by = _author_of(conn, group_id, fact_id)
+            if written_by is None:
+                return {"error": (
+                    f"no fact {fact_id} in this scope - pass the fact_id from a "
+                    "query_memory result, not a remembered one"
+                )}
+            if written_by == UNKNOWN_AGENT:
+                return {"error": (
+                    f"fact {fact_id} predates agent attribution (agent_id is "
+                    f"'{UNKNOWN_AGENT}'), so it cannot evidence a cross-tool save. "
+                    "Run `alembic upgrade head` to backfill these."
+                )}
             try:
                 recorded = _observations.record(
                     conn, group_id, _observations.RECALL_SAVE, note,
