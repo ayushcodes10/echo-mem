@@ -11,6 +11,7 @@ genuinely un-auto-checkable is criterion 3, a real hybrid-retrieval win."""
 
 import json
 
+from echo_memory.cli import adopt
 from echo_memory.cli.graph import fetch_graph
 from echo_memory.cli.trial import render_criterion_six
 
@@ -86,12 +87,23 @@ def render_status(scopes: dict, criterion_six: dict) -> str:
         else:
             lines.append("  audit: (none yet)")
 
-        by_agent = s.get("writers") or {}
+        by_agent = dict(s.get("writers") or {})
+        # An agent that has written nothing contributes no row to writers(),
+        # which counts facts in the graph - so a client wired but silent reads
+        # as absent rather than as zero. That is the difference between noticing
+        # a mis-wired tool on day 3 and noticing it when the trial expires.
+        for client in adopt.adopted_clients():
+            by_agent.setdefault(client["agent_id"], 0)
         if by_agent:
             ranked = sorted(by_agent.items(), key=lambda kv: (-kv[1], kv[0]))
             written = ", ".join(f"{agent}={n}" for agent, n in ranked)
             lines.append(f"  written by: {written}")
-            if len(ranked) == 1:
+            silent = [a for a, n in ranked if n == 0]
+            if silent:
+                lines.append(
+                    f"  ! wired but has never written: {', '.join(silent)}"
+                )
+            if len([a for a, n in ranked if n]) == 1:
                 lines.append(
                     f"  ! only {ranked[0][0]} has ever written here, so a cross-tool "
                     "recall save is not yet possible - run `echo-memory install` for a "

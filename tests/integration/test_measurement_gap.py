@@ -339,3 +339,22 @@ def test_cli_all_projects_shows_them_marked(migrated_db, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "[cross-project]" in out
+
+
+def test_status_names_a_client_that_is_wired_but_has_never_written(migrated_db, tmp_path,
+                                                                   monkeypatch):
+    """S8-F1's promised line could not render as originally specified:
+    `writers()` counts facts, so an agent with none contributes no row and reads
+    as absent rather than as zero. The adopt registry supplies the missing half."""
+    from echo_memory.cli import adopt, status
+
+    config = _startup(migrated_db, agent_id="claude-code")
+    monkeypatch.setattr(
+        adopt, "adopted_clients",
+        lambda home=None: [{"client": "cursor", "agent_id": "cursor", "path": "x"}],
+    )
+
+    scopes = status.fetch_status(connect(migrated_db), config)
+    text = status.render_status(scopes, check.build_report(connect(migrated_db), config))
+
+    assert "wired but has never written: cursor" in text
