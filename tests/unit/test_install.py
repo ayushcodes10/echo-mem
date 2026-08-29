@@ -10,9 +10,10 @@ from echo_memory.cli.install import (
     _merge_json,
     _strip_frontmatter,
     install,
+    render_install,
     skill_text,
 )
-from echo_memory.infra.config import Config
+from echo_memory.infra.config import Config, load_config
 
 CONFIG = Config(
     user_id="ayush", agent_id="claude-code",
@@ -188,3 +189,50 @@ def test_a_config_is_never_left_truncated(tmp_path, monkeypatch):
 
     assert json.loads(target.read_text())["mcpServers"]["other"]["command"] == "keep-me"
     assert not list(tmp_path.glob(".*echo-mem.tmp")), "temp file left behind"
+
+
+def test_clients_share_one_solo_store_while_reporting_different_agents(tmp_path):
+    """The round trip that F1 fails: rebuild a Config from each written entry's
+    env and assert the group ids agree. Distinct agent_ids are the point of
+    adopt; distinct SOLO stores would be an invisible regression."""
+    project = tmp_path / "repo"
+    project.mkdir()
+
+    install(project, CONFIG, ("claude", "cursor"), project="repo")
+
+    envs = [
+        json.loads((project / p).read_text())["mcpServers"]["echo-memory"]["env"]
+        for p in (".mcp.json", ".cursor/mcp.json")
+    ]
+    configs = [load_config(e) for e in envs]
+
+    assert len({c.agent_id for c in configs}) == 2, "attribution must differ"
+    assert len({c.shared_group_id() for c in configs}) == 1
+    assert len({c.solo_group_id() for c in configs}) == 1, "solo must not fork per client"
+
+
+def test_a_configured_credential_file_is_referenced_not_embedded(tmp_path, monkeypatch):
+    secret = tmp_path / "database-url"
+    secret.write_text("postgresql://postgres:s3cret@localhost:5433/echo_memory\n")
+    monkeypatch.setenv("ECHO_MEMORY_DATABASE_URL_FILE", str(secret))
+    project = tmp_path / "repo"
+    project.mkdir()
+
+    done = install(project, CONFIG, ("claude",), project="repo")
+
+    written = (project / ".mcp.json").read_text()
+    assert "s3cret" not in written, "the password must not reach a committable file"
+    assert "ECHO_MEMORY_DATABASE_URL_FILE" in written
+    assert done is not None
+
+
+def test_without_a_credential_file_the_message_says_gitignore_not_commit(tmp_path):
+    """The old message told users to commit a file containing their password."""
+    project = tmp_path / "repo"
+    project.mkdir()
+    done = install(project, CONFIG, ("claude",), project="repo")
+
+    text = render_install(project, "repo", ("claude",), done)
+
+    assert "gitignore" in text
+    assert "Commit these files" not in text

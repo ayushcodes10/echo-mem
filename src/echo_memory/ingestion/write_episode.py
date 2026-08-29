@@ -225,6 +225,30 @@ def write_episode(
     onboarding_sample: dict | None = None
 
     with conn.transaction():
+        # One writer per group, stated rather than inherited.
+        #
+        # Everything below is an unlocked read-modify-write: _find_active_edge
+        # then _create_edge then _invalidate_edge, and resolve_entities has the
+        # same shape around exact-match-or-create. Two agents writing one triple
+        # concurrently would both see no existing edge and leave two active
+        # ones - or two nodes for one entity, which IS criterion 6's duplicate
+        # bar, inflated by the very command meant to make that gate measurable.
+        #
+        # That race does not currently happen, and the reason is an accident:
+        # _increment_write_episode_count below is an upsert on group_state keyed
+        # by group_id, and being the transaction's first statement it takes a
+        # row lock held to commit. A review flagged the missing lock; a test
+        # written to prove the race passed without one, which is how the
+        # accident surfaced.
+        #
+        # It is made explicit here because nothing records that the counter is
+        # load-bearing. Move it, make it conditional, or drop the counter, and
+        # the serialisation disappears silently at exactly the moment six
+        # clients start writing. Transaction-scoped, so it releases on commit or
+        # rollback with no unlock path to forget, and free at one writer.
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"episode|{group_id}",)
+        )
         call_count = _increment_write_episode_count(conn, group_id)
 
         outcome = resolve_entities(conn, group_id, entities, resolutions, embedder)

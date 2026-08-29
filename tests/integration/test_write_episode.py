@@ -10,7 +10,7 @@ similarity for arbitrary strings isn't controllable enough for that.
 
 from fake_embedder import REFERENCE, VectorEmbedder, unit_vector_at_angle
 
-from echo_memory.infra.db import connect
+from echo_memory.infra.db import GRAPH_NAME, connect
 from echo_memory.ingestion.embeddings import LocalEmbedder
 from echo_memory.ingestion.write_episode import write_episode
 
@@ -417,3 +417,59 @@ def test_superseding_a_fact_is_reported_to_the_agent(migrated_db):
     assert second["superseded"][0]["replaced"] == "api runs on prod"
     assert second["superseded"][0]["with"] == "api runs on staging"
     assert second["superseded"][0]["fact_id"]
+
+
+def test_two_agents_writing_one_triple_leave_one_active_edge(migrated_db):
+    """`adopt` wires six clients to one shared scope, so one triple can be
+    written twice at once. Two active edges for one triple - or two nodes for
+    one entity - is criterion 6's own duplicate bar, inflated by the command
+    meant to make that gate measurable.
+
+    This passes both with and without the explicit advisory lock, because
+    _increment_write_episode_count's upsert on group_state already takes a row
+    lock as the transaction's first statement. That is worth pinning: the
+    invariant is what matters, and it currently rests on a counter nobody
+    documented as load-bearing. If someone moves or removes that counter, this
+    test is what notices."""
+    import threading
+
+    embedder = LocalEmbedder()
+    ents = [{"name": "api", "type": "service"}, {"name": "prod", "type": "env"}]
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def writer(session, text):
+        try:
+            conn = connect(migrated_db)
+            barrier.wait(timeout=10)
+            write_episode(
+                conn, "g-race", session, ents,
+                [{"source": "api", "target": "prod", "relation_type": "runs_on",
+                  "fact": text, "confidence": "extracted"}],
+                {}, embedder,
+            )
+            conn.close()
+        except Exception as e:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(e)
+
+    threads = [
+        threading.Thread(target=writer, args=(f"s{i}", f"api runs on host-{i}"))
+        for i in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"writer raised: {errors}"
+    conn = connect(migrated_db)
+    conn.execute("LOAD 'age'")
+    conn.execute('SET search_path = ag_catalog, "$user", public')
+    row = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH_NAME}', $$
+            MATCH ()-[e:FACT]->()
+            WHERE e.group_id = 'g-race' AND e.t_invalid IS NULL
+            RETURN count(e)
+        $$) AS (n agtype)"""
+    ).fetchone()
+    assert int(str(row[0])) == 1, "two concurrent writers left two active edges"
