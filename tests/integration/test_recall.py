@@ -148,11 +148,11 @@ def test_cli_emits_hook_json_when_something_matches(migrated_db, monkeypatch, ca
 
 
 def test_recalled_facts_carry_the_agent_that_wrote_them(migrated_db):
-    """`record_recall_save` asks the caller for `written_by`, and its docstring
-    names query_memory as the source. Until 2026-08-28 that field was not in the
-    response: provenance carried session_id and source_episode_id only. An agent
-    following the instruction found nothing, which is one of three reasons the
-    cross-tool criterion had never been satisfied once."""
+    """Provenance has to reach the agent for a save to be recordable at all.
+    Until 2026-08-28 query_memory returned session_id and source_episode_id
+    only, so an agent told to report who wrote a fact found nothing. The tool
+    now derives written_by from the cited fact server-side, but agent_id is
+    still what makes a recall recognisable as cross-tool in the first place."""
     config = _seed(migrated_db)
 
     result = recall.recall_for_prompt(
