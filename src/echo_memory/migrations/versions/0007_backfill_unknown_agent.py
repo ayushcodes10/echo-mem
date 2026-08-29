@@ -37,6 +37,13 @@ GRAPH = "echo_memory"
 
 
 def upgrade() -> None:
+    # Every migration that touches the graph has to load AGE and put
+    # ag_catalog on the search_path first; Alembic's connection does not
+    # inherit what the application sets. Omitting these was why 0007 failed
+    # the first time it ever met real `unknown` rows - CI migrates an empty
+    # database, so the cypher body had never executed.
+    op.execute("LOAD 'age'")
+    op.execute('SET search_path = ag_catalog, "$user", public')
     op.execute(f"""
         SELECT * FROM cypher('{GRAPH}', $$
             MATCH ()-[e:FACT]->()

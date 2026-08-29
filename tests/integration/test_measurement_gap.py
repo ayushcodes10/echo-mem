@@ -23,22 +23,51 @@ NEAR_DUPLICATE = unit_vector_at_angle(0.60)
 ORTHOGONAL = [0.0, 0.0, 1.0] + [0.0] * 381
 
 
-def _startup(migrated_db, project="eigen", agent_id="claude-code"):
+def _startup(migrated_db, project="eigen", agent_id="claude-code", vectors=None):
     config = Config(
         user_id="ayush", agent_id=agent_id, database_url=migrated_db, project=project
     )
-    server.startup(config=config, embedder=VectorEmbedder({"anything": REFERENCE}))
+    server.startup(
+        config=config,
+        embedder=VectorEmbedder({"anything": REFERENCE, **(vectors or {})}),
+    )
     return config
+
+
+def _fact_written_by(migrated_db, agent_id, fact="a fact worth recalling",
+                     then_as="claude-code"):
+    """Write one fact as `agent_id` and return its fact_id.
+
+    `record_recall_save` derives written_by from the cited fact's own edge, so
+    a test that wants a cross-tool save has to actually put a fact in the store
+    under the other tool's name. Until 2026-08-29 the tests passed
+    written_by="cursor" into a store with no cursor facts and the gate counted
+    it - the bug these helpers exist to make unrepeatable."""
+    _startup(migrated_db, agent_id=agent_id,
+             vectors={"other": ORTHOGONAL, fact: REFERENCE})
+    server.write_episode(
+        "shared", f"s-{agent_id}",
+        [{"name": "anything", "type": "thing"}, {"name": "other", "type": "thing"}],
+        [{"source": "anything", "target": "other", "relation_type": "relates_to",
+          "fact": fact, "confidence": "extracted"}],
+    )
+    result = server.query_memory("shared", None, top_k=10, digest=True)
+    fact_id = next(f["fact_id"] for f in result["facts"] if f["fact"] == fact)
+    # _startup rebinds the server's global agent id. Restore the recalling
+    # tool, or the caller records a same-tool save without noticing.
+    _startup(migrated_db, agent_id=then_as)
+    return fact_id
 
 
 # ---------------------------------------------------------------- T1: the tool
 
 
 def test_agent_records_a_cross_tool_save_that_counts(migrated_db):
+    fact_id = _fact_written_by(migrated_db, "cursor")
     _startup(migrated_db, agent_id="claude-code")
 
     result = server.record_recall_save(
-        "shared", "the Upstox WS entitlement is account-level", written_by="cursor"
+        "shared", fact_id, "the Upstox WS entitlement is account-level"
     )
 
     assert result["recorded"] is True
@@ -47,9 +76,32 @@ def test_agent_records_a_cross_tool_save_that_counts(migrated_db):
     assert result["required"] == observations.REQUIRED_SAVES
 
 
+def test_a_save_cannot_be_manufactured_for_a_fact_that_does_not_exist(migrated_db):
+    """The gate decides real build work, so its number must be checkable. Until
+    2026-08-29 written_by was free text: an agent could type any tool name and
+    the save counted, in a store containing nothing that tool ever wrote."""
+    _startup(migrated_db, agent_id="claude-code")
+
+    result = server.record_recall_save("shared", "999999", "a save I invented")
+
+    assert "error" in result
+    assert "no fact" in result["error"]
+    assert result.get("counts_toward_gate") is None
+
+
+def test_a_fact_from_another_scope_cannot_be_cited(migrated_db):
+    """An unscoped lookup would let one tenant's fact evidence another's gate."""
+    fact_id = _fact_written_by(migrated_db, "cursor")
+    _startup(migrated_db, agent_id="claude-code")
+
+    result = server.record_recall_save("solo", fact_id, "citing across scopes")
+
+    assert "error" in result and "no fact" in result["error"]
+
+
 def test_recalled_by_defaults_to_this_server(migrated_db):
     config = _startup(migrated_db, agent_id="claude-code")
-    server.record_recall_save("shared", "something", written_by="cursor")
+    server.record_recall_save("shared", _fact_written_by(migrated_db, "cursor"), "something")
 
     conn = connect(migrated_db)
     entry = observations.list_observations(conn, [config.group_id("shared")])[0]
@@ -63,7 +115,7 @@ def test_same_tool_save_is_recorded_but_does_not_count(migrated_db):
     measures, but it is still evidence recall works, so it is kept."""
     _startup(migrated_db, agent_id="claude-code")
 
-    result = server.record_recall_save("shared", "my own note", written_by="claude-code")
+    result = server.record_recall_save("shared", _fact_written_by(migrated_db, "claude-code"), "my own note")
 
     assert result["recorded"] is True
     assert result["counts_toward_gate"] is False
@@ -71,19 +123,21 @@ def test_same_tool_save_is_recorded_but_does_not_count(migrated_db):
     assert "does not count" in result["note"]
 
 
-def test_missing_written_by_is_refused(migrated_db):
+def test_a_missing_fact_id_is_refused(migrated_db):
+    """Was test_missing_written_by_is_refused. written_by is no longer a
+    parameter - the fact being cited is what the server validates now."""
     _startup(migrated_db)
 
-    result = server.record_recall_save("shared", "a save", written_by="")
+    result = server.record_recall_save("shared", "", "a save")
 
     assert "error" in result
-    assert "written_by" in result["error"]
+    assert "no fact" in result["error"]
 
 
 def test_a_bad_scope_returns_a_typed_error(migrated_db):
     _startup(migrated_db)
 
-    result = server.record_recall_save("nonsense", "a save", written_by="cursor")
+    result = server.record_recall_save("nonsense", "1", "a save")
 
     assert "error" in result
     assert "scope" in result["error"]
@@ -97,8 +151,9 @@ def test_an_identical_retry_is_a_no_op(migrated_db):
     exactly three."""
     _startup(migrated_db)
 
-    first = server.record_recall_save("shared", "the same sentence", written_by="cursor")
-    second = server.record_recall_save("shared", "the same sentence", written_by="cursor")
+    fid = _fact_written_by(migrated_db, "cursor")
+    first = server.record_recall_save("shared", fid, "the same sentence")
+    second = server.record_recall_save("shared", fid, "the same sentence")
 
     assert first["already_recorded"] is False
     assert second["already_recorded"] is True
@@ -109,8 +164,9 @@ def test_an_identical_retry_is_a_no_op(migrated_db):
 def test_two_different_saves_from_one_tool_both_count(migrated_db):
     _startup(migrated_db)
 
-    server.record_recall_save("shared", "the first occasion", written_by="cursor")
-    result = server.record_recall_save("shared", "a different occasion", written_by="cursor")
+    fid = _fact_written_by(migrated_db, "cursor")
+    server.record_recall_save("shared", fid, "the first occasion")
+    result = server.record_recall_save("shared", fid, "a different occasion")
 
     assert result["cross_tool_saves"] == 2
 
@@ -119,7 +175,7 @@ def test_an_oversized_note_is_refused(migrated_db):
     _startup(migrated_db)
 
     result = server.record_recall_save(
-        "shared", "x" * (observations.MAX_NOTE_LEN + 1), written_by="cursor"
+        "shared", _fact_written_by(migrated_db, "cursor"), "x" * (observations.MAX_NOTE_LEN + 1)
     )
 
     assert "error" in result
@@ -130,7 +186,7 @@ def test_a_note_at_the_cap_is_accepted(migrated_db):
     _startup(migrated_db)
 
     result = server.record_recall_save(
-        "shared", "x" * observations.MAX_NOTE_LEN, written_by="cursor"
+        "shared", _fact_written_by(migrated_db, "cursor"), "x" * observations.MAX_NOTE_LEN
     )
 
     assert result["recorded"] is True

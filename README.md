@@ -85,8 +85,14 @@ claude mcp add --scope user echo-memory \
   -- "$(pwd)/.venv/bin/python" -m echo_memory.server
 ```
 
-Start a new Claude Code session and `write_episode`/`query_memory`/`get_audit_log` are
-available across every project, not just this repo.
+Start a new Claude Code session and `write_episode`/`query_memory`/`record_recall_save`/
+`get_audit_log` are available across every project, not just this repo.
+
+**Wiring a second tool? Give it its own `ECHO_MEMORY_AGENT_ID`.** Cursor should say
+`cursor`, Claude Desktop `claude-desktop`. Memory is shared either way, but a fact
+records which tool learned it, and two tools claiming the same id makes cross-tool
+recall impossible to see afterwards. `echo-memory install --for both` sets them
+correctly without you having to remember.
 
 Prefer it scoped to one project - a single Claude project, a Cursor workspace, a repo
 whose memory shouldn't mingle with the rest? `echo-memory install [path] --for

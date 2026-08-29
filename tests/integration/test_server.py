@@ -139,7 +139,7 @@ def test_a_database_outage_returns_a_typed_error_not_a_stack_trace(migrated_db, 
     for call in (
         lambda: server.query_memory("shared", query="anything"),
         lambda: server.get_audit_log("shared"),
-        lambda: server.record_recall_save("shared", "a save", written_by="cursor"),
+        lambda: server.record_recall_save("shared", "1", "a save"),
         lambda: server.write_episode("shared", "s", [], []),
     ):
         result = call()

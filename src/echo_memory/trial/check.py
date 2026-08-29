@@ -204,6 +204,23 @@ def suppressed_pair_count(conn, group_id: str) -> int:
     return sum(1 for c in everything if not c["same_project"])
 
 
+def unattributed_facts(conn, group_ids: list[str]) -> int:
+    """Facts whose `agent_id` is still the 0003 backfill placeholder.
+
+    Found live on 2026-08-29: migration 0007 had shipped but was never applied
+    to the trial database, leaving 58 such facts. Each one would have counted
+    toward the cross-tool bar it exists to be excluded from."""
+    quoted = ", ".join(f"'{g}'" for g in group_ids)
+    row = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH ()-[e:FACT]->()
+            WHERE e.agent_id = '{UNKNOWN_PROJECT}' AND e.group_id IN [{quoted}]
+            RETURN count(e)
+        $$) AS (n agtype)"""
+    ).fetchone()
+    return int(str(row[0])) if row and row[0] is not None else 0
+
+
 def build_report(
     conn, config, today: date | None = None, include_exact: bool = False,
     all_projects: bool = False,
@@ -229,7 +246,9 @@ def build_report(
     }
 
     tallies = observations.counts(conn, group_ids)
+    unattributed = unattributed_facts(conn, group_ids)
     return {
+        "unattributed_facts": unattributed,
         "trial": _elapsed(trial, today) if trial else None,
         "counts": tallies,
         "open": open_items,
@@ -237,7 +256,15 @@ def build_report(
         "n_unreviewed": sum(len(s["unreviewed_resolutions"]) for s in open_items.values()),
         "n_suppressed_pairs": sum(s["suppressed_pairs"] for s in open_items.values()),
         "met": {
-            "saves": tallies["cross_tool_saves"] >= observations.REQUIRED_SAVES,
+            # A store holding facts whose author was never recorded cannot
+            # evidence a CROSS-tool save: 'unknown' compares unequal to every
+            # real agent id, so those facts satisfy `written_by != recalled_by`
+            # for the wrong reason. Migration 0007 backfills them; until it has
+            # run, the bar is reported as unmet rather than as met-by-accident.
+            "saves": (
+                tallies["cross_tool_saves"] >= observations.REQUIRED_SAVES
+                and unattributed == 0
+            ),
             "duplicates": tallies["duplicates"] <= observations.MAX_DUPLICATES,
             "bad_merges": tallies["bad_merges"] <= observations.MAX_BAD_MERGES,
         },

@@ -5,7 +5,15 @@ testing (plain tables silently landing in ag_catalog instead of public).
 See conftest.py for the migrated_db fixture and the DB-reachability skip.
 """
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 from echo_memory.infra.db import GRAPH_NAME, connect
+
+REPO_ROOT = Path(__file__).parent.parent.parent
+DATABASE_URL = os.environ.get("ECHO_MEMORY_DATABASE_URL")
 
 
 def test_plain_tables_land_in_public_schema(migrated_db):
@@ -73,3 +81,46 @@ def test_node_edge_audit_embedding_round_trip(migrated_db):
         "SELECT count(*) FROM public.fact_embedding WHERE edge_id = %s", (edge_id,)
     ).fetchone()
     assert embedding_count == 1
+
+
+def test_migration_0007_runs_standalone_on_a_connection_without_age(migrated_db):
+    """0007 shipped broken and CI could not have caught it.
+
+    Alembic runs a full `upgrade head` on ONE connection, so 0007 inherited
+    `LOAD 'age'` from 0003 and its cypher body worked in every test. On a
+    database already at 0006 - which is what the trial machine was - only 0007
+    runs, on a fresh connection with nothing loaded, and it failed with
+    `function cypher(unknown, unknown) does not exist`. 58 facts kept a
+    fabricated author for six days as a result.
+
+    This exercises the standalone path: downgrade to 0006, seed the exact rows
+    0007 exists to fix, then upgrade on a new connection."""
+    env = {**os.environ, "ECHO_MEMORY_DATABASE_URL": DATABASE_URL}
+    alembic = [sys.executable, "-m", "alembic"]
+    subprocess.run([*alembic, "downgrade", "0006"], cwd=REPO_ROOT, env=env, check=True)
+
+    with connect(DATABASE_URL) as conn:
+        conn.execute("LOAD 'age'")
+        conn.execute('SET search_path = ag_catalog, "$user", public')
+        conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH_NAME}', $$
+                CREATE (a:ENTITY {{name: 'a', group_id: 'g'}})
+                      -[:FACT {{fact: 'f', group_id: 'g', agent_id: 'unknown'}}]->
+                       (b:ENTITY {{name: 'b', group_id: 'g'}})
+                RETURN 1
+            $$) AS (n agtype)"""
+        )
+        conn.commit()
+
+    # The failing path: a standalone 0007 on its own connection.
+    subprocess.run([*alembic, "upgrade", "head"], cwd=REPO_ROOT, env=env, check=True)
+
+    with connect(DATABASE_URL) as conn:
+        conn.execute("LOAD 'age'")
+        conn.execute('SET search_path = ag_catalog, "$user", public')
+        row = conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH_NAME}', $$
+                MATCH ()-[e:FACT]->() WHERE e.agent_id = 'unknown' RETURN count(e)
+            $$) AS (n agtype)"""
+        ).fetchone()
+    assert int(str(row[0])) == 0, "0007 left an 'unknown' author behind"
