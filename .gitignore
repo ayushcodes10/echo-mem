@@ -46,3 +46,8 @@ postgres-data/
 
 # Logs
 *.log
+
+# Built on demand by `echo-memory skill --package`. The source of truth is the
+# SKILL.md that ships inside the package; a zip in git is a binary nobody can
+# diff and goes stale the first time the instructions change.
+echo-memory-skill.zip
