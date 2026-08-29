@@ -177,3 +177,37 @@ def test_unsupported_clients_are_named_rather_than_guessed(tmp_path):
 def test_plan_explains_every_action(tmp_path, action):
     for r in adopt.plan(CONFIG, home=_home(tmp_path, "cursor")):
         assert r["why"], f"{r['client']} has no explanation"
+
+
+def test_moving_the_credential_into_a_file_is_not_a_conflict(tmp_path, monkeypatch):
+    """Found by running adopt against a real machine: the inline URL and the
+    path of a file containing that same URL are different strings, so the guard
+    read a routine migration as a repoint to another database. It is the case
+    _same_target's own docstring predicted and did not handle."""
+    secret = tmp_path / "database-url"
+    secret.write_text(CONFIG.database_url + "\n")
+    home = _home(tmp_path, "cursor")
+    path = adopt.CLIENTS["cursor"]["path"](home)
+    path.write_text(json.dumps({"mcpServers": {"echo-memory": {
+        "env": {"ECHO_MEMORY_USER_ID": "ayush",
+                "ECHO_MEMORY_DATABASE_URL": CONFIG.database_url},
+    }}}))
+    monkeypatch.setenv("ECHO_MEMORY_DATABASE_URL_FILE", str(secret))
+
+    results = {r["client"]: r for r in adopt.plan(CONFIG, home=home)}
+
+    assert results["cursor"]["action"] == "update", "same database, expressed differently"
+
+
+def test_a_credential_file_naming_another_database_is_still_a_conflict(tmp_path, monkeypatch):
+    secret = tmp_path / "database-url"
+    secret.write_text("postgresql://postgres:pw@localhost:5433/somewhere_else\n")
+    home = _home(tmp_path, "cursor")
+    adopt.CLIENTS["cursor"]["path"](home).write_text(json.dumps({"mcpServers": {
+        "echo-memory": {"env": {"ECHO_MEMORY_USER_ID": "ayush",
+                                "ECHO_MEMORY_DATABASE_URL": CONFIG.database_url}}}}))
+    monkeypatch.setenv("ECHO_MEMORY_DATABASE_URL_FILE", str(secret))
+
+    results = {r["client"]: r for r in adopt.plan(CONFIG, home=home)}
+
+    assert results["cursor"]["action"] == "conflict"
