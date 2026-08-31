@@ -415,7 +415,10 @@ def main(argv: list[str] | None = None) -> int:
         results = (
             adopt.apply(config, force=args.force) if args.apply else adopt.plan(config)
         )
-        print(adopt.render(results, applied=args.apply), end="")
+        print(
+            adopt.render(results, applied=args.apply, manual=adopt.manual_steps(config)),
+            end="",
+        )
         return 0
 
     if args.command == "init-db":
