@@ -15,6 +15,7 @@ from echo_memory.cli import recall
 from echo_memory.cli.main import main
 from echo_memory.infra.config import Config
 from echo_memory.infra.db import connect
+from echo_memory.ingestion import capture
 
 FACT = "chat-module-api.dugoutlive.com resolves to dugout-dev-alb, so it is DEV not prod"
 
@@ -182,3 +183,83 @@ def test_injected_facts_carry_their_author_and_fact_id(migrated_db):
     assert "written by claude-code" in text
     assert "fact_id" in text
     assert "record_recall_save with that fact's fact_id" in text
+
+
+# ------------------------------------------------- the write half of the hook
+
+
+def test_queued_files_are_surfaced_even_when_nothing_matches(migrated_db):
+    """The nudge to drain pending_ingest lived inside query_memory's response,
+    so an agent learned work was queued only by calling a tool it does not
+    spontaneously call - which is the exact reason this hook exists. Three files
+    sat unprocessed for days as a result."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    capture.notice(conn, "/tmp/a-memory-file.md", "dugout", "digest-a")
+
+    result = recall.recall_for_prompt(conn, config, "what is the weather in reykjavik")
+    text = recall.render_context(result)
+
+    assert result["facts"] == [], "still no lexical match"
+    assert "1 memory file(s) noticed" in text
+    assert "echo-memory pending" in text
+
+
+def test_silence_when_nothing_matches_and_nothing_is_queued(migrated_db):
+    """The original contract, now explicit rather than accidental: a hook that
+    always speaks becomes noise the model learns to skim."""
+    config = _seed(migrated_db)
+
+    result = recall.recall_for_prompt(
+        connect(migrated_db), config, "what is the weather in reykjavik"
+    )
+
+    assert result["pending"] == 0
+    assert recall.render_context(result) == ""
+
+
+def test_a_store_nobody_is_writing_to_says_so(migrated_db):
+    """Reads were made automatic by this hook. Writes stayed a polite request in
+    a tool description, and the observed write rate over three days of heavy use
+    was zero."""
+    _seed(migrated_db)
+
+    text = recall.render_context({
+        "facts": [], "pending": 0, "days_since_write": recall.QUIET_DAYS + 4,
+    })
+
+    assert "has been written to memory in 7 days" in text
+    assert "write_episode now" in text
+
+
+def test_a_recent_write_is_not_nagged_about(migrated_db):
+    assert recall.render_context(
+        {"facts": [], "pending": 0, "days_since_write": recall.QUIET_DAYS - 1}
+    ) == ""
+
+
+def test_the_write_half_rides_along_with_matched_facts(migrated_db):
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    capture.notice(conn, "/tmp/another.md", "dugout", "digest-b")
+
+    text = recall.render_context(
+        recall.recall_for_prompt(conn, config, "is chat-module-api dev or prod")
+    )
+
+    assert "dugout-dev-alb" in text, "facts still come first"
+    assert "1 memory file(s) noticed" in text
+
+
+def test_a_short_prompt_still_reports_queued_work(migrated_db):
+    """'yes' skips retrieval because it matches everything lexically. Queued
+    work has nothing to do with the prompt."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    capture.notice(conn, "/tmp/c.md", "dugout", "digest-c")
+
+    result = recall.recall_for_prompt(conn, config, "yes")
+
+    assert "too short" in result["skipped"]
+    assert result["pending"] == 1
+    assert "1 memory file(s) noticed" in recall.render_context(result)
