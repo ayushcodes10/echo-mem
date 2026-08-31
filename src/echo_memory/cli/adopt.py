@@ -32,6 +32,7 @@ import json
 import os
 import shutil
 import sys
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -69,6 +70,22 @@ CLIENTS = {
     },
 }
 
+# Clients whose config this cannot safely rewrite, but whose entry it can
+# compose. Codex keeps its MCP servers in ~/.codex/config.toml, which is TOML
+# and hand-edited: the stdlib reads it but cannot write it, and the libraries
+# that can do not preserve comments or key order. Round-tripping somebody's
+# model pins and sandbox settings through a writer that silently reorders them
+# is the same violation as overwriting an entry we did not create, so the block
+# gets printed and the human pastes it.
+MANUAL = {
+    "codex": {
+        "label": "Codex",
+        "agent_id": "codex",
+        "path": lambda home: home / ".codex" / "config.toml",
+        "why": "config is hand-edited TOML; printing the block instead",
+    },
+}
+
 # Named so the summary can say why, instead of leaving the user to wonder
 # whether their editor was missed or is unsupported.
 UNSUPPORTED = {
@@ -77,6 +94,51 @@ UNSUPPORTED = {
 }
 
 REGISTRY = Path(".config") / "echo-memory" / "adopted.json"
+
+
+def _toml_entry(config, agent_id: str, project: str) -> str:
+    """The `[mcp_servers.echo-memory]` block, built from the same
+    `_server_entry` every other client gets so the two cannot drift."""
+    entry = _server_entry(config, project, agent_id)
+    env = ", ".join(f'{k} = "{v}"' for k, v in entry["env"].items())
+    args = ", ".join(f'"{a}"' for a in entry["args"])
+    return (
+        f"[mcp_servers.{SERVER_KEY}]\n"
+        f'command = "{entry["command"]}"\n'
+        f"args = [{args}]\n"
+        f"env = {{ {env} }}\n"
+    )
+
+
+def _has_codex_entry(path: Path) -> bool:
+    """Whether echo-memory is already registered. Read-only: tomllib parses,
+    and nothing here writes."""
+    if not path.exists():
+        return False
+    try:
+        return SERVER_KEY in tomllib.loads(path.read_text()).get("mcp_servers", {})
+    except (tomllib.TOMLDecodeError, OSError):
+        return False
+
+
+def manual_steps(config, home: Path | None = None) -> list[dict]:
+    """Clients that need a human to paste something, with the thing to paste."""
+    home = home or Path.home()
+    out = []
+    for name, spec in MANUAL.items():
+        path = spec["path"](home)
+        if not path.exists():
+            action, block = "skip", None
+        elif _has_codex_entry(path):
+            action, block = "already registered", None
+        else:
+            action, block = "manual", _toml_entry(config, spec["agent_id"], config.project)
+        out.append({
+            "client": name, "label": spec["label"], "path": path,
+            "agent_id": spec["agent_id"], "action": action,
+            "why": spec["why"], "block": block,
+        })
+    return out
 
 
 def registry_path(home: Path | None = None) -> Path:
@@ -223,7 +285,7 @@ def adopted_clients(home: Path | None = None) -> list[dict]:
         return []
 
 
-def render(results: list[dict], applied: bool) -> str:
+def render(results: list[dict], applied: bool, manual: list[dict] | None = None) -> str:
     verb = "Adopted" if applied else "Would adopt"
     lines = [f"{verb} Echo Memory for the MCP clients on this machine:", ""]
     for r in results:
@@ -236,9 +298,24 @@ def render(results: list[dict], applied: bool) -> str:
             lines.append("      pass --force to repoint it")
         if r.get("verified") is False:
             lines.append("      written but not readable back - is the client running?")
+    for item in manual or []:
+        if item["action"] == "skip":
+            lines.append(f"  - {item['label']:<16} skip        (not installed)")
+        elif item["action"] == "already registered":
+            lines.append(f"    {item['label']:<16} already registered  as {item['agent_id']}")
+        else:
+            lines.append(f"  ~ {item['label']:<16} paste needed  ({item['why']})")
     for name, why in UNSUPPORTED.items():
         lines.append(f"  - {name:<16} unsupported  ({why})")
     lines.append("")
+
+    for item in manual or []:
+        if item["action"] != "manual":
+            continue
+        lines.append(f"Add this to {item['path']}:")
+        lines.append("")
+        lines += [f"  {ln}" for ln in item["block"].rstrip().split("\n")]
+        lines.append("")
     if not applied:
         lines.append("Nothing was written. Re-run with --apply to make these changes.")
     else:
