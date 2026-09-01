@@ -17,6 +17,8 @@ BASE = {
     "orphans": [], "components": 4, "clusters": 8,
     "unreviewed_pairs": 2, "unattributed_facts": 0,
     "duplicates": 0, "bad_merges": 0,
+    "reads": {"days": 7, "reads": 0, "reads_with_facts": 0,
+              "injected_chars": 0, "injected_tokens": 0, "saves": 0},
 }
 
 
@@ -115,3 +117,46 @@ def test_render_shows_the_last_real_write_even_when_it_is_not_a_warning():
 
     assert "18 written while working" in text
     assert "2026-08-29" in text
+
+
+def test_read_volume_with_no_saves_is_flagged_as_an_open_question():
+    """The product's central claim is that recall earns what it costs. Real read
+    volume producing no recorded save does not prove it fails - it proves nobody
+    can tell, and the two need different fixes."""
+    _, attention, rec = health.findings(h(reads={
+        "days": 7, "reads": 340, "reads_with_facts": 300,
+        "injected_chars": 440000, "injected_tokens": 110000, "saves": 0,
+    }))
+
+    assert any("produced no recorded save" in a for a in attention)
+    assert any("different fixes" in r for r in rec)
+
+
+def test_reads_with_saves_are_not_flagged():
+    _, attention, _ = health.findings(h(reads={
+        "days": 7, "reads": 340, "reads_with_facts": 300,
+        "injected_chars": 440000, "injected_tokens": 110000, "saves": 4,
+    }))
+
+    assert not any("no recorded save" in a for a in attention)
+
+
+def test_render_states_the_cost_alongside_the_benefit():
+    text = health.render(h(reads={
+        "days": 7, "reads": 340, "reads_with_facts": 306,
+        "injected_chars": 440000, "injected_tokens": 110000, "saves": 12,
+    }))
+
+    assert "read 340 times in 7d" in text
+    assert "90% returned something" in text
+    assert "110,000 tokens injected" in text
+    assert "12 save(s) recorded" in text
+
+
+def test_a_store_with_no_reads_says_so_rather_than_dividing_by_zero():
+    text = health.render(h(reads={
+        "days": 7, "reads": 0, "reads_with_facts": 0,
+        "injected_chars": 0, "injected_tokens": 0, "saves": 0,
+    }))
+
+    assert "no reads recorded in 7d" in text

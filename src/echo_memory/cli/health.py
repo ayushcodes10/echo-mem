@@ -32,6 +32,7 @@ from echo_memory.cli.graph import fetch_graph
 from echo_memory.graph import communities
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.trial import check as trial_check
+from echo_memory.trial import reads as trial_reads
 
 # Days without a written fact before the store is treated as going cold. Chosen
 # against observed behaviour rather than theory: this store wrote on three
@@ -113,6 +114,7 @@ def collect(conn, config, today: datetime | None = None) -> dict:
     silent = sorted(wired - {a for a, n in writers.items() if n})
 
     report = trial_check.build_report(conn, config, today=today.date())
+    read_stats = trial_reads.summary(conn, group_ids)
     orphans = [n for g in graphs.values() for n in _orphans(g)]
 
     return {
@@ -131,6 +133,7 @@ def collect(conn, config, today: datetime | None = None) -> dict:
         "unattributed_facts": report.get("unattributed_facts", 0),
         "duplicates": report["counts"]["duplicates"],
         "bad_merges": report["counts"]["bad_merges"],
+        "reads": read_stats,
     }
 
 
@@ -225,6 +228,18 @@ def findings(h: dict) -> tuple[list[str], list[str], list[str]]:
         )
         rec.append("Orphans are unreachable by traversal; relate them or let them go.")
 
+    r = h.get("reads") or {}
+    if r.get("reads") and not r.get("saves"):
+        attention.append(
+            f"{r['reads']} reads cost ~{r['injected_tokens']:,} injected tokens and "
+            "produced no recorded save"
+        )
+        rec.append(
+            "A read that helped is only visible if record_recall_save is called. "
+            "Zero saves against real read volume means either the recall is not "
+            "useful or nobody is reporting when it is - and those need different fixes."
+        )
+
     if h["unreviewed_pairs"] > REVIEW_BACKLOG:
         attention.append(f"{h['unreviewed_pairs']} similar pairs awaiting review")
         rec.append("Run `echo-memory trial check` to judge them before the queue is ignored.")
@@ -257,6 +272,18 @@ def render(h: dict) -> str:
         ),
         "",
     ]
+    r = h.get("reads") or {}
+    if r.get("reads"):
+        hit = round(100 * r["reads_with_facts"] / r["reads"])
+        lines.append(
+            f"  read {r['reads']} times in {r['days']}d, {hit}% returned something, "
+            f"~{r['injected_tokens']:,} tokens injected, {r['saves']} save(s) recorded"
+        )
+        lines.append("")
+    elif r:
+        lines.append(f"  no reads recorded in {r['days']}d")
+        lines.append("")
+
     if strong:
         lines.append("  strong")
         lines += [f"    + {s}" for s in strong]
