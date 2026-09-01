@@ -21,6 +21,7 @@ from echo_memory.ingestion.embeddings import Embedder, LocalEmbedder
 from echo_memory.ingestion.write_episode import write_episode as _write_episode
 from echo_memory.retrieval.query_memory import query_memory as _query_memory
 from echo_memory.trial import observations as _observations
+from echo_memory.trial import reads as _reads
 
 server = MCPServer(
     name="echo-memory",
@@ -151,6 +152,14 @@ def query_memory(scope: str, query: str | None = None, top_k: int = 10, digest: 
     try:
         with _state.pool.connection() as conn:
             result = _query_memory(conn, group_id, query, top_k, _state.embedder, digest=digest)
+        # The other read surface. Counted the same way so the ratio in
+        # `echo-memory health` covers both, not just the hook.
+        if "error" not in result:
+            _reads.record(
+                conn, group_id, _reads.QUERY,
+                n_facts=len(result.get("facts") or []),
+                injected_chars=sum(len(f.get("fact") or "") for f in result.get("facts") or []),
+            )
             _bootstrap_once(conn)
             queued = capture.pending(conn)
             if queued:
