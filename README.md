@@ -191,7 +191,11 @@ hostnames, account numbers and client names.
 echo-memory health
 ```
 
-A score, what is strong, what needs attention, and what to do about each. It
+A score, what is strong, what needs attention, and what to do about each,
+including what recall has cost: how often memory was read, how often a read
+returned anything, roughly how many tokens were injected, and how many saves
+those reads produced. Writes were counted from the start; reads were not counted
+at all, so nothing could answer whether recall earns what it costs. It
 exists to be run when you have no question - a store can look healthy by every
 number this CLI reports while most of its facts came from a bulk import, the
 last real write was a week ago, and only one of several wired agents has ever

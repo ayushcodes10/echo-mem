@@ -333,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
         conn = connect(config.database_url)
         result = recall_cmd.recall_for_prompt(conn, config, prompt, args.top_k)
         context = recall_cmd.render_context(result)
+        recall_cmd.record_read(conn, config, result, context)
         if args.hook_json:
             # Nothing relevant: stay silent rather than injecting an empty
             # block into every prompt the user types.

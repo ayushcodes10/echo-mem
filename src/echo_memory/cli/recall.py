@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 
 from echo_memory.ingestion import capture
 from echo_memory.retrieval.query_memory import query_memory
+from echo_memory.trial import reads
 
 # Injected on every prompt, so this stays small. Three facts is enough to
 # answer "we already know this" without crowding out the user's actual words.
@@ -161,6 +162,19 @@ def _write_side_lines(result: dict) -> list[str]:
             "write_episode now rather than at the end."
         )
     return lines
+
+
+def record_read(conn, config, result: dict, context: str) -> None:
+    """What this prompt cost in injected characters, recorded after rendering
+    because that is the only point where the real figure is known.
+
+    Counted even when the context is empty: a read that returned nothing still
+    happened, and reads-that-found-nothing over reads-total is the ratio that
+    says whether retrieval is working."""
+    reads.record(
+        conn, config.group_id("shared"), reads.HOOK,
+        n_facts=len(result.get("facts") or []), injected_chars=len(context),
+    )
 
 
 def render_hook_output(context: str) -> str:
