@@ -110,15 +110,30 @@ def _toml_entry(config, agent_id: str, project: str) -> str:
     )
 
 
-def _has_codex_entry(path: Path) -> bool:
-    """Whether echo-memory is already registered. Read-only: tomllib parses,
-    and nothing here writes."""
+def _codex_state(path: Path, want_agent_id: str) -> str:
+    """"missing", "wrong-agent-id", or "registered". Read-only: tomllib parses,
+    and nothing here writes.
+
+    Checking the agent id and not just the key matters more than it looks. This
+    used to return a bool for "is the server present", and on 2026-09-02 it
+    reported Codex as already registered while its config carried
+    ECHO_MEMORY_AGENT_ID = "claude-code" - written before install.py learned to
+    give each client its own id. Every fact Codex wrote would have been filed as
+    claude-code, which is precisely the fault that made the v1a cross-tool
+    criterion unable to return a signal for the first eight days of the trial.
+    A presence check that does not check correctness reports a broken install as
+    a healthy one."""
     if not path.exists():
-        return False
+        return "missing"
     try:
-        return SERVER_KEY in tomllib.loads(path.read_text()).get("mcp_servers", {})
+        entry = tomllib.loads(path.read_text()).get("mcp_servers", {}).get(SERVER_KEY)
     except (tomllib.TOMLDecodeError, OSError):
-        return False
+        return "missing"
+    if entry is None:
+        return "missing"
+    if (entry.get("env") or {}).get("ECHO_MEMORY_AGENT_ID") != want_agent_id:
+        return "wrong-agent-id"
+    return "registered"
 
 
 def manual_steps(config, home: Path | None = None) -> list[dict]:
@@ -127,10 +142,18 @@ def manual_steps(config, home: Path | None = None) -> list[dict]:
     out = []
     for name, spec in MANUAL.items():
         path = spec["path"](home)
+        state = _codex_state(path, spec["agent_id"])
         if not path.exists():
             action, block = "skip", None
-        elif _has_codex_entry(path):
+        elif state == "registered":
             action, block = "already registered", None
+        elif state == "wrong-agent-id":
+            # Worth its own action rather than folding into "manual": the entry
+            # looks installed, so the operator needs telling that the one field
+            # the cross-tool criterion depends on is wrong.
+            action, block = "wrong agent id", _toml_entry(
+                config, spec["agent_id"], config.project
+            )
         else:
             action, block = "manual", _toml_entry(config, spec["agent_id"], config.project)
         out.append({
@@ -303,6 +326,17 @@ def render(results: list[dict], applied: bool, manual: list[dict] | None = None)
             lines.append(f"  - {item['label']:<16} skip        (not installed)")
         elif item["action"] == "already registered":
             lines.append(f"    {item['label']:<16} already registered  as {item['agent_id']}")
+        elif item["action"] == "wrong agent id":
+            lines.append(
+                f"  ! {item['label']:<16} registered, but its ECHO_MEMORY_AGENT_ID is not "
+                f"'{item['agent_id']}'"
+            )
+            lines.append(
+                f"    Every fact it writes is filed under the wrong tool. Fix {item['path']}:"
+            )
+            lines.append("")
+            lines += [f"      {line}" for line in item["block"].splitlines()]
+            lines.append("")
         else:
             lines.append(f"  ~ {item['label']:<16} paste needed  ({item['why']})")
     for name, why in UNSUPPORTED.items():
