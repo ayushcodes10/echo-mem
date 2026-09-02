@@ -671,9 +671,18 @@ fact in this session.
 
 Three bounds keep it from being the hook people disable:
 
-- **It fires once per session.** Claude Code sets `stop_hook_active` when a
-  session is already continuing because of a stop hook; seeing that, this exits
-  silently. One nudge, never a loop.
+- **It fires once per session, recorded not inferred.** The first version
+  trusted Claude Code's `stop_hook_active`, which is set only while a session is
+  *continuing* from a stop hook — once the agent answers and stops again, it is a
+  fresh stop with the flag clear. An eigen session hit the gate **five times** on
+  2026-09-02 and spent 27 minutes unable to satisfy any of them. Gated sessions
+  are now written to `stop_gate_fired` and never gated twice.
+- **It states how to give up.** The gate cannot see the session's tool list, so
+  it can block a session that has no way to comply — `write_episode` absent, the
+  CLI not on `PATH`. The reason now tells that session to say so in one line and
+  stop, and the command it prints is the hook's own absolute `ECHO_MEMORY_BIN`
+  rather than a bare `echo-memory` that a virtualenv install does not put on
+  `PATH`. An unsatisfiable demand with no stated way out is worse than no gate.
 - **It is scoped to the current project.** Blocking an echo-mem session because
   eigen has a backlog would train everyone to switch it off.
 - **It is silent when the queue is clean**, which is the steady state.
