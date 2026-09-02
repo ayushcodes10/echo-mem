@@ -30,16 +30,23 @@ payload=$(cat)
 
 if command -v jq >/dev/null 2>&1; then
   prompt=$(printf '%s' "$payload" | jq -r '.prompt // empty' 2>/dev/null)
+  session_id=$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)
 else
   prompt=$(printf '%s' "$payload" | sed -n 's/.*"prompt"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' | head -1)
+  session_id=$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 fi
 
 [ -n "${prompt:-}" ] || exit 0
 
+# Attribution is best-effort: an older CLI rejects the flag, and a recorded
+# read matters more than a labelled one.
+sid_args=""
+[ -n "${session_id:-}" ] && sid_args="--session-id $session_id"
+
 if command -v timeout >/dev/null 2>&1; then
-  out=$(printf '%s' "$prompt" | timeout "$ECHO_MEMORY_RECALL_TIMEOUT" "$ECHO_MEMORY_BIN" recall --hook-json 2>/dev/null)
+  out=$(printf '%s' "$prompt" | timeout "$ECHO_MEMORY_RECALL_TIMEOUT" "$ECHO_MEMORY_BIN" recall --hook-json $sid_args 2>/dev/null)
 else
-  out=$(printf '%s' "$prompt" | "$ECHO_MEMORY_BIN" recall --hook-json 2>/dev/null)
+  out=$(printf '%s' "$prompt" | "$ECHO_MEMORY_BIN" recall --hook-json $sid_args 2>/dev/null)
 fi
 
 [ -n "${out:-}" ] && printf '%s\n' "$out"

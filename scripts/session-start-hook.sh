@@ -23,6 +23,17 @@ set -u
 
 cat >/dev/null   # drain the SessionStart payload
 
+# Heal any drift before briefing: a memory file edited while the capture hook
+# was not installed, or through a path it did not match, is invisible to the
+# queue until something reads the filesystem. Three eigen files sat in that
+# state until 2026-09-02. Silent and best-effort - the briefing matters more
+# than the sweep, and the sweep must never be what makes a session start late.
+if command -v timeout >/dev/null 2>&1; then
+  timeout "$ECHO_MEMORY_BRIEF_TIMEOUT" "$ECHO_MEMORY_BIN" reconcile --quiet >/dev/null 2>&1 || true
+else
+  "$ECHO_MEMORY_BIN" reconcile --quiet >/dev/null 2>&1 || true
+fi
+
 # The project is resolved from the hook's own working directory, which Claude
 # Code sets to the project root - the same rule the MCP server uses, so a fact
 # written this session and the briefing that mentioned it agree on the name.
