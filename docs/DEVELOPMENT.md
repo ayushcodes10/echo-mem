@@ -431,7 +431,35 @@ two days of the v1a trial that was 4 times, while the agent's own file-based
 memory wrote 7 files in the same window because a hook fired deterministically.
 The capture path already existed; it just wasn't wired to Echo Memory.
 
-`scripts/capture-memory-hook.sh` closes that. Register it as a `PostToolUse`
+### Install every hook at once
+
+```bash
+echo-memory install-hooks          # writes ~/.claude/settings.json
+echo-memory install-hooks --dry-run
+```
+
+Five hooks, one command, safe to re-run: entries this tool wrote are replaced
+rather than stacked, and hooks anything else registered are left alone.
+
+**Why one command and not five copy-paste blocks.** This section used to
+document each hook separately. That shape half-completes silently — the hooks
+are independent, nothing checks that all of them landed, and a machine missing
+one is indistinguishable from a machine missing none until months of memory
+have quietly not been captured. They are not really independent anyway: they
+are one mechanism in five places (notice a write, sweep for drift, recall on
+the prompt, save before compaction, gate the stop), and a set where any member
+can be absent is a set that will be.
+
+The hooks go in the **user-level** settings file, which is what makes this work
+in projects that don't exist yet. A per-project registration would have to be
+remembered for every new repo — the exact failure this is fixing.
+
+The individual blocks below are what the command writes, kept for anyone
+merging them by hand.
+
+### PostToolUse: queue a memory file the moment it is written
+
+`scripts/capture-memory-hook.sh`. Register it as a `PostToolUse`
 hook on `Write|Edit` in `~/.claude/settings.json`:
 
 ```json
@@ -613,6 +641,64 @@ the file now says something the graph hasn't heard.
 
 The hook never blocks or fails a tool call - a memory-capture side effect has
 no business breaking the edit that triggered it - so every path exits 0.
+
+### Stop: hold the session open until what it learned is stored
+
+Everything above *asks*. Between 2026-08-23 and 2026-09-02 the session-start
+briefing asked every session in every project to drain the capture queue, in
+these words:
+
+> N memory file(s) are queued but not yet recorded as facts. Run
+> `echo-memory pending`, read each, and write_episode what it states.
+
+In that window 16 memory files were written across eigen and dugout. The
+capture hook noticed all 16. **None** were turned into facts by the session
+that wrote them; they were ingested by hand ten days later, from a different
+project. The instruction was correct, specific, and ignored 100% of the time.
+
+The lesson is not that it needed better wording. Claude Code's own file-based
+memory is a permanent system-prompt section, present on every turn; this was
+one reminder at session start competing with several hundred registered tools.
+Instructions lose to whatever is structurally louder. The things that worked in
+that same window were all hooks.
+
+So `scripts/session-stop-hook.sh` doesn't remind - it returns
+`{"decision": "block", "reason": ...}`, which hands control back to the agent
+with the reason as its next instruction. `Stop` fires when the agent is about
+to finish, which is exactly when it still holds the context to say what it
+learned and is no longer mid-task. A memory file written this session becomes a
+fact in this session.
+
+Three bounds keep it from being the hook people disable:
+
+- **It fires once per session.** Claude Code sets `stop_hook_active` when a
+  session is already continuing because of a stop hook; seeing that, this exits
+  silently. One nudge, never a loop.
+- **It is scoped to the current project.** Blocking an echo-mem session because
+  eigen has a backlog would train everyone to switch it off.
+- **It is silent when the queue is clean**, which is the steady state.
+
+```bash
+echo-memory stop-check              # what this project still owes
+echo-memory stop-check --hook-json  # what the hook returns
+```
+
+### Reconcile: heal a hook that didn't fire
+
+A queue only knows what it was told. On 2026-09-02 three eigen memory files
+were found holding content the queue had never seen - the hook wasn't installed
+when they were written, or the edit came through a path it didn't match.
+Nothing detected it, and nothing would have.
+
+`echo-memory reconcile` reads the filesystem instead of trusting the hook:
+every `*/memory/*.md` under `~/.claude/projects/`, digest-compared against the
+queue, with anything that moved reopened. It runs from the SessionStart hook
+(silently, best-effort) and again inside `stop-check`, so a missed capture
+self-heals instead of being permanent.
+
+Deliberately the same scope as the capture hook. If the two disagreed about
+what counts as a memory, the sweep would either keep reopening files the hook
+ignores or keep missing files the hook queues.
 
 ## Dashboard
 
