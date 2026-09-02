@@ -78,3 +78,19 @@ def test_the_projects_root_can_be_pointed_elsewhere(tmp_path, monkeypatch):
 def test_without_an_override_it_is_the_real_location(monkeypatch):
     monkeypatch.delenv(reconcile.ROOT_ENV, raising=False)
     assert reconcile.claude_projects_root() == reconcile.DEFAULT_CLAUDE_PROJECTS
+
+
+def test_the_cli_path_falls_back_when_argv_is_another_runner(monkeypatch):
+    """Imported into pytest, argv[0] is the pytest binary. Printing
+    "<pytest> pending --done" would hand the agent a command that cannot work."""
+    from echo_memory.cli import stop_gate
+
+    monkeypatch.delenv("ECHO_MEMORY_BIN", raising=False)
+    assert stop_gate.cli_path() == "echo-memory"
+
+
+def test_the_cli_path_prefers_the_hook_s_own_binary(monkeypatch):
+    from echo_memory.cli import stop_gate
+
+    monkeypatch.setenv("ECHO_MEMORY_BIN", "/opt/echo-mem/.venv/bin/echo-memory")
+    assert stop_gate.cli_path() == "/opt/echo-mem/.venv/bin/echo-memory"

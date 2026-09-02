@@ -146,6 +146,10 @@ def _add_project_parsers(sub) -> None:
     stop.add_argument(
         "--hook-json", action="store_true", help="emit Stop hook JSON instead of plain text"
     )
+    stop.add_argument(
+        "--session-id", default=None,
+        help="the calling session, so the gate holds it open at most once",
+    )
 
     rec = sub.add_parser(
         "recall", help="facts matching a prompt, for the UserPromptSubmit hook"

@@ -195,3 +195,51 @@ def test_the_reason_offers_the_already_stored_outcome(migrated_db, tmp_path):
 
     assert "do not write it twice" in reason
     assert "nothing durable" in reason
+
+
+def test_a_session_is_held_open_at_most_once_ever(migrated_db, monkeypatch, tmp_path, capsys):
+    """The bound that failed in production. stop_hook_active is set only while a
+    session is CONTINUING from a stop hook; once the agent answers and stops
+    again the flag is clear, so an eigen session hit this gate five times on
+    2026-09-02 and spent 27 minutes unable to satisfy any of them."""
+    _cli_env(migrated_db, monkeypatch, tmp_path)
+    _memory_file(tmp_path, "-Users-ayush-work-eigen", "pause.md", "unwritten")
+
+    assert main(["stop-check", "--hook-json", "--session-id", "s-1"]) == 0
+    first = capsys.readouterr().out
+    assert '"decision": "block"' in first
+
+    # Same session, file still unwritten: must stay silent regardless.
+    assert main(["stop-check", "--hook-json", "--session-id", "s-1"]) == 0
+    assert capsys.readouterr().out == ""
+
+    # A different session still gets its one nudge.
+    assert main(["stop-check", "--hook-json", "--session-id", "s-2"]) == 0
+    assert '"decision": "block"' in capsys.readouterr().out
+
+
+def test_the_reason_names_a_runnable_binary_not_a_bare_command(migrated_db, tmp_path, monkeypatch):
+    """It used to print a bare `echo-memory`, which is not on PATH for a
+    virtualenv install - so the one route that did not need the MCP tool did not
+    work either, and the session had no way to comply at all."""
+    monkeypatch.setenv("ECHO_MEMORY_BIN", "/opt/echo-mem/.venv/bin/echo-memory")
+    conn = connect(migrated_db)
+    _memory_file(tmp_path, "-Users-ayush-work-eigen", "pause.md", "unwritten")
+
+    reason = stop_gate.render_reason(stop_gate.gate(conn, "eigen", root=tmp_path))
+
+    assert "/opt/echo-mem/.venv/bin/echo-memory pending --done" in reason
+
+
+def test_the_reason_tells_an_unequipped_session_how_to_stop(migrated_db, tmp_path):
+    """The gate cannot see the session's tool list, so it can block a session
+    that has no way to comply. An unsatisfiable demand with no stated way out is
+    worse than no gate at all."""
+    conn = connect(migrated_db)
+    _memory_file(tmp_path, "-Users-ayush-work-eigen", "pause.md", "unwritten")
+
+    reason = stop_gate.render_reason(stop_gate.gate(conn, "eigen", root=tmp_path))
+
+    assert "cannot satisfy this" in reason
+    assert "Do not retry" in reason
+    assert "will not fire again for this session" in reason
