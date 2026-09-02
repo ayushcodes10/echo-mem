@@ -85,7 +85,19 @@ def render_reason(result: dict) -> str:
         "",
         (
             "Write what the file actually says - the decision, the correction, the "
-            "finding and why it holds. Do not summarise it into one vague fact. If a "
+            "finding and why it holds. Do not summarise it into one vague fact."
+        ),
+        "",
+        # The third outcome is the one a well-behaved session actually hits. The
+        # MCP tool description says to call write_episode in the same turn as the
+        # thing happens, and Claude Code then writes its own memory file, so the
+        # queue sees a file whose content is already in the graph. Offering only
+        # "write it" and "it holds nothing" told that session to write duplicates -
+        # and a gate that fires on correct behaviour is a gate people switch off.
+        (
+            "Two other outcomes are fine, and both end in marking it done. If you "
+            "already called write_episode for this content earlier in the session, "
+            "check nothing is missing and mark it done - do not write it twice. If a "
             "file genuinely holds nothing durable, mark it done and say so."
         ),
     ]

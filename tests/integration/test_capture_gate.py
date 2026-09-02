@@ -179,3 +179,19 @@ def test_the_stop_check_command_runs(migrated_db, monkeypatch, capsys, tmp_path)
     # Nothing is queued for this project, so the gate must say nothing at all -
     # a Stop hook that prints on every clean session blocks every session.
     assert capsys.readouterr().out == ""
+
+
+def test_the_reason_offers_the_already_stored_outcome(migrated_db, tmp_path):
+    """The common case for a well-behaved session. The MCP tool description
+    says to call write_episode in the same turn the thing happens, and Claude
+    Code then writes its own memory file - so the queue sees a file whose
+    content is already in the graph. The first version of this reason offered
+    only "write it" or "it holds nothing durable", which told that session to
+    write the facts a second time."""
+    conn = connect(migrated_db)
+    _memory_file(tmp_path, "-Users-ayush-work-eigen", "pause.md", "already written as facts")
+
+    reason = stop_gate.render_reason(stop_gate.gate(conn, "eigen", root=tmp_path))
+
+    assert "do not write it twice" in reason
+    assert "nothing durable" in reason
