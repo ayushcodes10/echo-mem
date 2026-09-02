@@ -164,7 +164,7 @@ def _write_side_lines(result: dict) -> list[str]:
     return lines
 
 
-def record_read(conn, config, result: dict, context: str) -> None:
+def record_read(conn, config, result: dict, context: str, session_id: str | None = None) -> None:
     """What this prompt cost in injected characters, recorded after rendering
     because that is the only point where the real figure is known.
 
@@ -174,6 +174,7 @@ def record_read(conn, config, result: dict, context: str) -> None:
     reads.record(
         conn, config.group_id("shared"), reads.HOOK,
         n_facts=len(result.get("facts") or []), injected_chars=len(context),
+        project=config.project, session_id=session_id,
     )
 
 

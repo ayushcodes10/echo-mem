@@ -19,13 +19,26 @@ QUERY = "query_memory"
 CHARS_PER_TOKEN = 4
 
 
-def record(conn, group_id: str, kind: str, n_facts: int, injected_chars: int) -> None:
-    """Never raises. A prompt must reach the agent whether or not this works."""
+def record(
+    conn,
+    group_id: str,
+    kind: str,
+    n_facts: int,
+    injected_chars: int,
+    project: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """Never raises. A prompt must reach the agent whether or not this works.
+
+    project and session_id are optional because this runs on the prompt path
+    against whatever CLI version is installed; an unattributed read is worth
+    more than an exception between the user and the agent."""
     try:
         conn.execute(
-            """INSERT INTO public.read_event (group_id, kind, n_facts, injected_chars)
-               VALUES (%s, %s, %s, %s)""",
-            (group_id, kind, n_facts, injected_chars),
+            """INSERT INTO public.read_event
+                   (group_id, kind, n_facts, injected_chars, project, session_id)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (group_id, kind, n_facts, injected_chars, project, session_id),
         )
     except Exception as e:  # noqa: BLE001 - see docstring: never blocks a prompt
         _logger.warning("read_event_not_recorded", extra={"error": str(e)})
@@ -59,3 +72,31 @@ def summary(conn, group_ids: list[str], days: int = 7) -> dict:
         "injected_tokens": (chars or 0) // CHARS_PER_TOKEN,
         "saves": (saves or [0])[0],
     }
+
+
+def by_project(conn, group_ids: list[str], days: int = 7) -> list[dict]:
+    """Reads per project, so the cost of recall can be read against the repo
+    that paid it. This is the question read_event could not answer on the day
+    it shipped: every row carried the same group_id, so 12 reads across four
+    repos and 12 reads in one were indistinguishable."""
+    rows = conn.execute(
+        """SELECT coalesce(project, 'unattributed'), count(*),
+                  count(*) FILTER (WHERE n_facts > 0),
+                  coalesce(sum(injected_chars), 0),
+                  count(DISTINCT session_id)
+           FROM public.read_event
+           WHERE group_id = ANY(%s) AND at > now() - make_interval(days => %s)
+           GROUP BY 1 ORDER BY 2 DESC""",
+        (group_ids, days),
+    ).fetchall()
+    return [
+        {
+            "project": r[0],
+            "reads": r[1],
+            "reads_with_facts": r[2],
+            "injected_chars": r[3],
+            "injected_tokens": r[3] // CHARS_PER_TOKEN,
+            "sessions": r[4],
+        }
+        for r in rows
+    ]

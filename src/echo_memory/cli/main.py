@@ -13,11 +13,13 @@ from datetime import date
 from pathlib import Path
 
 from echo_memory.audit.get_audit_log import get_fact_history
-from echo_memory.cli import adopt, health, initdb, reattribute_cmd
+from echo_memory.cli import adopt, health, initdb, reattribute_cmd, stop_gate
 from echo_memory.cli import analyse as analyse_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
+from echo_memory.cli import hooks as hooks_cmd
 from echo_memory.cli import queue as queue_cmd
 from echo_memory.cli import recall as recall_cmd
+from echo_memory.cli import reconcile as reconcile_cmd
 from echo_memory.cli import session_start as session_start_cmd
 from echo_memory.cli import trial as trial_cmd
 from echo_memory.cli.benchmark import render as render_benchmark
@@ -116,6 +118,35 @@ def _add_project_parsers(sub) -> None:
         "--done", nargs="+", metavar="PATH", help="mark these paths as ingested"
     )
 
+    hooks_parser = sub.add_parser(
+        "install-hooks",
+        help="register every capture hook in ~/.claude/settings.json",
+    )
+    hooks_parser.add_argument(
+        "--dry-run", action="store_true", help="show what would be registered, change nothing"
+    )
+    hooks_parser.add_argument(
+        "--settings", type=Path, default=None,
+        help="settings file to write (default: ~/.claude/settings.json)",
+    )
+
+    recon = sub.add_parser(
+        "reconcile",
+        help="re-notice memory files the capture hook missed or that changed on disk",
+    )
+    recon.add_argument("--project", metavar="NAME", help="only this project")
+    recon.add_argument(
+        "--quiet", action="store_true", help="say nothing (for the session-start hook)"
+    )
+
+    stop = sub.add_parser(
+        "stop-check",
+        help="what this project still owes the graph, for the Stop hook",
+    )
+    stop.add_argument(
+        "--hook-json", action="store_true", help="emit Stop hook JSON instead of plain text"
+    )
+
     rec = sub.add_parser(
         "recall", help="facts matching a prompt, for the UserPromptSubmit hook"
     )
@@ -125,6 +156,10 @@ def _add_project_parsers(sub) -> None:
         help="emit UserPromptSubmit hook JSON instead of plain text",
     )
     rec.add_argument("--top-k", type=int, default=recall_cmd.DEFAULT_TOP_K)
+    rec.add_argument(
+        "--session-id", default=None,
+        help="the calling session, so a read can be tied to the write it produced",
+    )
 
     ana = sub.add_parser(
         "analyse", help="first-run comprehension pass for an existing project"
@@ -328,12 +363,38 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "trial":
         return trial_cmd.run(args, config, connect(config.database_url))
 
+    if args.command == "install-hooks":
+        scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+        bin_path = str(Path(sys.argv[0]).resolve())
+        if args.dry_run:
+            entries = hooks_cmd.plan(config, scripts_dir, bin_path)
+            print(hooks_cmd.render(
+                {"path": str(args.settings or hooks_cmd.SETTINGS),
+                 "events": [e["event"] for e in entries]}, dry_run=True), end="")
+            return 0
+        try:
+            result = hooks_cmd.apply(config, scripts_dir, bin_path, args.settings)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print(hooks_cmd.render(result), end="")
+        return 0
+
+    if args.command == "reconcile":
+        result = reconcile_cmd.reconcile(conn, project=args.project)
+        if not args.quiet:
+            print(reconcile_cmd.render(result), end="")
+        return 0
+
+    if args.command == "stop-check":
+        return stop_gate.run(args, config, conn)
+
     if args.command == "recall":
         prompt = args.prompt or sys.stdin.read()
         conn = connect(config.database_url)
         result = recall_cmd.recall_for_prompt(conn, config, prompt, args.top_k)
         context = recall_cmd.render_context(result)
-        recall_cmd.record_read(conn, config, result, context)
+        recall_cmd.record_read(conn, config, result, context, args.session_id)
         if args.hook_json:
             # Nothing relevant: stay silent rather than injecting an empty
             # block into every prompt the user types.

@@ -114,3 +114,33 @@ def test_both_kinds_land_in_the_same_window(migrated_db, kind):
     reads.record(conn, "g", kind, n_facts=1, injected_chars=10)
 
     assert reads.summary(conn, ["g"])["reads"] == 1
+
+
+def test_a_read_says_which_project_and_session_it_happened_in(migrated_db):
+    """read_event shipped counting reads it could not attribute: group_id is
+    the same string for every Claude Code session in every repo, so 12 reads
+    across four projects and 12 reads in one looked identical. Asked whether
+    the eigen sessions were reading memory, the table had no answer."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+
+    result = recall.recall_for_prompt(conn, config, "is chat-module-api dev or prod")
+    context = recall.render_context(result)
+    recall.record_read(conn, config, result, context, session_id="sess-abc")
+
+    rows = reads.by_project(conn, [config.group_id("shared")])
+    assert [(r["project"], r["reads"], r["sessions"]) for r in rows] == [("dugout", 1, 1)]
+
+
+def test_an_unattributed_read_still_records(migrated_db):
+    """The prompt hook may be running against an older CLI mid-upgrade. A read
+    without a label is worth more than an exception between user and agent."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+
+    reads.record(conn, config.group_id("shared"), reads.HOOK, n_facts=0, injected_chars=0)
+
+    assert reads.summary(conn, [config.group_id("shared")])["reads"] == 1
+    assert [r["project"] for r in reads.by_project(conn, [config.group_id("shared")])] == [
+        "unattributed"
+    ]
