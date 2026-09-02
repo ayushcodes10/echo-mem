@@ -381,13 +381,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "reconcile":
+        conn = connect(config.database_url)
         result = reconcile_cmd.reconcile(conn, project=args.project)
         if not args.quiet:
             print(reconcile_cmd.render(result), end="")
         return 0
 
     if args.command == "stop-check":
-        return stop_gate.run(args, config, conn)
+        return stop_gate.run(args, config, connect(config.database_url))
 
     if args.command == "recall":
         prompt = args.prompt or sys.stdin.read()

@@ -22,6 +22,7 @@ Cheap enough to run at session start: sha256 over a few dozen small files. It
 does not extract; extraction stays with the agent, because the server never
 calls an LLM."""
 
+import os
 from pathlib import Path
 
 from echo_memory.infra.project import decode_claude_project_dir
@@ -29,7 +30,18 @@ from echo_memory.ingestion import capture
 
 # Where Claude Code keeps per-project memory. One directory per project, its
 # name the project path with separators collapsed to dashes.
-CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+DEFAULT_CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+
+# Resolved per call rather than at import, and overridable, for the two cases
+# where the default is wrong: a client configured with CLAUDE_CONFIG_DIR
+# somewhere else, and a test, which must never sweep the real machine's memory
+# files into whatever database it is pointed at.
+ROOT_ENV = "ECHO_MEMORY_CLAUDE_PROJECTS"
+
+
+def claude_projects_root() -> Path:
+    override = os.environ.get(ROOT_ENV)
+    return Path(override) if override else DEFAULT_CLAUDE_PROJECTS
 
 # The index file lists the real memories one line each; every one of those
 # triggers on its own. Ingesting the index would add a fact per pointer.
@@ -40,7 +52,7 @@ SOURCE = "claude-memory"
 
 def memory_files(root: Path | None = None) -> list[tuple[Path, str]]:
     """Every memory file on disk, paired with the project it belongs to."""
-    root = root or CLAUDE_PROJECTS
+    root = root or claude_projects_root()
     found: list[tuple[Path, str]] = []
     try:
         project_dirs = sorted(p for p in root.iterdir() if p.is_dir())
