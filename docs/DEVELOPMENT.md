@@ -678,6 +678,14 @@ Three bounds keep it from being the hook people disable:
   eigen has a backlog would train everyone to switch it off.
 - **It is silent when the queue is clean**, which is the steady state.
 
+The reason names three outcomes, not one. A session that follows the MCP tool
+description correctly - "call write_episode in the same turn" - and then writes
+a Claude Code memory file leaves the queue holding a file whose content is
+already in the graph. The first version of the reason offered only "write the
+facts" or "it holds nothing durable", which told that session to write its facts
+a second time. Already-stored is now an explicit outcome, because a gate that
+fires on correct behaviour is a gate people switch off.
+
 ```bash
 echo-memory stop-check              # what this project still owes
 echo-memory stop-check --hook-json  # what the hook returns
