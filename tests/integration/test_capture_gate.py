@@ -12,6 +12,7 @@ reminding it. These tests pin the behaviours that make that safe to leave on."""
 import json
 
 from echo_memory.cli import reconcile, stop_gate
+from echo_memory.cli.main import main
 from echo_memory.infra.config import Config
 from echo_memory.infra.db import connect
 from echo_memory.ingestion import capture
@@ -139,3 +140,42 @@ def test_the_done_command_never_looks_like_the_whole_list(migrated_db, tmp_path)
 
     done_line = next(ln for ln in reason.splitlines() if "--done" in ln)
     assert done_line.endswith(" ...")
+
+
+def _cli_env(migrated_db, monkeypatch, tmp_path, project="eigen"):
+    monkeypatch.setenv("ECHO_MEMORY_USER_ID", "ayush")
+    monkeypatch.setenv("ECHO_MEMORY_AGENT_ID", "claude-code")
+    monkeypatch.setenv("ECHO_MEMORY_DATABASE_URL", migrated_db)
+    monkeypatch.setenv("ECHO_MEMORY_PROJECT", project)
+    # Without this the CLI sweeps the real ~/.claude/projects and files the
+    # developer's own memories into whichever database the test is pointed at.
+    monkeypatch.setenv("ECHO_MEMORY_CLAUDE_PROJECTS", str(tmp_path))
+
+
+def test_the_reconcile_command_runs(migrated_db, monkeypatch, capsys, tmp_path):
+    """Both of these shipped broken: the dispatch used a connection the command
+    had never opened, and every test called the module functions directly, so
+    nothing exercised the path an actual user takes. `echo-memory reconcile`
+    raised UnboundLocalError the first time it was run by hand."""
+    _cli_env(migrated_db, monkeypatch, tmp_path)
+
+    assert main(["reconcile"]) == 0
+    assert "memory file(s)" in capsys.readouterr().out
+
+
+def test_the_reconcile_command_is_silent_when_quiet(
+    migrated_db, monkeypatch, capsys, tmp_path
+):
+    _cli_env(migrated_db, monkeypatch, tmp_path)
+
+    assert main(["reconcile", "--quiet"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_the_stop_check_command_runs(migrated_db, monkeypatch, capsys, tmp_path):
+    _cli_env(migrated_db, monkeypatch, tmp_path)
+
+    assert main(["stop-check", "--hook-json"]) == 0
+    # Nothing is queued for this project, so the gate must say nothing at all -
+    # a Stop hook that prints on every clean session blocks every session.
+    assert capsys.readouterr().out == ""

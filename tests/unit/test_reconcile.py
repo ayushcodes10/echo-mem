@@ -65,3 +65,16 @@ def test_render_separates_never_seen_from_changed():
     })
     assert "a.md" in out and "never noticed" in out
     assert "b.md" in out and "changed since ingest" in out
+
+
+def test_the_projects_root_can_be_pointed_elsewhere(tmp_path, monkeypatch):
+    """Resolved per call, not at import. A test that swept the real
+    ~/.claude/projects filed the developer's own memories into the test
+    database the first time `echo-memory stop-check` ran through the CLI."""
+    monkeypatch.setenv(reconcile.ROOT_ENV, str(tmp_path))
+    assert reconcile.claude_projects_root() == tmp_path
+
+
+def test_without_an_override_it_is_the_real_location(monkeypatch):
+    monkeypatch.delenv(reconcile.ROOT_ENV, raising=False)
+    assert reconcile.claude_projects_root() == reconcile.DEFAULT_CLAUDE_PROJECTS
