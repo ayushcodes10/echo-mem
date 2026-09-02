@@ -211,3 +211,58 @@ def test_a_credential_file_naming_another_database_is_still_a_conflict(tmp_path,
     results = {r["client"]: r for r in adopt.plan(CONFIG, home=home)}
 
     assert results["cursor"]["action"] == "conflict"
+
+
+def _codex_config(agent_id: str | None) -> str:
+    env = f'\nECHO_MEMORY_AGENT_ID = "{agent_id}"' if agent_id else ""
+    return (
+        '[mcp_servers.echo-memory]\ncommand = "python"\n'
+        f'\n[mcp_servers.echo-memory.env]\nECHO_MEMORY_USER_ID = "ayush"{env}\n'
+    )
+
+
+def test_a_codex_entry_with_the_wrong_agent_id_is_not_registered(tmp_path):
+    """The real failure, 2026-09-02: Codex's config carried
+    ECHO_MEMORY_AGENT_ID = "claude-code", written before install.py learned to
+    give each client its own id. The old presence check reported it as already
+    registered, so every fact Codex wrote would have been filed as claude-code -
+    exactly the fault that made the cross-tool criterion unable to signal."""
+    path = tmp_path / "config.toml"
+    path.write_text(_codex_config("claude-code"))
+    assert adopt._codex_state(path, "codex") == "wrong-agent-id"
+
+
+def test_a_correct_codex_entry_is_registered(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(_codex_config("codex"))
+    assert adopt._codex_state(path, "codex") == "registered"
+
+
+def test_a_codex_entry_with_no_env_at_all_is_not_registered(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[mcp_servers.echo-memory]\ncommand = "python"\n')
+    assert adopt._codex_state(path, "codex") == "wrong-agent-id"
+
+
+def test_a_missing_or_unparseable_config_reads_as_missing(tmp_path):
+    assert adopt._codex_state(tmp_path / "nope.toml", "codex") == "missing"
+    broken = tmp_path / "broken.toml"
+    broken.write_text("[[[not toml")
+    assert adopt._codex_state(broken, "codex") == "missing"
+
+
+def test_the_wrong_agent_id_is_reported_loudly_with_the_fix(tmp_path, monkeypatch):
+    """An entry that looks installed needs telling, not silence: the operator
+    would otherwise read 'already registered' and trust it."""
+    from echo_memory.infra.config import Config
+
+    home = tmp_path
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "config.toml").write_text(_codex_config("claude-code"))
+    config = Config(user_id="ayush", agent_id="claude-code", database_url="postgresql://x/y")
+
+    steps = adopt.manual_steps(config, home=home)
+    codex = next(s for s in steps if s["agent_id"] == "codex")
+
+    assert codex["action"] == "wrong agent id"
+    assert 'ECHO_MEMORY_AGENT_ID = "codex"' in codex["block"]
