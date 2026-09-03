@@ -244,7 +244,6 @@ def record_recall_save(
     scope: str,
     fact_id: str,
     note: str,
-    recalled_by: str | None = None,
 ) -> dict:
     """Record that a fact you recalled from memory saved the user from
     re-explaining something to you.
@@ -254,21 +253,15 @@ def record_recall_save(
     answered something the user would otherwise have had to tell you again,
     and the fact was originally written by a DIFFERENT tool or a past session.
 
-    That last part is the whole point, and it is why this takes `fact_id`
-    rather than a `written_by` string. Pass the `fact_id` of the fact that
-    helped - every query_memory result carries one. The server reads that
-    edge's own `agent_id` and uses it as `written_by`; the caller does not get
-    to assert who wrote a fact.
+    That is why this takes only a `fact_id`. Pass the one carried by the
+    query_memory result that helped; the server reads that edge's own agent_id
+    for the writer, and uses its own configured agent id for the reader. You
+    assert neither. Both used to be caller-supplied, and each in turn let the
+    model being graded type its own evidence.
 
-    Until 2026-08-29 `written_by` was free text supplied by the caller. Nothing
-    checked the fact existed, so the number gating v1a was a string typed by
-    the model being graded. A fact_id is checkable, so the reading is
-    admissible.
-
-    recalled_by is you, defaulting to this server's own agent id. If the fact's
-    author and you are the same tool, the save is still recorded but does not
-    count toward the trial's bar - recalling your own note from ten minutes ago
-    is not the thing being measured.
+    If the fact's author and you are the same tool, the save is recorded but
+    does not count - recalling your own note from ten minutes ago is not the
+    thing being measured.
 
     note should be one sentence naming what it saved re-explaining, written so
     it still makes sense read cold in six months. Recording the identical note
@@ -282,7 +275,10 @@ def record_recall_save(
     except ConfigError as e:
         return {"error": str(e)}
 
-    recalled_by = recalled_by or _state.config.agent_id
+    # Not a parameter: an agent asserting which tool it is, to a criterion that
+    # measures whether two tools are involved, is the same fault the written_by
+    # fix closed on 2026-08-29.
+    recalled_by = _state.config.agent_id
     try:
         with _state.pool.connection() as conn:
             written_by = _author_of(conn, group_id, fact_id)
@@ -321,6 +317,12 @@ def record_recall_save(
         "recorded": True,
         "observation_id": recorded["id"],
         "already_recorded": not recorded["created"],
+        # Always returned, both branches. The caller supplies neither of these
+        # now, so the only way it can see what the server concluded about
+        # authorship - and check the save it just logged says what it meant -
+        # is for the response to state it.
+        "written_by": written_by,
+        "recalled_by": recalled_by,
         "counts_toward_gate": cross_tool,
         "cross_tool_saves": counts["cross_tool_saves"],
         "required": _observations.REQUIRED_SAVES,
