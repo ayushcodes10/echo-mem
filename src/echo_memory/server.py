@@ -76,42 +76,37 @@ def write_episode(
     """Record something worth remembering later: a decision, a correction,
     a stated preference, or context that would otherwise have to be
     re-explained to a different tool or a future session. Call this
-    proactively and immediately when you notice one of these - don't wait
-    to be asked, and don't batch it up for later in the conversation. The
-    cost of a missed memory (re-explaining something later) is higher than
-    the cost of one extra call.
+    proactively and immediately when you notice one - don't wait to be
+    asked, don't batch it for later. A missed memory costs more than an
+    extra call.
 
-    You (the calling agent) extract entities/facts yourself - this server
-    never calls an LLM. Exact shape, every key required unless marked
-    optional:
+    You extract the entities and facts yourself; this server never calls
+    an LLM.
 
     entities: [{"name": "Postgres", "type": "tool"}, ...]
-      - name: non-empty string, unique per entity in this call
-      - type: any short string describing what kind of thing this is
-        (e.g. "tool", "person", "decision", "preference") - your choice,
-        not a fixed enum
+      name  non-empty, unique within this call
+      type  any short string ("tool", "person", "decision") - not an enum
 
-    facts: [{"source": "Decision", "target": "Postgres", "relation_type": "uses",
-             "fact": "decided to use Postgres for storage", "confidence": "extracted"}, ...]
-      - source/target: must each exactly match a "name" in entities above
-      - relation_type: any short string describing the relationship
-        (e.g. "uses", "prefers", "caused_by") - your choice, not a fixed enum
-      - fact: the actual sentence to remember, plain text
-      - confidence: MUST be exactly one of "extracted" (directly stated),
-        "inferred" (you deduced it), or "ambiguous" (uncertain) - any other
-        value, including numbers or omitting it, is rejected
+    facts: [{"source": ..., "target": ..., "relation_type": ...,
+             "fact": ..., "confidence": ...}, ...]
+      source/target   must each exactly match a name in entities
+      relation_type   any short string ("uses", "caused_by") - not an enum
+      fact            the sentence to remember, plain text
+      confidence      exactly one of "extracted" (stated), "inferred"
+                      (deduced), "ambiguous" (uncertain). Anything else,
+                      including a number or omitting it, is rejected.
 
-    entity_resolutions (optional): only needed when a previous call
-    returned ambiguous_entities and you're now confirming which candidate
-    a mention refers to, or that it's new: {"mention name": {"resolved_to":
-    "<node_id from ambiguous_entities>" | "new"}}. Omit entirely on a call
-    with no prior ambiguity to resolve.
+    entity_resolutions (optional): only after a call returned
+    ambiguous_entities, to say which candidate a mention meant:
+    {"mention": {"resolved_to": "<node_id>" | "new"}}. Omit otherwise.
 
-    Example call:
-    write_episode(scope="solo", session_id="sess-1",
-      entities=[{"name": "Postgres", "type": "tool"}, {"name": "Decision", "type": "decision"}],
-      facts=[{"source": "Decision", "target": "Postgres", "relation_type": "uses",
-              "fact": "decided to use Postgres for storage", "confidence": "extracted"}])
+    Example:
+    write_episode(scope="solo", session_id="s1",
+      entities=[{"name": "Postgres", "type": "tool"},
+                {"name": "Decision", "type": "decision"}],
+      facts=[{"source": "Decision", "target": "Postgres",
+              "relation_type": "uses", "confidence": "extracted",
+              "fact": "decided to use Postgres for storage"}])
     """
     try:
         group_id = _state.config.group_id(scope)
