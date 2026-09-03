@@ -266,7 +266,7 @@ def _add_project_parsers(sub) -> None:
         help="project directory (default: the current one)",
     )
     inst.add_argument(
-        "--for", dest="targets", choices=["claude", "cursor", "both"], default="claude",
+        "--for", dest="targets", choices=["claude", "cursor", "codex", "all"], default="claude",
         help="which tool to set up (default: claude)",
     )
     inst.add_argument(
@@ -504,7 +504,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "install":
-        targets = ("claude", "cursor") if args.targets == "both" else (args.targets,)
+        targets = (
+            ("claude", "cursor", "codex") if args.targets == "all" else (args.targets,)
+        )
         root = args.root.resolve()
         if not root.is_dir():
             print(f"error: not a directory: {root}", file=sys.stderr)
