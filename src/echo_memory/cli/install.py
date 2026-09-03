@@ -134,6 +134,34 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+# Codex reads AGENTS.md and has no hook system, so this file is the only place
+# it can be told when to use the tools it already has. Measured 2026-09-03: a
+# Codex session with all four tools connected and no instruction anywhere spent
+# 32 minutes analysing a repo and made zero calls - 0.01s of CPU across the
+# whole window. Claude Code gets the same message four ways (SessionStart
+# injection, prompt-time recall, the Stop gate, SKILL.md); Codex was getting it
+# none.
+AGENTS_MARKER = "<!-- echo-memory -->"
+AGENTS_END = "<!-- /echo-memory -->"
+
+AGENTS_SECTION = """{marker}
+## Echo Memory
+
+This project has persistent memory across sessions and tools, over MCP.
+
+- Call `query_memory` before asking about anything that may already have been
+  explained - a past session or a different tool may have recorded it.
+- Call `write_episode` in the same turn something worth keeping happens: a
+  decision, a correction, a stated preference, a hard-won finding and why it
+  holds. Do not batch it to the end; a missed memory costs more than an extra
+  call.
+- If a recalled fact saved re-explaining something another tool wrote, call
+  `record_recall_save` with its fact_id.
+
+You extract the entities and facts yourself - the server never calls a model,
+which is why writing is free.
+{end}"""
+
 CURSOR_RULE = """---
 description: How to use Echo Memory in this project
 alwaysApply: true
@@ -162,6 +190,25 @@ def install(root: Path, config, targets: tuple[str, ...], project: str | None = 
         entry = _server_entry(config, project, CLIENT_AGENT_IDS["claude"])
         state = _merge_json(mcp, ("mcpServers", SERVER_KEY), entry)
         done.append(f"{state}  {mcp.relative_to(root)}")
+
+    if "codex" in targets:
+        # Merged into any existing AGENTS.md rather than written over it: the
+        # file usually holds the project's own conventions, and replacing those
+        # to add a memory section would be a rude way to install anything.
+        agents = root / "AGENTS.md"
+        section = AGENTS_SECTION.format(marker=AGENTS_MARKER, end=AGENTS_END)
+        existing = agents.read_text() if agents.exists() else ""
+        if AGENTS_MARKER in existing:
+            start = existing.index(AGENTS_MARKER)
+            stop = existing.index(AGENTS_END) + len(AGENTS_END)
+            body = existing[:start] + section + existing[stop:]
+            state = "unchanged" if body == existing else "updated"
+        else:
+            body = (existing.rstrip("\n") + "\n\n" if existing else "") + section + "\n"
+            state = "updated" if existing else "created"
+        if state != "unchanged":
+            _atomic_write(agents, body)
+        done.append(f"{state}  {agents.relative_to(root)}")
 
     if "cursor" in targets:
         mcp = root / ".cursor" / "mcp.json"
@@ -213,6 +260,25 @@ def render_install(root: Path, project: str, targets: tuple[str, ...], done: lis
     ]
     if "claude" in targets:
         lines.append("Claude Code picks up .mcp.json and the skill on the next session here.")
+    if "codex" in targets:
+        # Merged into any existing AGENTS.md rather than written over it: the
+        # file usually holds the project's own conventions, and replacing those
+        # to add a memory section would be a rude way to install anything.
+        agents = root / "AGENTS.md"
+        section = AGENTS_SECTION.format(marker=AGENTS_MARKER, end=AGENTS_END)
+        existing = agents.read_text() if agents.exists() else ""
+        if AGENTS_MARKER in existing:
+            start = existing.index(AGENTS_MARKER)
+            stop = existing.index(AGENTS_END) + len(AGENTS_END)
+            body = existing[:start] + section + existing[stop:]
+            state = "unchanged" if body == existing else "updated"
+        else:
+            body = (existing.rstrip("\n") + "\n\n" if existing else "") + section + "\n"
+            state = "updated" if existing else "created"
+        if state != "unchanged":
+            _atomic_write(agents, body)
+        done.append(f"{state}  {agents.relative_to(root)}")
+
     if "cursor" in targets:
         lines.append("Cursor: enable the server under Settings > MCP, then reload the window.")
     return "\n".join(lines) + "\n"

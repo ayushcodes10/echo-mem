@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from echo_memory.cli.install import (
+    AGENTS_MARKER,
     _merge_json,
     _strip_frontmatter,
     install,
@@ -236,3 +237,63 @@ def test_without_a_credential_file_the_message_says_gitignore_not_commit(tmp_pat
 
     assert "gitignore" in text
     assert "Commit these files" not in text
+
+
+def _codex_install(root):
+    return install(root, CONFIG, ("codex",), project="eigen")
+
+
+def test_codex_gets_an_instruction_because_it_has_no_hooks(tmp_path):
+    """Measured 2026-09-03: a Codex session with all four tools connected and no
+    instruction anywhere spent 32 minutes analysing a repo and made zero calls -
+    0.01s of CPU across the window. Claude Code is told the same thing four ways
+    (SessionStart injection, prompt-time recall, the Stop gate, SKILL.md); Codex
+    reads AGENTS.md and was being told none of them."""
+    done = _codex_install(tmp_path)
+
+    agents = tmp_path / "AGENTS.md"
+    assert agents.exists()
+    body = agents.read_text()
+    for tool in ("query_memory", "write_episode", "record_recall_save"):
+        assert tool in body
+    assert any("AGENTS.md" in line for line in done)
+
+
+def test_an_existing_agents_md_is_kept(tmp_path):
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("# Eigon\n\nRun `make test` before pushing.\n")
+
+    _codex_install(tmp_path)
+
+    body = agents.read_text()
+    assert "Run `make test` before pushing." in body
+    assert "write_episode" in body
+
+
+def test_reinstalling_replaces_the_section_instead_of_stacking_it(tmp_path):
+    _codex_install(tmp_path)
+    once = (tmp_path / "AGENTS.md").read_text()
+    _codex_install(tmp_path)
+    twice = (tmp_path / "AGENTS.md").read_text()
+
+    assert once == twice
+    assert twice.count(AGENTS_MARKER) == 1
+
+
+def test_a_reinstall_over_edited_project_text_keeps_that_text(tmp_path):
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("# Eigon\n")
+    _codex_install(tmp_path)
+    agents.write_text(agents.read_text() + "\n## Deploy\n\nUse the harness.\n")
+
+    _codex_install(tmp_path)
+
+    body = agents.read_text()
+    assert "Use the harness." in body
+    assert "# Eigon" in body
+    assert body.count(AGENTS_MARKER) == 1
+
+
+def test_installing_for_claude_does_not_write_agents_md(tmp_path):
+    install(tmp_path, CONFIG, ("claude",), project="eigen")
+    assert not (tmp_path / "AGENTS.md").exists()
