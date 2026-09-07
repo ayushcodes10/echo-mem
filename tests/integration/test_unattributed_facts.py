@@ -145,3 +145,69 @@ def test_the_refusal_reaches_the_one_place_the_value_is_lost(migrated_db):
                 "session-3", "episode-1", 0, server._state.embedder,
                 "echo-mem", "",
             )
+
+
+def test_an_ambiguity_deferral_leaves_no_orphan_node(migrated_db):
+    """A call that reports edges_created: [] must not have created a node.
+
+    Writing five dugout facts on 2026-09-07 returned only ambiguous_entities,
+    which reads as "nothing was written" - and left "ECS secret resolution at
+    task startup" in the graph with no edges. Every fact using it was held back
+    for ambiguity, so it had nothing to connect to, and nothing forces the
+    caller to make the follow-up call that would have given it one."""
+    from fake_embedder import unit_vector_at_angle
+
+    near_a = unit_vector_at_angle(0.60)
+    near_b = unit_vector_at_angle(0.58)
+    # A THIRD dimension, not a wider angle in the same plane. unit_vector_at_angle
+    # only moves within e1-e2, so two "far apart" angles there can still be very
+    # similar to each other - 0.05 and 0.60 are 0.83 apart, which lands in the
+    # ambiguous band and makes the bystander ambiguous too, quietly voiding the
+    # test.
+    apart = [0.0, 0.0, 1.0] + [0.0] * 381
+    vectors = {
+        "alpha one": near_a, "alpha two": near_b,
+        "alpha one exists": near_a, "alpha two exists": near_b,
+        # The mention sits close to both seeds and identical to neither, which
+        # is the definition of ambiguous.
+        "alpha": REFERENCE,
+        "bystander": apart,
+        "a fact held back by ambiguity": apart,
+    }
+    config = Config(
+        user_id="ayush", agent_id="claude-code", database_url=migrated_db, project="echo-mem"
+    )
+    server.startup(config=config, embedder=VectorEmbedder(vectors))
+
+    for name in ("alpha one", "alpha two"):
+        server.write_episode(
+            "shared", "seed",
+            [{"name": name, "type": "test"}],
+            [{"source": name, "target": name, "relation_type": "is",
+              "fact": f"{name} exists", "confidence": "extracted"}],
+            entity_resolutions={name: {"resolved_to": "new"}},
+        )
+
+    result = server.write_episode(
+        "shared", "deferred",
+        [{"name": "alpha", "type": "test"}, {"name": "bystander", "type": "test"}],
+        [{"source": "alpha", "target": "bystander", "relation_type": "uses",
+          "fact": "a fact held back by ambiguity", "confidence": "extracted"}],
+    )
+
+    assert result.get("ambiguous_entities"), result
+    assert not result.get("edges_created")
+
+    with server._state.pool.connection() as conn:
+        conn.execute("LOAD 'age'")
+        conn.execute('SET search_path = ag_catalog, "$user", public')
+        rows = conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH}', $$
+                MATCH (n) WHERE n.name = 'bystander' RETURN id(n)
+            $$) AS (i agtype)"""
+        ).fetchall()
+
+    assert rows == [], (
+        "an entity used only by a held-back fact must not be created; it would "
+        "be an orphan the caller was never told about"
+    )

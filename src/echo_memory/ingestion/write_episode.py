@@ -281,7 +281,38 @@ def write_episode(
 
         entities_by_name = {e["name"]: e for e in entities}
         name_to_node_id = dict(outcome.resolved)
+
+        # Which facts can be written now: a fact touching an ambiguous mention
+        # waits for the caller to say which candidate it meant. Computed BEFORE
+        # any node is created, because it decides which nodes are worth creating.
+        ambiguous_mentions = {a.mention for a in outcome.ambiguous}
+        ready_facts = [
+            f
+            for f in facts
+            if f["source"] not in ambiguous_mentions and f["target"] not in ambiguous_mentions
+        ]
+
+        # A new entity is created only if some fact being written now actually
+        # uses it, or if no fact mentions it at all - the caller asked for that
+        # one directly, so honour it.
+        #
+        # Creating every new entity regardless left orphans. An entity whose
+        # only facts are held back for ambiguity has nothing to connect to, and
+        # if the caller never makes the follow-up call with entity_resolutions -
+        # which nothing forces it to - the node stays unreachable forever. That
+        # is not hypothetical: writing five dugout facts on 2026-09-07 returned
+        # ambiguous_entities and edges_created: [], reported as "nothing was
+        # written", and left "ECS secret resolution at task startup" behind. The
+        # response says no edges; it never said it had made a node.
+        #
+        # Deferring costs nothing. The follow-up call carries the same entities,
+        # so anything genuinely needed is created then, alongside the fact that
+        # gives it an edge.
+        used_by_ready = {f["source"] for f in ready_facts} | {f["target"] for f in ready_facts}
+        mentioned_by_any = {f["source"] for f in facts} | {f["target"] for f in facts}
         for name in outcome.new_entities:
+            if name not in used_by_ready and name in mentioned_by_any:
+                continue
             entity = entities_by_name[name]
             name_to_node_id[name] = _create_node(
                 conn, group_id, entity["name"], entity["type"], embedder
@@ -299,13 +330,6 @@ def write_episode(
             )
             if "append_alias" in event:
                 _append_alias(conn, event["node_id"], event["append_alias"])
-
-        ambiguous_mentions = {a.mention for a in outcome.ambiguous}
-        ready_facts = [
-            f
-            for f in facts
-            if f["source"] not in ambiguous_mentions and f["target"] not in ambiguous_mentions
-        ]
 
         for fact in ready_facts:
             source_id = name_to_node_id[fact["source"]]
