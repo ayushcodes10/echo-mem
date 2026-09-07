@@ -162,10 +162,13 @@ def query_memory(scope: str, query: str | None = None, top_k: int = 10, digest: 
                     "count": len(queued),
                     "files": [{"path": q["path"], "project": q["project"]} for q in queued[:10]],
                     "instruction": (
-                        "These memory files changed on disk and may not be recorded as "
-                        "facts yet. A file is queued because it changed on disk, which does not mean its content is missing from the graph - a past session may have written the facts and never marked it done. Call query_memory on the file's subject FIRST. If what it states is already recorded, mark it done instead of writing it again; duplicate facts are counted against this store's quality. Otherwise call write_episode with what it "
-                        "states. Either way finish with `echo-memory pending --done "
-                        "<path>` for each."
+                        "These memory files changed on disk. That is not the same as "
+                        "their content being absent from the graph - a past session may "
+                        "have written the facts and never marked the file done. Call "
+                        "query_memory on each file's subject FIRST; if what it states is "
+                        "already recorded, mark it done rather than writing it twice. "
+                        "Otherwise call write_episode with what it states. Either way, "
+                        "finish with `echo-memory pending --done <path>` for each."
                     ),
                 }
             return result
