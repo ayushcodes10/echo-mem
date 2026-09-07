@@ -127,6 +127,23 @@ def _create_edge(
     project: str,
     agent_id: str,
 ) -> str:
+    # Apache AGE drops a property whose value is null at CREATE time, so a None
+    # here does not store `agent_id: null` - it stores no agent_id key at all,
+    # silently. That is how 30 facts in the author's own store ended up
+    # unattributable: a long-lived MCP server process that had imported this
+    # module before agent_id existed kept writing through it for 16 days. The
+    # data looks fine until something asks who wrote a fact, and by then the
+    # session that could have answered is gone.
+    #
+    # Raising is the point. A fact whose author is unknown cannot evidence a
+    # cross-tool recall save, which is the one measurement this project exists
+    # to make, so losing the write is strictly better than keeping a fact that
+    # quietly cannot be counted.
+    if not agent_id:
+        raise ValidationError(
+            f"refusing to write a fact with no agent_id (got {agent_id!r}). "
+            "Every fact records who wrote it; see server.py's _author_of."
+        )
     row = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             MATCH (a), (b) WHERE id(a) = $sid AND id(b) = $tid
@@ -204,6 +221,15 @@ def write_episode(
     start = time.perf_counter()
 
     try:
+        # Checked here, before any row is written, so a caller with a broken
+        # config gets one clean error instead of a half-written episode. The
+        # same condition is re-checked in _create_edge, which is the only place
+        # that can actually lose the value; see the note there.
+        if not agent_id:
+            raise ValidationError(
+                f"refusing to write a fact with no agent_id (got {agent_id!r}). "
+                "Set ECHO_MEMORY_AGENT_ID, or pass agent_id explicitly."
+            )
         _validate(entities, facts)
     except ValidationError as e:
         log_write_episode(

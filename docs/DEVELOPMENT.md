@@ -601,9 +601,10 @@ records it properly for reporting.
 `PostToolUse` catches memory files as they're written. It cannot catch what a
 session worked out but never wrote down, and compaction is where that
 disappears. `scripts/precompact-hook.sh` fires immediately before compaction and
-returns `hookSpecificOutput.additionalContext`, which Claude Code injects into
-the model's context — so the reminder reaches the agent at the last moment it
-still has the full conversation:
+prints its reminder as **plain text on stdout**, which Claude Code passes as
+`newCustomInstructions` — the instructions steering the summarisation itself, so
+the reminder shapes what survives rather than being one more message the
+summariser may drop:
 
 ```json
 {
@@ -616,6 +617,23 @@ still has the full conversation:
   }
 }
 ```
+
+**Do not give this hook a JSON body.** `hookSpecificOutput` is validated per
+event, and PreCompact does not define one — the events that do are `PreToolUse`,
+`PostToolUse`, `PostToolBatch`, `UserPromptSubmit`, `SessionStart`, `Stop` and
+`SubagentStop`. This hook originally returned
+`hookSpecificOutput.additionalContext`, copied from the SessionStart hook where
+that shape is right, and every compaction from the day it landed until
+2026-09-07 answered:
+
+```
+PreCompact [...] failed: Hook JSON output validation failed — (root): Invalid input
+```
+
+The hook still exited 0, so nothing looked broken, and the reminder never
+reached a model once. `tests/unit/test_hook_output_contract.py` now runs each
+hook script and rejects a `hookSpecificOutput` naming an event that cannot
+accept it.
 
 It deliberately does **not** touch the database. A hook on the compaction path
 is latency the user waits through, and a reminder that always fires beats a
