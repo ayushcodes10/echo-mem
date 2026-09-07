@@ -140,20 +140,30 @@ command. `write_episode` fires dozens of times a day precisely because an agent 
 it inline, so recall saves now have the same affordance:
 
 ```
-record_recall_save(scope="shared", note="...", written_by="cursor")
+record_recall_save(scope="shared", fact_id="1125899906842710", note="...")
 ```
 
-`written_by` is the tool that recorded the fact (it is on every `query_memory` result as
-`agent_id`); `recalled_by` defaults to the server's own agent id. Both are required -
-without them the "to a different tool" clause cannot be evaluated. A same-tool save is
-recorded but does not count toward the bar. Recording the identical note twice is a
-no-op, so a retry after an error is safe.
+`fact_id` is the id carried by the `query_memory` result that helped. Nothing
+about who was involved is a parameter: the server reads the writer from that
+edge's own `agent_id` and uses its own configured agent id as the reader.
+
+Both used to be caller-supplied, and each in turn let the model being graded
+type its own evidence. `written_by` was free text until 2026-08-29, so the
+number gating v1a was a string the agent chose. `recalled_by` survived until
+end-to-end testing on 2026-09-03 passed `recalled_by="codex"` from a
+claude-code server and watched it produce a counted cross-tool save.
+
+A same-tool save is recorded but does not count toward the bar. Recording the
+identical note twice is a no-op, so a retry after an error is safe. A fact whose
+`agent_id` is `unknown`, or absent because it predates attribution, is refused
+outright — it cannot evidence which tool wrote it.
 
 **This makes the gate agent-reported rather than human-judged.** That is a deliberate
 tradeoff: the alternative, an agent-proposes/human-confirms flow, keeps the evidentiary
 rigour but reintroduces exactly the friction that produced 0/3. The mitigations are that
-`written_by` is mandatory, same-tool saves never count, an identical retry cannot move
-the counter, and every note stays readable in `echo-memory trial log`. **Read the log
+neither side of the comparison is caller-supplied, same-tool saves never count, an
+identical retry cannot move the counter, and every note stays readable in
+`echo-memory trial log`. **Read the log
 before declaring the gate met** - the count alone is a self-report from the system under
 test.
 
@@ -734,6 +744,54 @@ self-heals instead of being permanent.
 Deliberately the same scope as the capture hook. If the two disagreed about
 what counts as a memory, the sweep would either keep reopening files the hook
 ignores or keep missing files the hook queues.
+
+## Releasing
+
+**Pushing to git does not publish anything.** `pip install echo-mem` serves
+whatever was last uploaded to PyPI, which is a separate act.
+
+That gap bit this project once already. 0.1.0 was uploaded by hand on
+2026-08-25 and never republished; by 2026-09-07 the published package was 30
+commits and five migrations behind `main` — 0007 through 0011 — so a
+pip-installed user could not reach the current schema at all. `pyproject.toml`
+still said `0.1.0` throughout, so one version string named two materially
+different codebases and nothing in the artifact revealed which one you had.
+
+Releases now go out from a tag:
+
+```bash
+# 1. bump the version in pyproject.toml, commit it on a branch, merge it
+# 2. tag the merge commit on main
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` then builds an sdist and a wheel, refuses the
+tag if it disagrees with `pyproject.toml`, checks the wheel actually carries
+every migration script in `src/echo_memory/migrations/versions/`, and publishes.
+
+The migration check is not ceremony. The migrations are package data and
+`alembic.ini` deliberately is not shipped, so `echo-memory init-db` drives
+Alembic through its Python API against the scripts inside the installed package
+(see `cli/initdb.py`). A wheel missing them installs cleanly and then cannot
+create its own database — the exact failure that command exists to prevent.
+
+Auth is PyPI Trusted Publishing (OIDC), so no API token is stored in repository
+secrets. It needs a **one-time setup on PyPI** before the first tagged release
+will succeed: project settings → publishing → add a GitHub publisher for this
+repository, workflow `release.yml`, environment `pypi`. Until that exists the
+build steps pass and the publish step fails.
+
+To verify a build locally before tagging:
+
+```bash
+python -m build
+python -m venv /tmp/probe && /tmp/probe/bin/pip install dist/*.whl
+ECHO_MEMORY_USER_ID=x ECHO_MEMORY_AGENT_ID=x \
+  ECHO_MEMORY_DATABASE_URL=postgresql://... /tmp/probe/bin/echo-memory init-db
+```
+
+Run it from outside the repository. Inside a clone the package resolves from
+`src/` and a wheel that ships nothing would still appear to work.
 
 ## Dashboard
 
