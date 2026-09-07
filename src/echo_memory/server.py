@@ -162,9 +162,13 @@ def query_memory(scope: str, query: str | None = None, top_k: int = 10, digest: 
                     "count": len(queued),
                     "files": [{"path": q["path"], "project": q["project"]} for q in queued[:10]],
                     "instruction": (
-                        "These memory files were written but never recorded as facts. Read "
-                        "each one and call write_episode with what it states, then run "
-                        "`echo-memory pending --done <path>` for each."
+                        "These memory files changed on disk. That is not the same as "
+                        "their content being absent from the graph - a past session may "
+                        "have written the facts and never marked the file done. Call "
+                        "query_memory on each file's subject FIRST; if what it states is "
+                        "already recorded, mark it done rather than writing it twice. "
+                        "Otherwise call write_episode with what it states. Either way, "
+                        "finish with `echo-memory pending --done <path>` for each."
                     ),
                 }
             return result
@@ -215,8 +219,39 @@ def _bootstrap_once(conn) -> None:
         _logger.warning("bootstrap_failed", extra={"error": str(e)})
 
 
-def _author_of(conn, group_id: str, fact_id: str) -> str | None:
-    """The `agent_id` on a fact edge, or None if no such fact is in this scope.
+# Returned by `_author_of` for a fact that is really there but carries no
+# agent_id at all. Distinct from None, which means no such fact in this scope.
+# Collapsing the two sent an agent chasing a fact_id that was never the problem;
+# see `_author_of`.
+UNATTRIBUTED = object()
+
+
+def _author_of(conn, group_id: str, fact_id: str) -> str | object | None:
+    """The `agent_id` on a fact edge.
+
+    Three outcomes, and they are not interchangeable:
+      - the agent id, as a string
+      - UNATTRIBUTED, when the edge exists but has no agent_id property at all
+      - None, when no such fact is in this scope
+
+    The middle case used to return None as well, so `record_recall_save`
+    answered a real fact with "no fact <id> in this scope - pass the fact_id
+    from a query_memory result, not a remembered one". That advice is not just
+    wrong, it is unfollowable: the id DID come from query_memory, so the agent
+    re-queries, gets the same id back, and tries again. Nothing it can do
+    resolves the error, and the loop looks exactly like the one the Stop gate
+    caused on 2026-09-02.
+
+    Facts reach that state through a real path. A Claude Code MCP server is a
+    long-lived stdio process that imports this package once, at spawn, and an
+    editable install does not change that: a server started before `agent_id`
+    shipped on 2026-08-23 kept writing facts without it. One such process
+    (pid 53784, started 2026-08-22 17:47) was still writing on 2026-09-03 -
+    30 facts in this store have no agent_id because of it. Apache AGE drops a
+    property whose value is null on CREATE, so the key is absent rather than
+    null, which is why `WHERE e.agent_id = 'unknown'` in migration 0007 never
+    matched them. Migration 0011 backfills them; `_create_edge` now refuses to
+    write another.
 
     Scoped by group_id on purpose: a fact_id from another tenant must not be
     citable as evidence here, and an unscoped lookup would let one."""
@@ -236,7 +271,14 @@ def _author_of(conn, group_id: str, fact_id: str) -> str | None:
         $$, %s) AS (agent_id agtype)""",
         (json.dumps({"edge_id": edge_id, "gid": group_id}),),
     ).fetchone()
-    return str(row[0]).strip('"') if row and row[0] is not None else None
+    if row is None:
+        return None
+    # A row came back, so the edge exists and is in this scope. A null here is
+    # a fact without provenance, which is a different problem from a fact that
+    # isn't there, and gets a different answer.
+    if row[0] is None:
+        return UNATTRIBUTED
+    return str(row[0]).strip('"')
 
 
 @server.tool()
@@ -287,11 +329,20 @@ def record_recall_save(
                     f"no fact {fact_id} in this scope - pass the fact_id from a "
                     "query_memory result, not a remembered one"
                 )}
+            if written_by is UNATTRIBUTED:
+                return {"error": (
+                    f"fact {fact_id} carries no agent_id, so it cannot evidence a "
+                    "cross-tool save. This is not something you can fix by "
+                    "re-querying - the fact_id is correct. Run "
+                    "`echo-memory init-db` to backfill it, then cite a "
+                    "different fact for this save."
+                )}
             if written_by == UNKNOWN_AGENT:
                 return {"error": (
                     f"fact {fact_id} predates agent attribution (agent_id is "
                     f"'{UNKNOWN_AGENT}'), so it cannot evidence a cross-tool save. "
-                    "Run `alembic upgrade head` to backfill these."
+                    "Nothing recovers this - the session that knew is gone. Cite "
+                    "a different fact."
                 )}
             try:
                 recorded = _observations.record(

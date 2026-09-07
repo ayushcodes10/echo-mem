@@ -75,7 +75,7 @@ def render_criterion_six(report: dict, indent: str = "  ", show_hint: bool = Tru
         lines.append(
             f"{indent}    ! {report['unattributed_facts']} fact(s) still carry "
             f"agent_id '{UNKNOWN_PROJECT}', so a cross-tool save cannot be evidenced "
-            "- run `alembic upgrade head`"
+            "- they predate attribution and cannot be recovered"
         )
     lines.append(
         f"{indent}[{'x' if met['duplicates'] else ' '}] {counts['duplicates']} "

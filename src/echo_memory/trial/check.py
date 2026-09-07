@@ -205,15 +205,29 @@ def suppressed_pair_count(conn, group_id: str) -> int:
 
 
 def unattributed_facts(conn, group_ids: list[str]) -> int:
-    """Facts whose `agent_id` is still the 0003 backfill placeholder.
+    """Facts that cannot say who wrote them.
 
-    Found live on 2026-08-29: migration 0007 had shipped but was never applied
-    to the trial database, leaving 58 such facts. Each one would have counted
-    toward the cross-tool bar it exists to be excluded from."""
+    Two shapes, and counting only the first hid the second for ten days:
+
+      - `agent_id` is the literal 'unknown', the 0003 backfill placeholder.
+        Found live on 2026-08-29: migration 0007 had shipped but was never
+        applied to the trial database, leaving 58 such facts.
+      - `agent_id` is missing outright. Apache AGE drops a property whose value
+        is null at CREATE, so a writer that passed None left no key at all
+        rather than a null one. A long-lived MCP server process that imported
+        the package before `agent_id` shipped on 2026-08-23 kept doing exactly
+        that until 2026-09-03 - 30 facts in the author's own store.
+
+    `IS NULL` in AGE matches an absent key as well as a null value, which is
+    what makes one clause cover both. Missing the second shape meant `health`
+    reported "every fact has a recorded author" over a store where thirty had
+    none, and the criterion 6 gate's `unattributed == 0` passed the same way -
+    a measurement blind spot in the thing built to do the measuring."""
     row = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             MATCH ()-[e:FACT]->()
-            WHERE e.agent_id = $unknown AND e.group_id IN $gids
+            WHERE (e.agent_id = $unknown OR e.agent_id IS NULL)
+              AND e.group_id IN $gids
             RETURN count(e)
         $$, %s) AS (n agtype)""",
         (json.dumps({"unknown": UNKNOWN_PROJECT, "gids": list(group_ids)}),),

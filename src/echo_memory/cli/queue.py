@@ -57,7 +57,9 @@ def run_pending(args, _config, conn) -> int:
             print(f"\n  {current_project}")
         print(f"    ({item['source']}) {item['path']}")
     print(
-        "\nRead each one and call write_episode with the entities and facts it states, "
-        "then: echo-memory pending --done <path>..."
+        "\nA file is listed because it changed on disk, not because its content is "
+        "known to be missing. Query memory for its subject first: if the facts are "
+        "already there, just mark it done. Otherwise call write_episode with what it "
+        "states, then: echo-memory pending --done <path>..."
     )
     return 0

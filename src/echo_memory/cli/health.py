@@ -31,6 +31,7 @@ from echo_memory.cli import adopt
 from echo_memory.cli.graph import fetch_graph
 from echo_memory.graph import communities
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
+from echo_memory.infra.project import UNKNOWN as UNKNOWN_AGENT
 from echo_memory.trial import check as trial_check
 from echo_memory.trial import reads as trial_reads
 
@@ -80,7 +81,12 @@ def _writers(conn, group_ids: list[str]) -> dict[str, int]:
     ).fetchall()
     counts: dict[str, int] = {}
     for (agent_id,) in rows:
-        name = str(agent_id).strip('"')
+        # An absent agent_id arrives as Python None, and str(None) is "None" -
+        # which was reported to the user as though a tool were literally named
+        # that. Apache AGE drops a null-valued property at CREATE, so this is
+        # the shape a fact written without an author actually has. Fold it into
+        # the same placeholder migration 0003 used, so one name means one thing.
+        name = UNKNOWN_AGENT if agent_id is None else str(agent_id).strip('"')
         counts[name] = counts.get(name, 0) + 1
     return counts
 
@@ -246,7 +252,23 @@ def findings(h: dict) -> tuple[list[str], list[str], list[str]]:
 
     if h["unattributed_facts"]:
         attention.append(f"{h['unattributed_facts']} facts have no recorded author")
-        rec.append("Run `alembic upgrade head` to backfill attribution.")
+        # Deliberately not "run alembic upgrade head". Migration 0011 is what
+        # turns these into 'unknown' in the first place, so once it has run the
+        # advice is unfollowable: the schema is already at head and nothing
+        # further will change the number. Telling someone to re-run a migration
+        # that just ran is the same unactionable dead end record_recall_save
+        # used to hand an agent for a fact_id that was never wrong.
+        #
+        # The information is gone. Who wrote these is only knowable from the
+        # session that wrote them, and it has exited. What IS actionable is
+        # stopping the supply: a Claude Code MCP server imports this package
+        # once at spawn and keeps that code for its whole life, so a client
+        # left open across an upgrade goes on writing the old shape.
+        rec.append(
+            "These predate attribution and cannot be recovered - they will never "
+            "count toward a cross-tool save. Restart any long-running MCP client "
+            "so it stops writing more."
+        )
 
     return strong, attention, rec
 

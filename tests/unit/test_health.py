@@ -75,11 +75,20 @@ def test_a_wired_client_that_never_writes_is_named():
     assert any("skill" in r for r in rec)
 
 
-def test_unattributed_facts_are_flagged_with_the_command_that_fixes_them():
+def test_unattributed_facts_are_flagged_without_unfollowable_advice():
+    """These used to be reported with "run `alembic upgrade head`". Two things
+    are wrong with that. Migration 0011 is what produces this state, so once it
+    has run the advice changes nothing - and a pip-installed user has no
+    alembic.ini at all, so the command cannot even start (see cli/initdb.py).
+    What is actionable is stopping the supply: a long-running MCP client keeps
+    the code it imported at spawn, so it goes on writing the old shape."""
     _, attention, rec = health.findings(h(unattributed_facts=58))
 
     assert any("no recorded author" in a for a in attention)
-    assert any("alembic upgrade head" in r for r in rec)
+    assert not any("alembic" in r for r in rec), (
+        "a pip install has no alembic.ini; this command cannot be run"
+    )
+    assert any("restart" in r.lower() for r in rec)
 
 
 @pytest.mark.parametrize("field,value", [

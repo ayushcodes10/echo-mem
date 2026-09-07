@@ -118,8 +118,12 @@ def render_reason(result: dict, bin_path: str | None = None) -> str:
     lines += [
         "",
         (
-            "Read each one and call write_episode with the entities and facts it "
-            "states, then mark them stored:"
+            "A file is listed because it changed on disk, which is not the same as "
+            "its content being absent from the graph - a past session may have "
+            "written the facts and never marked it done. Call query_memory on each "
+            "file's subject first; if what it states is already recorded, mark it "
+            "done rather than writing it twice. Otherwise call write_episode with "
+            "the entities and facts it states. Either way, finish with:"
         ),
         "",
         # Two paths and an ellipsis: enough to show the shape of the command
