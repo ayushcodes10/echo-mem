@@ -1,0 +1,88 @@
+# Publish to PyPI when a version tag is pushed.
+#
+# This exists because there was no release path at all. echo-mem 0.1.0 went to
+# PyPI by hand on 2026-08-25 and was never republished, so by 2026-09-07 the
+# published package was 30 commits and five migrations behind main - including
+# 0008 through 0011, which means a pip-installed user could not reach the
+# current schema. Worse, pyproject still said 0.1.0, so one version string
+# named two materially different codebases and nothing about the artifact
+# revealed which one you had.
+#
+# Pushing to git does not publish. Only a v-prefixed tag does, and the tag has
+# to match the version in pyproject.toml - checked below, because a tag that
+# disagrees with the metadata reintroduces exactly the ambiguity above.
+#
+# Auth is PyPI Trusted Publishing (OIDC), so there is no API token in repository
+# secrets to leak or rotate. It requires a one-time setup on PyPI: project
+# settings, publishing, add a GitHub publisher for this repo with workflow
+# `release.yml` and environment `pypi`.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Refuse a tag that disagrees with pyproject
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $GITHUB_REF_NAME says $tag, pyproject says $pkg" >&2
+            exit 1
+          fi
+          echo "releasing $pkg"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      # The migrations are package data, and a pip install with no alembic.ini
+      # depends on them being inside the wheel (see cli/initdb.py). A wheel
+      # missing them installs cleanly and then cannot create its own schema,
+      # which is the failure this whole file exists to stop shipping.
+      - name: Check the wheel carries the migrations
+        run: |
+          python -m pip install --upgrade wheel
+          wheel=$(ls dist/*.whl)
+          # Counted from the source tree, not hardcoded: a literal here would
+          # silently stop covering the newest migration the day one is added.
+          want=$(ls src/echo_memory/migrations/versions/*.py | wc -l)
+          found=$(unzip -l "$wheel" | grep -c 'migrations/versions/.*\.py' || true)
+          echo "$found of $want migration scripts in $wheel"
+          if [ "$found" -lt "$want" ]; then
+            echo "wheel is missing migration scripts; a pip install could not run init-db" >&2
+            unzip -l "$wheel" | grep migrations || true
+            exit 1
+          fi
+          unzip -l "$wheel" | grep -q 'alembic.ini' \
+            || echo "note: alembic.ini is intentionally absent; init-db drives Alembic through its Python API"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # Trusted Publishing; no password or token is used
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

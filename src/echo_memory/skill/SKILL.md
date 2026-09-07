@@ -21,9 +21,12 @@ query_memory(scope="shared", query="why is the deploy branch master")
 query_memory(scope="shared", digest=True)   # "catch me up", ignores query
 ```
 
-If the response carries a `pending_ingest` field, memory files were written
-that the graph hasn't heard about. Read each listed file, call `write_episode`
-with what it states, then close it:
+If the response carries a `pending_ingest` field, memory files changed on disk
+and may not be recorded yet. Changed is not the same as missing: a past session
+may have written the facts and never marked the file done. Read each listed
+file, `query_memory` for its subject, and only call `write_episode` if what it
+states is genuinely absent — a duplicate fact costs more than a skipped one.
+Either way, close it: 
 
 ```bash
 echo-memory pending --done <path>

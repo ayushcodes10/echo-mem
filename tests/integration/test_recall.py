@@ -17,7 +17,7 @@ from echo_memory.infra.config import Config
 from echo_memory.infra.db import connect
 from echo_memory.ingestion import capture
 
-FACT = "chat-module-api.dugoutlive.com resolves to dugout-dev-alb, so it is DEV not prod"
+FACT = "chat-module-api.internal resolves to dugout-dev-alb, so it is DEV not prod"
 
 
 def _seed(migrated_db):
