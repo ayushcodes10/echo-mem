@@ -82,7 +82,11 @@ def test_the_error_names_the_real_problem_and_a_way_out(migrated_db):
     error = server.record_recall_save("shared", str(edge_id), "a note")["error"]
 
     assert "agent_id" in error
-    assert "alembic upgrade head" in error, "the fix has to be named, not implied"
+    assert "echo-memory init-db" in error, "the fix has to be named, not implied"
+    assert "alembic" not in error, (
+        "a pip install has no alembic.ini, so `alembic upgrade head` is not a "
+        "command this user can run; see cli/initdb.py"
+    )
 
 
 def test_a_genuinely_absent_fact_still_says_so(migrated_db):

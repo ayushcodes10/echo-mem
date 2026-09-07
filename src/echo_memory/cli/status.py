@@ -14,6 +14,7 @@ import json
 from echo_memory.cli import adopt
 from echo_memory.cli.graph import fetch_graph
 from echo_memory.cli.trial import render_criterion_six
+from echo_memory.infra.project import UNKNOWN as UNKNOWN_AGENT
 
 GRAPH = "echo_memory"
 
@@ -37,7 +38,12 @@ def writers(conn, group_id: str) -> dict[str, int]:
     ).fetchall()
     counts: dict[str, int] = {}
     for (agent_id,) in rows:
-        name = str(agent_id).strip('"')
+        # An absent agent_id arrives as Python None, and str(None) is "None" -
+        # which was reported to the user as though a tool were literally named
+        # that. Apache AGE drops a null-valued property at CREATE, so this is
+        # the shape a fact written without an author actually has. Fold it into
+        # the same placeholder migration 0003 used, so one name means one thing.
+        name = UNKNOWN_AGENT if agent_id is None else str(agent_id).strip('"')
         counts[name] = counts.get(name, 0) + 1
     return counts
 

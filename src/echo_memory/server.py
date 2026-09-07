@@ -330,14 +330,15 @@ def record_recall_save(
                     f"fact {fact_id} carries no agent_id, so it cannot evidence a "
                     "cross-tool save. This is not something you can fix by "
                     "re-querying - the fact_id is correct. Run "
-                    "`alembic upgrade head` to backfill it, then cite a "
+                    "`echo-memory init-db` to backfill it, then cite a "
                     "different fact for this save."
                 )}
             if written_by == UNKNOWN_AGENT:
                 return {"error": (
                     f"fact {fact_id} predates agent attribution (agent_id is "
                     f"'{UNKNOWN_AGENT}'), so it cannot evidence a cross-tool save. "
-                    "Run `alembic upgrade head` to backfill these."
+                    "Nothing recovers this - the session that knew is gone. Cite "
+                    "a different fact."
                 )}
             try:
                 recorded = _observations.record(
