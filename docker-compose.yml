@@ -3,6 +3,19 @@ services:
     build:
       context: .
       dockerfile: docker/postgres.Dockerfile
+    # Comes back on its own after a reboot, a Docker restart, or a crash.
+    #
+    # Without this the container stays down until someone runs `docker compose
+    # up` by hand, and nothing tells them to. On 2026-09-09 the Docker VM was
+    # not running after a restart, so every MCP tool call across every client
+    # answered "couldn't get a connection after 5.00 sec" - agents kept asking
+    # for memory and kept being told the store was unreachable, with the store
+    # itself perfectly intact.
+    #
+    # `unless-stopped` rather than `always`: if you deliberately stop the
+    # database, it stays stopped. Restarting Docker should not undo a decision
+    # you made on purpose.
+    restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-echo_memory}
