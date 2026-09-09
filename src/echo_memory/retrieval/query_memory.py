@@ -124,25 +124,6 @@ def _lexical_any_candidates(conn, group_id: str, query: str, limit: int) -> list
     return [edge_id for edge_id, score in rows if score > TS_RANK_FLOOR]
 
 
-def _lexical_candidates(conn, group_id: str, query: str, limit: int) -> list[str]:
-    rows = conn.execute(
-        f"""
-        SELECT f.id::text,
-               ts_rank(to_tsvector('english', f.properties ->> '"fact"'::agtype),
-                        websearch_to_tsquery('english', %s)) AS score
-        FROM {GRAPH}."FACT" f
-        WHERE (f.properties ->> '"group_id"'::agtype) = %s
-          AND (f.properties ->> '"t_invalid"'::agtype) IS NULL
-          AND to_tsvector('english', f.properties ->> '"fact"'::agtype)
-              @@ websearch_to_tsquery('english', %s)
-        ORDER BY score DESC
-        LIMIT %s
-        """,
-        (query, group_id, query, limit),
-    ).fetchall()
-    return [edge_id for edge_id, score in rows if score > TS_RANK_FLOOR]
-
-
 def _digest_candidates(conn, group_id: str, limit: int) -> list[str]:
     """No query text to rank against: a digest is "catch me up," not "answer
     this," so it's the most recently valid active facts, chronological, not
@@ -262,7 +243,22 @@ def query_memory(
     else:
         embedding = embedder.embed(query)
         vector_ids = _vector_candidates(conn, group_id, embedding, LIST_DEPTH)
-        lexical_ids = _lexical_candidates(conn, group_id, query, LIST_DEPTH)
+        # ANY-term, not websearch_to_tsquery's implicit AND.
+        #
+        # The AND form requires every non-stopword term of the query to appear
+        # in the fact. "deploy branch policy" against a fact about the deploy
+        # branch matches nothing, because "policy" is absent. Measured on six
+        # realistic questions against twenty real facts, exactly one returned
+        # anything - so RRF was fusing a populated vector list with an empty
+        # lexical one and reproducing the vector ordering exactly. That is also
+        # why k=60 and LIST_DEPTH=50 read as low-leverage: they have never had
+        # two lists to fuse.
+        #
+        # This function already existed for the hook path, thirty lines above,
+        # where the same behaviour had been found and worked around. The tool
+        # path kept the version that does not work, and the pair looked
+        # deliberate.
+        lexical_ids = _lexical_any_candidates(conn, group_id, query, LIST_DEPTH)
         fused = reciprocal_rank_fusion([vector_ids, lexical_ids])
         ranked_ids = sorted(fused, key=fused.get, reverse=True)[:top_k]
 
