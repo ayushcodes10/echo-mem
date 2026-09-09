@@ -72,6 +72,10 @@ class Ambiguous:
     candidates: list[Candidate]
 
 
+class ResolutionError(Exception):
+    pass
+
+
 @dataclass
 class ResolutionOutcome:
     # mention -> node graphid (as text)
@@ -151,6 +155,26 @@ def _fuzzy_candidates(conn, group_id: str, embedding: list[float], limit: int = 
     ]
 
 
+def _node_in_group(conn, group_id: str, node_id: str) -> bool:
+    """Whether node_id names a Node this group owns.
+
+    Both halves matter. Existence alone would still let one tenant graft an
+    edge onto another's entity; group alone cannot be checked without the
+    lookup."""
+    try:
+        wanted = int(node_id)
+    except (TypeError, ValueError):
+        return False
+    row = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH (n:Node) WHERE id(n) = $nid AND n.group_id = $gid
+            RETURN id(n)
+        $$, %s) AS (node_id agtype)""",
+        (json.dumps({"nid": wanted, "gid": group_id}),),
+    ).fetchone()
+    return row is not None
+
+
 def resolve_entities(
     conn,
     group_id: str,
@@ -171,6 +195,32 @@ def resolve_entities(
             if resolved_to == "new":
                 outcome.new_entities.add(name)
             else:
+                # The id has to be a real node in THIS group. It arrives from
+                # the calling agent, and until 2026-09-09 it was taken entirely
+                # on trust - no check that it existed, was a Node, or belonged
+                # to the caller.
+                #
+                # That produced the two bad merges this store has confirmed. An
+                # id recalled from memory rather than read from the graph
+                # pointed at 'node_embedding table' and 'AGE graphid column
+                # type', so three facts about Indian tax compliance were
+                # attached to an embedding table's lesson. Nothing objected;
+                # the facts simply landed somewhere else.
+                #
+                # In the hosted service the same hole is a cross-tenant write.
+                # Demonstrated before this fix: one account passed another
+                # account's node id and successfully attached an edge to it,
+                # because _create_edge matches nodes by id alone with no group
+                # filter. The edge carried the writer's own group_id while
+                # pointing at somebody else's entity.
+                if not _node_in_group(conn, group_id, resolved_to):
+                    raise ResolutionError(
+                        f"entity_resolutions[{name!r}] points at node "
+                        f"{resolved_to!r}, which is not a node in this scope. "
+                        "Pass an id from this call's own ambiguous_entities "
+                        "candidates, or \"new\" - never one remembered from "
+                        "an earlier turn."
+                    )
                 outcome.resolved[name] = resolved_to
                 outcome.audit_events.append(
                     {
