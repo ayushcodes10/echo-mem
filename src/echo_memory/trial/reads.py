@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from echo_memory.infra.logging import get_logger
 
+UNATTRIBUTED = "unattributed"
+
 _logger = get_logger("read_event")
 
 HOOK = "hook"
@@ -27,6 +29,7 @@ def record(
     injected_chars: int,
     project: str | None = None,
     session_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """Never raises. A prompt must reach the agent whether or not this works.
 
@@ -36,9 +39,9 @@ def record(
     try:
         conn.execute(
             """INSERT INTO public.read_event
-                   (group_id, kind, n_facts, injected_chars, project, session_id)
-               VALUES (%s, %s, %s, %s, %s, %s)""",
-            (group_id, kind, n_facts, injected_chars, project, session_id),
+                   (group_id, kind, n_facts, injected_chars, project, session_id, agent_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (group_id, kind, n_facts, injected_chars, project, session_id, agent_id),
         )
     except Exception as e:  # noqa: BLE001 - see docstring: never blocks a prompt
         _logger.warning("read_event_not_recorded", extra={"error": str(e)})
@@ -64,6 +67,21 @@ def summary(conn, group_ids: list[str], days: int = 7) -> dict:
              AND timestamp > now() - make_interval(days => %s)""",
         (group_ids, days),
     ).fetchone()
+    # Who did the reading. The whole claim is cross-tool recall, and one tool
+    # reading a hundred times looks identical to three tools reading thirty
+    # each until this is broken out. Rows written before migration 0012 have no
+    # agent_id and are counted under "unattributed" rather than assigned to a
+    # likely-looking tool.
+    by_agent = {
+        (agent or UNATTRIBUTED): count
+        for agent, count in conn.execute(
+            """SELECT agent_id, count(*) FROM public.read_event
+               WHERE group_id = ANY(%s) AND at > now() - make_interval(days => %s)
+               GROUP BY agent_id ORDER BY count(*) DESC""",
+            (group_ids, days),
+        ).fetchall()
+    }
+
     return {
         "days": days,
         "reads": reads or 0,
@@ -71,6 +89,7 @@ def summary(conn, group_ids: list[str], days: int = 7) -> dict:
         "injected_chars": chars or 0,
         "injected_tokens": (chars or 0) // CHARS_PER_TOKEN,
         "saves": (saves or [0])[0],
+        "by_agent": by_agent,
     }
 
 
