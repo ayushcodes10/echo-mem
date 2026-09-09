@@ -301,6 +301,14 @@ def render(h: dict) -> str:
             f"  read {r['reads']} times in {r['days']}d, {hit}% returned something, "
             f"~{r['injected_tokens']:,} tokens injected, {r['saves']} save(s) recorded"
         )
+        # Who did the reading. One tool reading a hundred times and three tools
+        # reading thirty each are the same number and completely different
+        # products, and the second is the one being claimed.
+        by_agent = r.get("by_agent") or {}
+        if by_agent:
+            lines.append(
+                "    by tool: " + ", ".join(f"{a}={n}" for a, n in by_agent.items())
+            )
         lines.append("")
     elif r:
         lines.append(f"  no reads recorded in {r['days']}d")

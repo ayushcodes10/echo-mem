@@ -144,3 +144,53 @@ def test_an_unattributed_read_still_records(migrated_db):
     assert [r["project"] for r in reads.by_project(conn, [config.group_id("shared")])] == [
         "unattributed"
     ]
+
+
+def test_a_query_read_records_which_tool_made_it(migrated_db):
+    """Reads carried no agent at all until 2026-09-09. With three clients
+    connected, "which of them is actually using memory" had no answer: for the
+    shared scope every tool's group_id is identical, so a hundred reads and one
+    read look the same."""
+    from echo_memory import server
+    from echo_memory.infra.config import Config
+    from echo_memory.trial import reads
+
+    config = Config(
+        user_id="ayush", agent_id="cursor", database_url=migrated_db, project="echo-mem"
+    )
+    server.startup(config=config, embedder=VectorEmbedder({FACT: REFERENCE, "anything": REFERENCE}))
+    server.query_memory("shared", query="anything")
+
+    with server._state.pool.connection() as conn:
+        row = conn.execute(
+            """SELECT agent_id, project FROM public.read_event
+               WHERE kind = 'query_memory' ORDER BY at DESC LIMIT 1"""
+        ).fetchone()
+        summary = reads.summary(conn, [config.shared_group_id()])
+
+    assert row[0] == "cursor", "the read must name the tool that made it"
+    assert row[1] == "echo-mem", (
+        "project was already a column and query_memory was not writing it, so "
+        "the main read surface was the one nobody could account for"
+    )
+    assert summary["by_agent"].get("cursor") == 1
+
+
+def test_reads_predating_attribution_are_not_assigned_to_a_likely_tool(migrated_db):
+    """Migration 0012 deliberately does not backfill. Guessing claude-code
+    because it was likeliest would put a number in the dashboard nobody could
+    defend."""
+    from echo_memory.infra.config import Config
+    from echo_memory.trial import reads
+
+    config = Config(user_id="ayush", agent_id="claude-code", database_url=migrated_db)
+    with connect(migrated_db) as conn:
+        conn.execute(
+            """INSERT INTO public.read_event (group_id, kind, n_facts, injected_chars)
+               VALUES (%s, 'query_memory', 1, 10)""",
+            (config.shared_group_id(),),
+        )
+        summary = reads.summary(conn, [config.shared_group_id()])
+
+    assert summary["by_agent"].get(reads.UNATTRIBUTED) == 1
+    assert "claude-code" not in summary["by_agent"]
