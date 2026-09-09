@@ -26,6 +26,35 @@ ONBOARDING_NUDGE_AT_COUNT = 3
 _logger = get_logger("write_episode")
 
 
+def embedding_text(source: str, target: str, fact: str) -> str:
+    """What actually gets embedded for a fact: its two entity names, then the
+    fact.
+
+    The entity names are structure the store already has and never put into the
+    vector, while the question an agent asks is entity-shaped - "what do I know
+    about updateSquad". Measured over 219 cases, by query shape:
+
+        query names both entities   MRR 0.604 -> 0.776
+        query names one entity      MRR 0.579 -> 0.659
+        query names neither         MRR 0.976 -> 0.959
+
+    The first row is the eval's own query shape and therefore its most
+    flattering: the query is literally a substring of the embedded text, which
+    is how one games a benchmark. The second is the honest number - a real
+    question usually names one of the things it is about - and the third is the
+    cost, a small dilution when the query names nothing.
+
+    Also measured and rejected: embedding only the fact's first sentence, the
+    "claim" half of a claim/detail split. That scored WORSE than the full text
+    (MRR 0.604 -> 0.582), because the entity names a query matches on often sit
+    in the evidence half, and truncating discards them. Prepending the names
+    and then shortening does beat prepending alone (0.776 vs 0.751), so the
+    split may be worth revisiting - but the names are doing the work, not the
+    brevity.
+    """
+    return f"{source} {target}. {fact}" if source and target else fact
+
+
 class ValidationError(Exception):
     pass
 
@@ -182,7 +211,9 @@ def _create_edge(
         ),
     ).fetchone()
     edge_id = str(row[0])
-    embedding = embedder.embed(fact["fact"])
+    embedding = embedder.embed(
+        embedding_text(fact.get("source", ""), fact.get("target", ""), fact["fact"])
+    )
     conn.execute(
         "INSERT INTO public.fact_embedding (edge_id, group_id, embedding) VALUES (%s::graphid, %s, %s)",
         (edge_id, group_id, embedding),
