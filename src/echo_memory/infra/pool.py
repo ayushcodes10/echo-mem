@@ -37,6 +37,28 @@ def make_pool(database_url: str, min_size: int = 0, max_size: int = 3) -> Connec
         # whether the tool is slow or broken. Five is long enough for a local
         # Postgres that is merely busy and short enough to read as an answer.
         timeout=5,
+        # How long the pool keeps escalating its reconnect delay before it
+        # resets and starts over. psycopg_pool backs off exponentially from
+        # 1 second, DOUBLING each failure - 1, 2, 4, 8, 16, 32 - bounded only
+        # by this value, which defaults to 300.
+        #
+        # That default makes a recovered database look broken. Measured on
+        # 2026-09-09: after a 60-second outage the pool went on answering
+        # PoolTimeout for ~30 seconds after Postgres was accepting connections
+        # again, while a pool created in the same process at the same moment
+        # connected in 0.01s. The delay had grown to ~32s and the pool was
+        # simply asleep. After an overnight outage it would be minutes.
+        #
+        # Nothing about that is visible from outside: an agent is told the
+        # database is unavailable, the user checks and finds Postgres running,
+        # and the only actual remedy is to wait or restart the client. Ten
+        # seconds keeps the worst case short enough that a retry lands.
+        reconnect_timeout=10.0,
+        # Verify a connection before handing it out. Without this the pool will
+        # serve a connection that was opened before the database restarted and
+        # is now dead, turning a recovered outage into a failed query on a
+        # connection that looked fine.
+        check=ConnectionPool.check_connection,
         configure=configure_connection,
         kwargs={"autocommit": True},
     )
