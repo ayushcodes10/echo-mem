@@ -154,6 +154,12 @@ def query_memory(scope: str, query: str | None = None, top_k: int = 10, digest: 
                 conn, group_id, _reads.QUERY,
                 n_facts=len(result.get("facts") or []),
                 injected_chars=sum(len(f.get("fact") or "") for f in result.get("facts") or []),
+                # All three were already columns and none were being written on
+                # this path, so every query_memory read landed unattributed
+                # while hook reads carried project and session. That made the
+                # main read surface the one nobody could account for.
+                project=_state.config.project,
+                agent_id=_state.config.agent_id,
             )
             _bootstrap_once(conn)
             queued = capture.pending(conn)
