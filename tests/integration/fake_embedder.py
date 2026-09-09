@@ -20,9 +20,23 @@ class VectorEmbedder:
         self._vectors = vectors
 
     def embed(self, text: str) -> list[float]:
-        if text not in self._vectors:
-            raise KeyError(f"VectorEmbedder has no vector registered for {text!r}")
-        return self._vectors[text]
+        if text in self._vectors:
+            return self._vectors[text]
+
+        # Facts are embedded as "<source> <target>. <fact>" so the entity names
+        # reach the vector (see write_episode.embedding_text). Almost every
+        # test here is about resolution, supersession or attribution and
+        # registers only the fact text, so fall back to the part after the
+        # names rather than making each of them restate the composed string.
+        #
+        # Still strict: the fallback only fires when the tail is itself
+        # registered, so genuinely unknown text raises exactly as before. A
+        # test that cares about the composed form registers it and gets it.
+        _, separator, tail = text.partition(". ")
+        if separator and tail in self._vectors:
+            return self._vectors[tail]
+
+        raise KeyError(f"VectorEmbedder has no vector registered for {text!r}")
 
 
 def unit_vector_at_angle(cos_theta: float, dim: int = 384) -> list[float]:

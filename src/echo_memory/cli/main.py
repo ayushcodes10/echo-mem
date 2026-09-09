@@ -196,6 +196,11 @@ def _add_project_parsers(sub) -> None:
         "--rounds", type=int, default=5, help="cycles to measure (default: 5)"
     )
 
+    sub.add_parser(
+        "reindex",
+        help="re-embed every fact with the current embedding text (run after an upgrade)",
+    )
+
     ev = sub.add_parser(
         "eval", help="retrieval quality against this store, for comparing configurations"
     )
@@ -446,6 +451,20 @@ def main(argv: list[str] | None = None) -> int:
         brief = session_start_cmd.build_brief(conn, config, project, Path.cwd())
         context = session_start_cmd.render_brief(brief)
         print(session_start_cmd.render_hook_output(context) if args.hook_json else context)
+        return 0
+
+    if args.command == "reindex":
+        from echo_memory.cli.reindex import reindex
+        from echo_memory.cli.reindex import render as render_reindex
+        from echo_memory.ingestion.embeddings import LocalEmbedder
+
+        conn = connect(config.database_url)
+        group_ids = [config.group_id(s) for s in ("solo", "shared")]
+
+        def progress(done, total):
+            print(f"  {done}/{total}", file=sys.stderr)
+
+        print(render_reindex(reindex(conn, group_ids, LocalEmbedder(), progress)), end="")
         return 0
 
     if args.command == "eval":
