@@ -195,6 +195,18 @@ def _add_project_parsers(sub) -> None:
     bench.add_argument(
         "--rounds", type=int, default=5, help="cycles to measure (default: 5)"
     )
+
+    ev = sub.add_parser(
+        "eval", help="retrieval quality against this store, for comparing configurations"
+    )
+    ev.add_argument(
+        "--limit", type=int, default=None,
+        help="cases to score (default: every fact joining two distinct entities)",
+    )
+    ev.add_argument(
+        "--ablate", action="store_true",
+        help="also score the configurations each retrieval change was chosen against",
+    )
     bench.add_argument(
         "--group", metavar="ID", default="benchmark:scratch",
         help="scope to write throwaway probe facts into (default: a dedicated "
@@ -434,6 +446,33 @@ def main(argv: list[str] | None = None) -> int:
         brief = session_start_cmd.build_brief(conn, config, project, Path.cwd())
         context = session_start_cmd.render_brief(brief)
         print(session_start_cmd.render_hook_output(context) if args.hook_json else context)
+        return 0
+
+    if args.command == "eval":
+        from echo_memory.eval.retrieval import build_cases, render, run
+        from echo_memory.ingestion.embeddings import LocalEmbedder
+
+        conn = connect(config.database_url)
+        group_id = config.group_id(args.scope)
+        cases = build_cases(conn, group_id, args.limit)
+        if not cases:
+            print(
+                "no cases: this scope has no fact joining two distinct entities.\n"
+                "A self-loop makes a query of one repeated word, which measures nothing.",
+                file=sys.stderr,
+            )
+            return 1
+
+        embedder = LocalEmbedder()
+        configs = [("shipping", {})]
+        if args.ablate:
+            configs += [
+                ("with MMR", {"use_mmr": True}),
+                ("static floor 0.15", {"floor": 0.15}),
+                ("vector only", {"vector_only": True}),
+                ("lexical only", {"lexical_only": True}),
+            ]
+        print(render([run(conn, group_id, embedder, cases, n, **kw) for n, kw in configs]))
         return 0
 
     if args.command == "benchmark":
