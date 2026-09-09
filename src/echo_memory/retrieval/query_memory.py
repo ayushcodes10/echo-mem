@@ -5,6 +5,7 @@ not after: see MATHS.local.md §7 for why post-hoc filtering is wrong even
 for a plain ranked list, not just for PPR's probability-mass case in v1b."""
 
 import json
+import math
 import re
 import time
 
@@ -25,8 +26,25 @@ MAX_TOP_K = 100
 # can't reuse those values. Still a placeholder pending real calibration,
 # deliberately conservative: hiding a real memory is worse than including
 # a mediocre one, which RRF's fusion already discounts by rank anyway.
+# Fallback only. The floor that actually runs is measured per store by
+# `adaptive_cosine_floor` below; this is what a store too small to measure
+# against falls back to.
 COSINE_FLOOR = 0.15
 TS_RANK_FLOOR = 0.0
+
+# How many random query/fact pairs to sample when measuring the noise floor,
+# and how many facts a store needs before measuring is better than guessing.
+FLOOR_SAMPLE = 200
+FLOOR_MIN_FACTS = 30
+# The percentile of that noise distribution to sit above. 95 lets one in twenty
+# unrelated facts through, which RRF then discounts by rank.
+FLOOR_PERCENTILE = 95
+
+# Maximal Marginal Relevance. 1.0 is pure relevance and reproduces the old
+# behaviour; 0.0 is pure novelty and ignores the question. 0.7 keeps relevance
+# dominant while breaking up runs of near-identical facts, which is the failure
+# being fixed rather than a general preference for variety.
+MMR_LAMBDA = 0.7
 
 _logger = get_logger("query_memory")
 
@@ -44,6 +62,119 @@ def _validate(query: str | None, top_k: int, digest: bool) -> None:
         raise ValidationError(f"top_k must be at most {MAX_TOP_K}, got {top_k}")
 
 
+def _mmr_select(conn, group_id: str, ranked_ids: list[str], top_k: int) -> list[str]:
+    """Pick top_k that are relevant AND not near-duplicates of each other.
+
+    The ranked list is scored purely on similarity to the query, so several
+    phrasings of one fact all score well and all get selected. The user pays
+    for every one of them in injected tokens and learns nothing from the second
+    onwards - the same failure the capture queue has, arriving through
+    retrieval instead.
+
+    Standard MMR: repeatedly take the candidate maximising
+        lambda * rel(d) - (1 - lambda) * max_{s in selected} sim(d, s)
+    Relevance is the fused rank, already computed. Similarity between
+    candidates comes from the embeddings that are already stored, so this costs
+    one extra query and no model calls.
+
+    Falls back to the plain ranked order if the embeddings cannot be read - a
+    less diverse answer is much better than no answer.
+    """
+    if len(ranked_ids) <= 1 or top_k <= 1:
+        return ranked_ids[:top_k]
+
+    try:
+        rows = conn.execute(
+            """SELECT edge_id::text, embedding FROM public.fact_embedding
+               WHERE group_id = %s AND edge_id::text = ANY(%s)""",
+            (group_id, list(ranked_ids)),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - see docstring
+        _logger.warning("mmr_skipped", extra={"reason": "embeddings unreadable"})
+        return ranked_ids[:top_k]
+
+    # pgvector hands back a Vector, not a list, and it is not iterable.
+    vectors = {
+        edge_id: (vec.to_list() if hasattr(vec, "to_list") else list(vec))
+        for edge_id, vec in rows
+    }
+    if len(vectors) < len(ranked_ids):
+        # Some candidate has no embedding; ranking it against the others would
+        # be arbitrary. Not worth a partial reorder.
+        return ranked_ids[:top_k]
+
+    # Relevance from position: the list is already in fused-score order, and
+    # only the ordering matters to MMR, not the scale.
+    relevance = {eid: 1.0 - (i / len(ranked_ids)) for i, eid in enumerate(ranked_ids)}
+
+    def cosine(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b, strict=True))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(x * x for x in b))
+        return dot / (na * nb) if na and nb else 0.0
+
+    selected: list[str] = [ranked_ids[0]]
+    remaining = [e for e in ranked_ids[1:]]
+    while remaining and len(selected) < top_k:
+        best, best_score = None, None
+        for candidate in remaining:
+            redundancy = max(
+                cosine(vectors[candidate], vectors[chosen]) for chosen in selected
+            )
+            score = MMR_LAMBDA * relevance[candidate] - (1 - MMR_LAMBDA) * redundancy
+            if best_score is None or score > best_score:
+                best, best_score = candidate, score
+        selected.append(best)
+        remaining.remove(best)
+    return selected
+
+
+def adaptive_cosine_floor(conn, group_id: str) -> float:
+    """The similarity an unrelated fact actually scores in THIS store.
+
+    A fixed 0.15 was measured to sit inside the noise rather than above it:
+    unrelated-fact similarity in this store runs 0.084-0.163 with sd
+    0.078-0.135, so a floor at 0.15 admits roughly half of everything. That is
+    why an abstract question returns cron bugs - the floor was never filtering.
+
+    Measuring beats picking a better constant. The right value depends on the
+    embedder, the length of the facts and the subject matter, all of which
+    differ per store and drift as one grows. Sampling random pairs of facts
+    approximates the query-to-unrelated-fact distribution well enough to place
+    a percentile, and costs one query.
+
+    Falls back to COSINE_FLOOR on a store too small to measure - under
+    FLOOR_MIN_FACTS the sample is mostly noise about noise.
+    """
+    row = conn.execute(
+        """
+        WITH sampled AS (
+            SELECT embedding FROM public.fact_embedding
+            WHERE group_id = %s ORDER BY random() LIMIT %s
+        ), pairs AS (
+            SELECT -(a.embedding <#> b.embedding) AS sim
+            FROM sampled a, sampled b
+            -- Every unordered pair once, and never a fact against itself,
+            -- which scores 1.0 and would drag the percentile up.
+            WHERE a.embedding <> b.embedding
+        )
+        SELECT count(*), percentile_cont(%s) WITHIN GROUP (ORDER BY sim)
+        FROM pairs
+        """,
+        (group_id, FLOOR_SAMPLE, FLOOR_PERCENTILE / 100.0),
+    ).fetchone()
+
+    if not row or not row[0] or row[1] is None:
+        return COSINE_FLOOR
+    n_pairs, percentile = row
+    # n_pairs is quadratic in the sample, so this is the fact count squared.
+    if n_pairs < FLOOR_MIN_FACTS * FLOOR_MIN_FACTS:
+        return COSINE_FLOOR
+    # Never below the static floor: a store whose facts are all near-identical
+    # would otherwise measure a floor of nearly zero and admit everything.
+    return max(COSINE_FLOOR, float(percentile))
+
+
 def _vector_candidates(conn, group_id: str, embedding: list[float], limit: int) -> list[str]:
     rows = conn.execute(
         f"""
@@ -57,7 +188,8 @@ def _vector_candidates(conn, group_id: str, embedding: list[float], limit: int) 
         """,
         (embedding, group_id, embedding, limit),
     ).fetchall()
-    return [edge_id for edge_id, score in rows if score >= COSINE_FLOOR]
+    floor = adaptive_cosine_floor(conn, group_id)
+    return [edge_id for edge_id, score in rows if score >= floor]
 
 
 def _any_term_tsquery(terms: list[str]) -> tuple[str, list[str]]:
@@ -120,25 +252,6 @@ def _lexical_any_candidates(conn, group_id: str, query: str, limit: int) -> list
         LIMIT %s
         """,
         (*params, group_id, *params, limit),
-    ).fetchall()
-    return [edge_id for edge_id, score in rows if score > TS_RANK_FLOOR]
-
-
-def _lexical_candidates(conn, group_id: str, query: str, limit: int) -> list[str]:
-    rows = conn.execute(
-        f"""
-        SELECT f.id::text,
-               ts_rank(to_tsvector('english', f.properties ->> '"fact"'::agtype),
-                        websearch_to_tsquery('english', %s)) AS score
-        FROM {GRAPH}."FACT" f
-        WHERE (f.properties ->> '"group_id"'::agtype) = %s
-          AND (f.properties ->> '"t_invalid"'::agtype) IS NULL
-          AND to_tsvector('english', f.properties ->> '"fact"'::agtype)
-              @@ websearch_to_tsquery('english', %s)
-        ORDER BY score DESC
-        LIMIT %s
-        """,
-        (query, group_id, query, limit),
     ).fetchall()
     return [edge_id for edge_id, score in rows if score > TS_RANK_FLOOR]
 
@@ -262,9 +375,27 @@ def query_memory(
     else:
         embedding = embedder.embed(query)
         vector_ids = _vector_candidates(conn, group_id, embedding, LIST_DEPTH)
-        lexical_ids = _lexical_candidates(conn, group_id, query, LIST_DEPTH)
+        # ANY-term, not websearch_to_tsquery's implicit AND.
+        #
+        # The AND form requires every non-stopword term of the query to appear
+        # in the fact. "deploy branch policy" against a fact about the deploy
+        # branch matches nothing, because "policy" is absent. Measured on six
+        # realistic questions against twenty real facts, exactly one returned
+        # anything - so RRF was fusing a populated vector list with an empty
+        # lexical one and reproducing the vector ordering exactly. That is also
+        # why k=60 and LIST_DEPTH=50 read as low-leverage: they have never had
+        # two lists to fuse.
+        #
+        # This function already existed for the hook path, thirty lines above,
+        # where the same behaviour had been found and worked around. The tool
+        # path kept the version that does not work, and the pair looked
+        # deliberate.
+        lexical_ids = _lexical_any_candidates(conn, group_id, query, LIST_DEPTH)
         fused = reciprocal_rank_fusion([vector_ids, lexical_ids])
-        ranked_ids = sorted(fused, key=fused.get, reverse=True)[:top_k]
+        by_score = sorted(fused, key=fused.get, reverse=True)
+        # Diversify before truncating, not after: the point is to choose which
+        # top_k, and slicing first throws away the candidates MMR would swap in.
+        ranked_ids = _mmr_select(conn, group_id, by_score[:LIST_DEPTH], top_k)
 
     facts_by_id = _fetch_facts(conn, ranked_ids)
     facts = [facts_by_id[edge_id] for edge_id in ranked_ids if edge_id in facts_by_id]
