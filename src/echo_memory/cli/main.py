@@ -219,6 +219,11 @@ def _add_project_parsers(sub) -> None:
         "--ablate", action="store_true",
         help="also score the configurations each retrieval change was chosen against",
     )
+    ev.add_argument(
+        "--shape", choices=["all", "entity_pair", "entity_single", "prose"],
+        default="all",
+        help="query shape (default: all three; one shape alone can invert a conclusion)",
+    )
     bench.add_argument(
         "--group", metavar="ID", default="benchmark:scratch",
         help="scope to write throwaway probe facts into (default: a dedicated "
@@ -492,19 +497,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "eval":
-        from echo_memory.eval.retrieval import build_cases, render, run
+        from echo_memory.eval.retrieval import SHAPES, build_cases, render, run
         from echo_memory.ingestion.embeddings import LocalEmbedder
 
         conn = connect(config.database_url)
         group_id = config.group_id(args.scope)
-        cases = build_cases(conn, group_id, args.limit)
-        if not cases:
-            print(
-                "no cases: this scope has no fact joining two distinct entities.\n"
-                "A self-loop makes a query of one repeated word, which measures nothing.",
-                file=sys.stderr,
-            )
-            return 1
+        shapes = SHAPES if args.shape == "all" else (args.shape,)
 
         embedder = LocalEmbedder()
         configs = [("shipping", {})]
@@ -515,7 +513,23 @@ def main(argv: list[str] | None = None) -> int:
                 ("vector only", {"vector_only": True}),
                 ("lexical only", {"lexical_only": True}),
             ]
-        print(render([run(conn, group_id, embedder, cases, n, **kw) for n, kw in configs]))
+
+        results = []
+        for shape in shapes:
+            cases = build_cases(conn, group_id, args.limit, shape=shape)
+            if not cases:
+                continue
+            results += [run(conn, group_id, embedder, cases, n, **kw) for n, kw in configs]
+
+        if not results:
+            print(
+                "no cases: this scope has no fact joining two distinct entities.\n"
+                "A self-loop makes a query of one repeated word, which measures nothing.",
+                file=sys.stderr,
+            )
+            return 1
+
+        print(render(results))
         return 0
 
     if args.command == "benchmark":
