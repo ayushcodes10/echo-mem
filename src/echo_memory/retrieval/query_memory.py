@@ -25,8 +25,19 @@ MAX_TOP_K = 100
 # can't reuse those values. Still a placeholder pending real calibration,
 # deliberately conservative: hiding a real memory is worse than including
 # a mediocre one, which RRF's fusion already discounts by rank anyway.
+# Fallback only. The floor that actually runs is measured per store by
+# `adaptive_cosine_floor` below; this is what a store too small to measure
+# against falls back to.
 COSINE_FLOOR = 0.15
 TS_RANK_FLOOR = 0.0
+
+# How many random query/fact pairs to sample when measuring the noise floor,
+# and how many facts a store needs before measuring is better than guessing.
+FLOOR_SAMPLE = 200
+FLOOR_MIN_FACTS = 30
+# The percentile of that noise distribution to sit above. 95 lets one in twenty
+# unrelated facts through, which RRF then discounts by rank.
+FLOOR_PERCENTILE = 95
 
 _logger = get_logger("query_memory")
 
@@ -44,6 +55,52 @@ def _validate(query: str | None, top_k: int, digest: bool) -> None:
         raise ValidationError(f"top_k must be at most {MAX_TOP_K}, got {top_k}")
 
 
+def adaptive_cosine_floor(conn, group_id: str) -> float:
+    """The similarity an unrelated fact actually scores in THIS store.
+
+    A fixed 0.15 was measured to sit inside the noise rather than above it:
+    unrelated-fact similarity in this store runs 0.084-0.163 with sd
+    0.078-0.135, so a floor at 0.15 admits roughly half of everything. That is
+    why an abstract question returns cron bugs - the floor was never filtering.
+
+    Measuring beats picking a better constant. The right value depends on the
+    embedder, the length of the facts and the subject matter, all of which
+    differ per store and drift as one grows. Sampling random pairs of facts
+    approximates the query-to-unrelated-fact distribution well enough to place
+    a percentile, and costs one query.
+
+    Falls back to COSINE_FLOOR on a store too small to measure - under
+    FLOOR_MIN_FACTS the sample is mostly noise about noise.
+    """
+    row = conn.execute(
+        """
+        WITH sampled AS (
+            SELECT embedding FROM public.fact_embedding
+            WHERE group_id = %s ORDER BY random() LIMIT %s
+        ), pairs AS (
+            SELECT -(a.embedding <#> b.embedding) AS sim
+            FROM sampled a, sampled b
+            -- Every unordered pair once, and never a fact against itself,
+            -- which scores 1.0 and would drag the percentile up.
+            WHERE a.embedding <> b.embedding
+        )
+        SELECT count(*), percentile_cont(%s) WITHIN GROUP (ORDER BY sim)
+        FROM pairs
+        """,
+        (group_id, FLOOR_SAMPLE, FLOOR_PERCENTILE / 100.0),
+    ).fetchone()
+
+    if not row or not row[0] or row[1] is None:
+        return COSINE_FLOOR
+    n_pairs, percentile = row
+    # n_pairs is quadratic in the sample, so this is the fact count squared.
+    if n_pairs < FLOOR_MIN_FACTS * FLOOR_MIN_FACTS:
+        return COSINE_FLOOR
+    # Never below the static floor: a store whose facts are all near-identical
+    # would otherwise measure a floor of nearly zero and admit everything.
+    return max(COSINE_FLOOR, float(percentile))
+
+
 def _vector_candidates(conn, group_id: str, embedding: list[float], limit: int) -> list[str]:
     rows = conn.execute(
         f"""
@@ -57,7 +114,8 @@ def _vector_candidates(conn, group_id: str, embedding: list[float], limit: int) 
         """,
         (embedding, group_id, embedding, limit),
     ).fetchall()
-    return [edge_id for edge_id, score in rows if score >= COSINE_FLOOR]
+    floor = adaptive_cosine_floor(conn, group_id)
+    return [edge_id for edge_id, score in rows if score >= floor]
 
 
 def _any_term_tsquery(terms: list[str]) -> tuple[str, list[str]]:
