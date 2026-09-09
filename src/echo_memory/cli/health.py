@@ -91,6 +91,36 @@ def _writers(conn, group_ids: list[str]) -> dict[str, int]:
     return counts
 
 
+def _connectivity(graph: dict) -> dict:
+    """How connected the graph actually is, reported by median rather than mean.
+
+    Mean degree was quoted as 2.11 for weeks and is misleading: the degree
+    distribution is heavy-tailed, so the mean is held up by a handful of hubs
+    while the typical node has one edge. Measured on the author's store, 208
+    nodes: median degree 1, 64% with exactly one edge, 83% with two or fewer,
+    and the top 5% of nodes holding 32% of all degree.
+
+    That distinction decides real work. A node of degree 1 is a leaf and can
+    never be traversed THROUGH, so multi-hop retrieval over a graph that is
+    mostly leaves dead-ends immediately - which is why Personalized PageRank
+    stayed deferred, and why reification was measured before being built.
+    """
+    degree: dict[str, int] = {n["id"]: 0 for n in graph["nodes"]}
+    for fact in graph["facts"]:
+        for endpoint in (fact["source_id"], fact["target_id"]):
+            if endpoint in degree:
+                degree[endpoint] += 1
+    values = sorted(degree.values())
+    if not values:
+        return {"median_degree": 0, "leaf_share": 0.0}
+    mid = len(values) // 2
+    median = (
+        values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+    )
+    leaves = sum(1 for v in values if v <= 1)
+    return {"median_degree": median, "leaf_share": leaves / len(values)}
+
+
 def _orphans(graph: dict) -> list[dict]:
     """Entities no fact connects to anything. A node with no edges cannot be
     reached by traversal and contributes nothing a flat list would not."""
@@ -135,6 +165,7 @@ def collect(conn, config, today: datetime | None = None) -> dict:
         "orphans": [{"name": n["name"], "type": n["type"]} for n in orphans],
         "components": len(set(detected["components"].values())) if nodes else 0,
         "clusters": len(detected["communities"]),
+        **_connectivity({"nodes": nodes, "facts": facts}),
         "unreviewed_pairs": report["n_open_pairs"],
         "unattributed_facts": report.get("unattributed_facts", 0),
         "duplicates": report["counts"]["duplicates"],
@@ -186,7 +217,12 @@ def findings(h: dict) -> tuple[list[str], list[str], list[str]]:
         strong.append("no bad merges confirmed")
     if h["unattributed_facts"] == 0 and h["facts"]:
         strong.append("every fact has a recorded author")
-    if h["clusters"] > 1:
+    # Only a strength when the clusters are actually joined-up. Many small
+    # clusters over a graph of leaves is fragmentation, and calling it
+    # "structure forming" is the kind of flattering number this command exists
+    # to stop reporting - it read as a strength for weeks over a store whose
+    # median node had one edge.
+    if h["clusters"] > 1 and h.get("leaf_share", 1.0) < 0.5:
         strong.append(f"{h['clusters']} distinct clusters, so structure is forming")
 
     quiet = h["days_since_write"]
@@ -249,6 +285,17 @@ def findings(h: dict) -> tuple[list[str], list[str], list[str]]:
     if h["unreviewed_pairs"] > REVIEW_BACKLOG:
         attention.append(f"{h['unreviewed_pairs']} similar pairs awaiting review")
         rec.append("Run `echo-memory trial check` to judge them before the queue is ignored.")
+
+    if h.get("leaf_share", 0) >= 0.5:
+        attention.append(
+            f"{h['leaf_share']:.0%} of entities have one edge or none "
+            f"(median degree {h['median_degree']:g})"
+        )
+        rec.append(
+            "Most entities are mentioned once, so traversal has nowhere to go. "
+            "Reuse existing entities when writing rather than minting new ones; "
+            "query_memory first to see what is already named."
+        )
 
     if h["unattributed_facts"]:
         attention.append(f"{h['unattributed_facts']} facts have no recorded author")
