@@ -145,6 +145,16 @@ def test_a_database_outage_returns_a_typed_error_not_a_stack_trace(migrated_db, 
         result = call()
         assert "error" in result, result
         assert "unavailable" in result["error"]
+        # The raw psycopg text describes a symptom and stops. A client reported
+        # "couldn't get a connection after 5.00 sec" to its user on 2026-09-09,
+        # who then had to work out for themselves that the Docker VM was down.
+        assert "docker compose up -d db" in result["error"], (
+            "the outage message must name the command that fixes it"
+        )
+        assert "Nothing is lost" in result["error"], (
+            "an agent relaying this must be able to say the store is intact, "
+            "not imply the user's memory was wiped"
+        )
 
 
 def test_a_programming_error_still_propagates(migrated_db, monkeypatch):
