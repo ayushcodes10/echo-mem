@@ -5,6 +5,7 @@ not after: see MATHS.local.md §7 for why post-hoc filtering is wrong even
 for a plain ranked list, not just for PPR's probability-mass case in v1b."""
 
 import json
+import math
 import re
 import time
 
@@ -39,6 +40,12 @@ FLOOR_MIN_FACTS = 30
 # unrelated facts through, which RRF then discounts by rank.
 FLOOR_PERCENTILE = 95
 
+# Maximal Marginal Relevance. 1.0 is pure relevance and reproduces the old
+# behaviour; 0.0 is pure novelty and ignores the question. 0.7 keeps relevance
+# dominant while breaking up runs of near-identical facts, which is the failure
+# being fixed rather than a general preference for variety.
+MMR_LAMBDA = 0.7
+
 _logger = get_logger("query_memory")
 
 
@@ -53,6 +60,73 @@ def _validate(query: str | None, top_k: int, digest: bool) -> None:
         raise ValidationError(f"top_k must be a positive integer, got {top_k!r}")
     if top_k > MAX_TOP_K:
         raise ValidationError(f"top_k must be at most {MAX_TOP_K}, got {top_k}")
+
+
+def _mmr_select(conn, group_id: str, ranked_ids: list[str], top_k: int) -> list[str]:
+    """Pick top_k that are relevant AND not near-duplicates of each other.
+
+    The ranked list is scored purely on similarity to the query, so several
+    phrasings of one fact all score well and all get selected. The user pays
+    for every one of them in injected tokens and learns nothing from the second
+    onwards - the same failure the capture queue has, arriving through
+    retrieval instead.
+
+    Standard MMR: repeatedly take the candidate maximising
+        lambda * rel(d) - (1 - lambda) * max_{s in selected} sim(d, s)
+    Relevance is the fused rank, already computed. Similarity between
+    candidates comes from the embeddings that are already stored, so this costs
+    one extra query and no model calls.
+
+    Falls back to the plain ranked order if the embeddings cannot be read - a
+    less diverse answer is much better than no answer.
+    """
+    if len(ranked_ids) <= 1 or top_k <= 1:
+        return ranked_ids[:top_k]
+
+    try:
+        rows = conn.execute(
+            """SELECT edge_id::text, embedding FROM public.fact_embedding
+               WHERE group_id = %s AND edge_id::text = ANY(%s)""",
+            (group_id, list(ranked_ids)),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - see docstring
+        _logger.warning("mmr_skipped", extra={"reason": "embeddings unreadable"})
+        return ranked_ids[:top_k]
+
+    # pgvector hands back a Vector, not a list, and it is not iterable.
+    vectors = {
+        edge_id: (vec.to_list() if hasattr(vec, "to_list") else list(vec))
+        for edge_id, vec in rows
+    }
+    if len(vectors) < len(ranked_ids):
+        # Some candidate has no embedding; ranking it against the others would
+        # be arbitrary. Not worth a partial reorder.
+        return ranked_ids[:top_k]
+
+    # Relevance from position: the list is already in fused-score order, and
+    # only the ordering matters to MMR, not the scale.
+    relevance = {eid: 1.0 - (i / len(ranked_ids)) for i, eid in enumerate(ranked_ids)}
+
+    def cosine(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b, strict=True))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(x * x for x in b))
+        return dot / (na * nb) if na and nb else 0.0
+
+    selected: list[str] = [ranked_ids[0]]
+    remaining = [e for e in ranked_ids[1:]]
+    while remaining and len(selected) < top_k:
+        best, best_score = None, None
+        for candidate in remaining:
+            redundancy = max(
+                cosine(vectors[candidate], vectors[chosen]) for chosen in selected
+            )
+            score = MMR_LAMBDA * relevance[candidate] - (1 - MMR_LAMBDA) * redundancy
+            if best_score is None or score > best_score:
+                best, best_score = candidate, score
+        selected.append(best)
+        remaining.remove(best)
+    return selected
 
 
 def adaptive_cosine_floor(conn, group_id: str) -> float:
@@ -318,7 +392,10 @@ def query_memory(
         # deliberate.
         lexical_ids = _lexical_any_candidates(conn, group_id, query, LIST_DEPTH)
         fused = reciprocal_rank_fusion([vector_ids, lexical_ids])
-        ranked_ids = sorted(fused, key=fused.get, reverse=True)[:top_k]
+        by_score = sorted(fused, key=fused.get, reverse=True)
+        # Diversify before truncating, not after: the point is to choose which
+        # top_k, and slicing first throws away the candidates MMR would swap in.
+        ranked_ids = _mmr_select(conn, group_id, by_score[:LIST_DEPTH], top_k)
 
     facts_by_id = _fetch_facts(conn, ranked_ids)
     facts = [facts_by_id[edge_id] for edge_id in ranked_ids if edge_id in facts_by_id]
