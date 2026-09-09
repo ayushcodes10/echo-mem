@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 
 from echo_memory.cli import reconcile as reconcile_mod
-from echo_memory.ingestion import capture
+from echo_memory.ingestion import activity, capture
 
 # How many files to name in the block. Past a handful the reason stops reading
 # as a task and starts reading as a wall, which is how the session-start
@@ -99,6 +99,42 @@ def gate(conn, project: str, root: Path | None = None) -> dict:
     reconcile_mod.reconcile(conn, root=root, project=project)
     queued = capture.pending(conn, project)
     return {"project": project, "n": len(queued), "files": [q["path"] for q in queued]}
+
+
+def render_unrecorded_reason(work: dict) -> str:
+    """What to say to a session that did a lot and wrote nothing.
+
+    Names the number, because a claim with a count attached is checkable by the
+    agent reading it and one without is nagging. Offers the same escape hatch
+    the file gate does: an honest "nothing durable happened" is a real answer,
+    and a gate with no way out is one people switch off.
+    """
+    return "\n".join([
+        f"This session changed {work['edits']} files and recorded nothing in memory.",
+        "",
+        (
+            "That is the failure this tool exists to prevent, and it is not "
+            "hypothetical: eight merged PRs in one window and two days of "
+            "building a service both went by this way. The work reached commit "
+            "messages and READMEs, which another tool cannot find - a Codex "
+            "session looking for exactly that work on 2026-09-09 queried memory "
+            "twenty times and correctly reported there was nothing there."
+        ),
+        "",
+        (
+            "Call write_episode now for whatever this session established: a "
+            "decision and why, a correction, a constraint that cost time to "
+            "find, something that would have to be re-explained to a different "
+            "tool tomorrow. Write it so it still makes sense read cold in six "
+            "months."
+        ),
+        "",
+        (
+            "If this session genuinely established nothing durable - a rename, "
+            "a formatting pass, an experiment you abandoned - say so in one "
+            "line and stop. That is a real answer and this will not ask again."
+        ),
+    ])
 
 
 def render_reason(result: dict, bin_path: str | None = None) -> str:
@@ -178,9 +214,20 @@ def run(args, config, conn) -> int:
     session_id = getattr(args, "session_id", None)
     if already_gated(conn, session_id):
         return 0
+
     result = gate(conn, config.project)
-    if not result["n"]:
+    if result["n"]:
+        record_gated(conn, session_id, config.project, result["n"])
+        print(render_hook_output(result) if args.hook_json else render_reason(result))
         return 0
-    record_gated(conn, session_id, config.project, result["n"])
-    print(render_hook_output(result) if args.hook_json else render_reason(result))
+
+    # No queued files does not mean nothing was owed. It usually means this
+    # session never wrote a memory file, which is the larger of the two capture
+    # failures and the one the gate could not previously see.
+    work = activity.worked_without_recording(conn, session_id)
+    if work["should_ask"]:
+        record_gated(conn, session_id, config.project, 0)
+        reason = render_unrecorded_reason(work)
+        print(json.dumps({"decision": "block", "reason": reason})
+              if args.hook_json else reason)
     return 0

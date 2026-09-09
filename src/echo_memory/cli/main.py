@@ -196,6 +196,13 @@ def _add_project_parsers(sub) -> None:
         "--rounds", type=int, default=5, help="cycles to measure (default: 5)"
     )
 
+    edit = sub.add_parser(
+        "notice-edit",
+        help="record that a session edited a file (PostToolUse hook; counts only)",
+    )
+    edit.add_argument("--session-id", required=True)
+    edit.add_argument("--project", default=None, help="default: detected from cwd")
+
     sub.add_parser(
         "reindex",
         help="re-embed every fact with the current embedding text (run after an upgrade)",
@@ -451,6 +458,23 @@ def main(argv: list[str] | None = None) -> int:
         brief = session_start_cmd.build_brief(conn, config, project, Path.cwd())
         context = session_start_cmd.render_brief(brief)
         print(session_start_cmd.render_hook_output(context) if args.hook_json else context)
+        return 0
+
+    if args.command == "notice-edit":
+        from echo_memory.ingestion import activity
+
+        # Never fails the edit that triggered it. Same contract as the capture
+        # hook it runs beside: a memory side effect must not break the tool call
+        # it is observing.
+        try:
+            conn = connect(config.database_url)
+            activity.record_edit(conn, args.session_id, args.project or config.project)
+        except Exception as e:  # noqa: BLE001
+            # Swallowed on purpose, and logged to stderr rather than silently:
+            # a database that is down must not break the edit being observed,
+            # but it should still be findable when someone asks why the gate
+            # went quiet.
+            print(f"notice-edit skipped: {e}", file=sys.stderr)
         return 0
 
     if args.command == "reindex":

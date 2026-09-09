@@ -27,11 +27,27 @@ payload=$(cat)
 # Prefer jq; fall back to a narrow grep so the hook still works without it.
 if command -v jq >/dev/null 2>&1; then
   file_path=$(printf '%s' "$payload" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
+  session_id=$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)
 else
   file_path=$(printf '%s' "$payload" | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  session_id=$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 fi
 
 [ -n "${file_path:-}" ] || exit 0
+
+# Count the edit, whatever it was.
+#
+# Everything below this line is about memory files, and for a long time that
+# was the whole hook - every other edit was discarded. That left the Stop gate
+# blind to the case it most needed to see: a session that does a great deal of
+# work and writes no memory file has an empty queue, which reads as nothing
+# owed. Eight merged PRs in one window and two days of building a service both
+# went by that way, with the gate installed and firing.
+#
+# A count, not a path. See ingestion/activity.py for why.
+if [ -n "${session_id:-}" ]; then
+  "$ECHO_MEMORY_BIN" notice-edit --session-id "$session_id" >/dev/null 2>&1 || true
+fi
 
 # Only Claude Code's own memory files. Anything else written during a session
 # is source code, scratch output or config, none of which is a memory.
