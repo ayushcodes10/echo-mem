@@ -10,6 +10,12 @@ MMR picks the candidate maximising
 
 with lambda 0.7, so relevance still dominates and near-duplicates are broken
 up rather than variety being pursued for its own sake.
+
+It is OFF by default, because the eval measured it making retrieval worse on
+this store: R@3 0.703 to 0.653 and MRR 0.605 to 0.594, for no token saving. See
+_mmr_select's docstring. These tests cover the mechanism, which is correct and
+may be worth turning on once claim/detail shortens every embedded text - not a
+claim that it currently helps.
 """
 
 from __future__ import annotations

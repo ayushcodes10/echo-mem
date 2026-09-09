@@ -12,6 +12,7 @@ import time
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.logging import get_logger, log_query_memory
 from echo_memory.retrieval.fusion import LIST_DEPTH, reciprocal_rank_fusion
+from echo_memory.retrieval.fusion import K as RRF_K
 
 DEFAULT_TOP_K = 10
 MAX_TOP_K = 100
@@ -64,6 +65,25 @@ def _validate(query: str | None, top_k: int, digest: bool) -> None:
 
 def _mmr_select(conn, group_id: str, ranked_ids: list[str], top_k: int) -> list[str]:
     """Pick top_k that are relevant AND not near-duplicates of each other.
+
+    OFF BY DEFAULT, because it was measured and it made retrieval worse. Over
+    219 cases on the author's store:
+
+        no MMR    R@3 0.703   R@5 0.758   MRR 0.605   1,103 tokens
+        MMR 0.7   R@3 0.653   R@5 0.717   MRR 0.594   1,103 tokens
+
+    Five points of R@3 and eleven of MRR, for no token saving at all. The
+    saving was the entire argument, and it does not exist: the response returns
+    top_k facts either way, so MMR substitutes which facts rather than
+    returning fewer. It would only pay if it let the caller ask for a smaller
+    top_k, which nothing does.
+
+    Kept rather than deleted because the reasoning is sound and the measurement
+    is about THIS store: near-duplicates here are rare, so there is little
+    redundancy to trade away and the trade only costs relevance. Splitting
+    claim from detail would shorten every embedded text and change that
+    profile, and this is worth re-measuring then. Turn it on with use_mmr=True
+    and run the eval before believing it.
 
     The ranked list is scored purely on similarity to the query, so several
     phrasings of one fact all score well and all get selected. The user pays
@@ -175,7 +195,9 @@ def adaptive_cosine_floor(conn, group_id: str) -> float:
     return max(COSINE_FLOOR, float(percentile))
 
 
-def _vector_candidates(conn, group_id: str, embedding: list[float], limit: int) -> list[str]:
+def _vector_candidates(
+    conn, group_id: str, embedding: list[float], limit: int, floor: float | None = None
+) -> list[str]:
     rows = conn.execute(
         f"""
         SELECT fe.edge_id::text, -(fe.embedding <#> %s::vector) AS score
@@ -188,7 +210,8 @@ def _vector_candidates(conn, group_id: str, embedding: list[float], limit: int) 
         """,
         (embedding, group_id, embedding, limit),
     ).fetchall()
-    floor = adaptive_cosine_floor(conn, group_id)
+    if floor is None:
+        floor = adaptive_cosine_floor(conn, group_id)
     return [edge_id for edge_id, score in rows if score >= floor]
 
 
@@ -334,6 +357,8 @@ def _provenance(raw, agent_id, project) -> dict | None:
 def query_memory(
     conn, group_id: str, query: str | None, top_k: int, embedder,
     digest: bool = False, lexical_only: bool = False,
+    *, use_mmr: bool = False, floor: float | None = None, vector_only: bool = False,
+    rrf_k: int | None = None,
 ) -> dict:
     """top_k has no default here: DEFAULT_TOP_K=10 is applied at the MCP tool
     schema layer (PR5), which is the natural place to declare it, rather
@@ -343,6 +368,19 @@ def query_memory(
     valid active facts instead of ranking against a query string: an opt-in
     "catch me up" convenience for session start, explicitly invoked, never
     auto-triggered (see the CEO plan's scope decision #2).
+
+    use_mmr, floor, vector_only and rrf_k exist so the eval harness can ablate
+    one change at a time and show which actually helped. Keyword only, and
+    defaulting to the shipping behaviour, so no caller gets a different answer
+    by accident. Nothing in the MCP surface exposes them - a knob the calling
+    agent can turn is a knob that ends up load-bearing.
+
+    What the eval said about each of them, over 219 cases on the author's
+    store, is recorded where each is implemented. In short: the ANY-term
+    lexical channel is the one clear win (MRR 0.571 vector-only to 0.605
+    hybrid), the adaptive floor is quality-neutral and cuts tokens ~5%, MMR
+    made things worse and is off, and rrf_k really is low-leverage - 0.606 to
+    0.613 across k from 5 to 100.
 
     lexical_only=True drops the vector signal and ranks on Postgres full-text
     search alone. It exists for one caller: the UserPromptSubmit hook, which
@@ -374,7 +412,7 @@ def query_memory(
         ranked_ids = lexical_ids[:top_k]
     else:
         embedding = embedder.embed(query)
-        vector_ids = _vector_candidates(conn, group_id, embedding, LIST_DEPTH)
+        vector_ids = _vector_candidates(conn, group_id, embedding, LIST_DEPTH, floor=floor)
         # ANY-term, not websearch_to_tsquery's implicit AND.
         #
         # The AND form requires every non-stopword term of the query to appear
@@ -390,12 +428,19 @@ def query_memory(
         # where the same behaviour had been found and worked around. The tool
         # path kept the version that does not work, and the pair looked
         # deliberate.
-        lexical_ids = _lexical_any_candidates(conn, group_id, query, LIST_DEPTH)
-        fused = reciprocal_rank_fusion([vector_ids, lexical_ids])
+        lexical_ids = [] if vector_only else _lexical_any_candidates(
+            conn, group_id, query, LIST_DEPTH
+        )
+        fused = reciprocal_rank_fusion(
+            [vector_ids, lexical_ids], k=rrf_k if rrf_k is not None else RRF_K
+        )
         by_score = sorted(fused, key=fused.get, reverse=True)
         # Diversify before truncating, not after: the point is to choose which
         # top_k, and slicing first throws away the candidates MMR would swap in.
-        ranked_ids = _mmr_select(conn, group_id, by_score[:LIST_DEPTH], top_k)
+        ranked_ids = (
+            _mmr_select(conn, group_id, by_score[:LIST_DEPTH], top_k)
+            if use_mmr else by_score[:top_k]
+        )
 
     facts_by_id = _fetch_facts(conn, ranked_ids)
     facts = [facts_by_id[edge_id] for edge_id in ranked_ids if edge_id in facts_by_id]
