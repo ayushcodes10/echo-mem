@@ -191,9 +191,22 @@ def _operational_error(e: psycopg.OperationalError) -> dict:
     story, which is the over-catching this exists to avoid.
 
     The agent gets something it can act on ("the database is unreachable, tell
-    the user") instead of a stack trace it can only relay."""
+    the user") instead of a stack trace it can only relay.
+
+    The recovery command is named because the raw psycopg text is not
+    actionable on its own. On 2026-09-09 a client reported "couldn't get a
+    connection after 5.00 sec" to its user, who then had to work out that the
+    Docker VM was down; the message describes a symptom and stops. Naming the
+    command costs one line and turns a report into a fix. It is also the one
+    moment an agent has the user's attention on the subject, so it is the wrong
+    place to be terse."""
     _logger.warning("database_unavailable", extra={"error_type": type(e).__name__})
-    return {"error": f"memory database unavailable: {e}"}
+    return {"error": (
+        f"memory database unavailable: {e}. Nothing is lost - the store is on disk "
+        "and unreachable, not empty. Tell the user to start it with "
+        "`docker compose up -d db` from the echo-mem checkout (and `colima start` "
+        "first if Docker itself is not running), then retry."
+    )}
 
 
 def _bootstrap_once(conn) -> None:
