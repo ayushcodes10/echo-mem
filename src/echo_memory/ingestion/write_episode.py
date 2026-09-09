@@ -9,7 +9,7 @@ import uuid
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.logging import get_logger, log_write_episode
 from echo_memory.infra.project import UNKNOWN as PROJECT_UNKNOWN
-from echo_memory.ingestion.resolution import resolve_entities
+from echo_memory.ingestion.resolution import ResolutionError, resolve_entities
 from echo_memory.retrieval.query_memory import query_memory
 
 MAX_ENTITIES = 50
@@ -144,9 +144,17 @@ def _create_edge(
             f"refusing to write a fact with no agent_id (got {agent_id!r}). "
             "Every fact records who wrote it; see server.py's _author_of."
         )
+    # Both endpoints must belong to this group. resolution.py already refuses a
+    # resolved_to from another scope, so reaching here with a foreign node means
+    # some other path produced the id - which is exactly when a second check
+    # earns its place. Matching on id alone let one account attach an edge to
+    # another account's entity, demonstrated against a real database before
+    # this landed.
     row = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
-            MATCH (a), (b) WHERE id(a) = $sid AND id(b) = $tid
+            MATCH (a), (b)
+            WHERE id(a) = $sid AND id(b) = $tid
+              AND a.group_id = $gid AND b.group_id = $gid
             CREATE (a)-[e:FACT {{
                 relation_type: $rel, fact: $fact, confidence: $confidence,
                 t_valid: $t_valid, t_invalid: null, group_id: $gid,
@@ -250,131 +258,143 @@ def write_episode(
     superseded: list[dict] = []
     onboarding_sample: dict | None = None
 
-    with conn.transaction():
-        # One writer per group, stated rather than inherited.
-        #
-        # Everything below is an unlocked read-modify-write: _find_active_edge
-        # then _create_edge then _invalidate_edge, and resolve_entities has the
-        # same shape around exact-match-or-create. Two agents writing one triple
-        # concurrently would both see no existing edge and leave two active
-        # ones - or two nodes for one entity, which IS criterion 6's duplicate
-        # bar, inflated by the very command meant to make that gate measurable.
-        #
-        # That race does not currently happen, and the reason is an accident:
-        # _increment_write_episode_count below is an upsert on group_state keyed
-        # by group_id, and being the transaction's first statement it takes a
-        # row lock held to commit. A review flagged the missing lock; a test
-        # written to prove the race passed without one, which is how the
-        # accident surfaced.
-        #
-        # It is made explicit here because nothing records that the counter is
-        # load-bearing. Move it, make it conditional, or drop the counter, and
-        # the serialisation disappears silently at exactly the moment six
-        # clients start writing. Transaction-scoped, so it releases on commit or
-        # rollback with no unlock path to forget, and free at one writer.
-        conn.execute(
-            "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"episode|{group_id}",)
+    try:
+        with conn.transaction():
+            # One writer per group, stated rather than inherited.
+            #
+            # Everything below is an unlocked read-modify-write: _find_active_edge
+            # then _create_edge then _invalidate_edge, and resolve_entities has the
+            # same shape around exact-match-or-create. Two agents writing one triple
+            # concurrently would both see no existing edge and leave two active
+            # ones - or two nodes for one entity, which IS criterion 6's duplicate
+            # bar, inflated by the very command meant to make that gate measurable.
+            #
+            # That race does not currently happen, and the reason is an accident:
+            # _increment_write_episode_count below is an upsert on group_state keyed
+            # by group_id, and being the transaction's first statement it takes a
+            # row lock held to commit. A review flagged the missing lock; a test
+            # written to prove the race passed without one, which is how the
+            # accident surfaced.
+            #
+            # It is made explicit here because nothing records that the counter is
+            # load-bearing. Move it, make it conditional, or drop the counter, and
+            # the serialisation disappears silently at exactly the moment six
+            # clients start writing. Transaction-scoped, so it releases on commit or
+            # rollback with no unlock path to forget, and free at one writer.
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"episode|{group_id}",)
+            )
+            call_count = _increment_write_episode_count(conn, group_id)
+
+            outcome = resolve_entities(conn, group_id, entities, resolutions, embedder)
+
+            entities_by_name = {e["name"]: e for e in entities}
+            name_to_node_id = dict(outcome.resolved)
+
+            # Which facts can be written now: a fact touching an ambiguous mention
+            # waits for the caller to say which candidate it meant. Computed BEFORE
+            # any node is created, because it decides which nodes are worth creating.
+            ambiguous_mentions = {a.mention for a in outcome.ambiguous}
+            ready_facts = [
+                f
+                for f in facts
+                if f["source"] not in ambiguous_mentions and f["target"] not in ambiguous_mentions
+            ]
+
+            # A new entity is created only if some fact being written now actually
+            # uses it, or if no fact mentions it at all - the caller asked for that
+            # one directly, so honour it.
+            #
+            # Creating every new entity regardless left orphans. An entity whose
+            # only facts are held back for ambiguity has nothing to connect to, and
+            # if the caller never makes the follow-up call with entity_resolutions -
+            # which nothing forces it to - the node stays unreachable forever. That
+            # is not hypothetical: writing five dugout facts on 2026-09-07 returned
+            # ambiguous_entities and edges_created: [], reported as "nothing was
+            # written", and left "ECS secret resolution at task startup" behind. The
+            # response says no edges; it never said it had made a node.
+            #
+            # Deferring costs nothing. The follow-up call carries the same entities,
+            # so anything genuinely needed is created then, alongside the fact that
+            # gives it an edge.
+            used_by_ready = {f["source"] for f in ready_facts} | {f["target"] for f in ready_facts}
+            mentioned_by_any = {f["source"] for f in facts} | {f["target"] for f in facts}
+            for name in outcome.new_entities:
+                if name not in used_by_ready and name in mentioned_by_any:
+                    continue
+                entity = entities_by_name[name]
+                name_to_node_id[name] = _create_node(
+                    conn, group_id, entity["name"], entity["type"], embedder
+                )
+
+            for event in outcome.audit_events:
+                _write_audit_entry(
+                    conn,
+                    group_id,
+                    session_id,
+                    mutation_type="entity_resolved",
+                    affected_node_id=event["node_id"],
+                    resolution_detail=event["resolution_detail"],
+                    summary=f"entity resolved: {event['resolution_detail']}",
+                )
+                if "append_alias" in event:
+                    _append_alias(conn, event["node_id"], event["append_alias"])
+
+            for fact in ready_facts:
+                source_id = name_to_node_id[fact["source"]]
+                target_id = name_to_node_id[fact["target"]]
+                existing_edge = _find_active_edge(
+                    conn, group_id, source_id, target_id, fact["relation_type"]
+                )
+
+                new_edge_id = _create_edge(
+                    conn, group_id, source_id, target_id, fact, session_id, episode_id, now,
+                    embedder, project, agent_id,
+                )
+                edges_created.append(new_edge_id)
+
+                if existing_edge is not None:
+                    old_edge_id, old_fact_text = existing_edge
+                    _invalidate_edge(conn, old_edge_id, now)
+                    superseded.append({
+                        "fact_id": old_edge_id,
+                        "replaced": old_fact_text,
+                        "with": fact["fact"],
+                    })
+                    _write_audit_entry(
+                        conn,
+                        group_id,
+                        session_id,
+                        mutation_type="fact_superseded",
+                        affected_edge_ids=[old_edge_id, new_edge_id],
+                        before_fact=old_fact_text,
+                        after_fact=fact["fact"],
+                        summary=f"invalidated {old_fact_text!r}, superseded by {fact['fact']!r}",
+                    )
+                else:
+                    _write_audit_entry(
+                        conn,
+                        group_id,
+                        session_id,
+                        mutation_type="created",
+                        affected_edge_ids=[new_edge_id],
+                        summary=f"created: {fact['fact']}",
+                    )
+
+            if call_count == ONBOARDING_NUDGE_AT_COUNT:
+                digest_result = query_memory(conn, group_id, None, 5, embedder, digest=True)
+                onboarding_sample = digest_result.get("facts")
+
+    except ResolutionError as e:
+        # Raised inside the transaction, which therefore rolls back: a bad
+        # resolved_to loses the whole episode rather than attaching some of
+        # its facts to the wrong entity, which is the failure being fixed.
+        # Comes out as the same {"error"} shape every other refusal uses.
+        log_write_episode(
+            _logger, group_id, session_id, len(entities), len(facts), 0, 0,
+            (time.perf_counter() - start) * 1000, error=str(e),
         )
-        call_count = _increment_write_episode_count(conn, group_id)
-
-        outcome = resolve_entities(conn, group_id, entities, resolutions, embedder)
-
-        entities_by_name = {e["name"]: e for e in entities}
-        name_to_node_id = dict(outcome.resolved)
-
-        # Which facts can be written now: a fact touching an ambiguous mention
-        # waits for the caller to say which candidate it meant. Computed BEFORE
-        # any node is created, because it decides which nodes are worth creating.
-        ambiguous_mentions = {a.mention for a in outcome.ambiguous}
-        ready_facts = [
-            f
-            for f in facts
-            if f["source"] not in ambiguous_mentions and f["target"] not in ambiguous_mentions
-        ]
-
-        # A new entity is created only if some fact being written now actually
-        # uses it, or if no fact mentions it at all - the caller asked for that
-        # one directly, so honour it.
-        #
-        # Creating every new entity regardless left orphans. An entity whose
-        # only facts are held back for ambiguity has nothing to connect to, and
-        # if the caller never makes the follow-up call with entity_resolutions -
-        # which nothing forces it to - the node stays unreachable forever. That
-        # is not hypothetical: writing five dugout facts on 2026-09-07 returned
-        # ambiguous_entities and edges_created: [], reported as "nothing was
-        # written", and left "ECS secret resolution at task startup" behind. The
-        # response says no edges; it never said it had made a node.
-        #
-        # Deferring costs nothing. The follow-up call carries the same entities,
-        # so anything genuinely needed is created then, alongside the fact that
-        # gives it an edge.
-        used_by_ready = {f["source"] for f in ready_facts} | {f["target"] for f in ready_facts}
-        mentioned_by_any = {f["source"] for f in facts} | {f["target"] for f in facts}
-        for name in outcome.new_entities:
-            if name not in used_by_ready and name in mentioned_by_any:
-                continue
-            entity = entities_by_name[name]
-            name_to_node_id[name] = _create_node(
-                conn, group_id, entity["name"], entity["type"], embedder
-            )
-
-        for event in outcome.audit_events:
-            _write_audit_entry(
-                conn,
-                group_id,
-                session_id,
-                mutation_type="entity_resolved",
-                affected_node_id=event["node_id"],
-                resolution_detail=event["resolution_detail"],
-                summary=f"entity resolved: {event['resolution_detail']}",
-            )
-            if "append_alias" in event:
-                _append_alias(conn, event["node_id"], event["append_alias"])
-
-        for fact in ready_facts:
-            source_id = name_to_node_id[fact["source"]]
-            target_id = name_to_node_id[fact["target"]]
-            existing_edge = _find_active_edge(
-                conn, group_id, source_id, target_id, fact["relation_type"]
-            )
-
-            new_edge_id = _create_edge(
-                conn, group_id, source_id, target_id, fact, session_id, episode_id, now,
-                embedder, project, agent_id,
-            )
-            edges_created.append(new_edge_id)
-
-            if existing_edge is not None:
-                old_edge_id, old_fact_text = existing_edge
-                _invalidate_edge(conn, old_edge_id, now)
-                superseded.append({
-                    "fact_id": old_edge_id,
-                    "replaced": old_fact_text,
-                    "with": fact["fact"],
-                })
-                _write_audit_entry(
-                    conn,
-                    group_id,
-                    session_id,
-                    mutation_type="fact_superseded",
-                    affected_edge_ids=[old_edge_id, new_edge_id],
-                    before_fact=old_fact_text,
-                    after_fact=fact["fact"],
-                    summary=f"invalidated {old_fact_text!r}, superseded by {fact['fact']!r}",
-                )
-            else:
-                _write_audit_entry(
-                    conn,
-                    group_id,
-                    session_id,
-                    mutation_type="created",
-                    affected_edge_ids=[new_edge_id],
-                    summary=f"created: {fact['fact']}",
-                )
-
-        if call_count == ONBOARDING_NUDGE_AT_COUNT:
-            digest_result = query_memory(conn, group_id, None, 5, embedder, digest=True)
-            onboarding_sample = digest_result.get("facts")
+        return {"error": str(e)}
 
     log_write_episode(
         _logger, group_id, session_id, len(entities), len(facts),
