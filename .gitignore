@@ -51,3 +51,19 @@ postgres-data/
 # SKILL.md that ships inside the package; a zip in git is a binary nobody can
 # diff and goes stale the first time the instructions change.
 echo-memory-skill.zip
+
+# Runtime state written by agent tooling that runs inside this repo
+# (claude-flow / ruflo). Local scratch: session state, a vector store and two
+# SQLite databases, about 3MB of binaries that no one can diff and that say
+# nothing about the project.
+#
+# Ignored rather than left untracked because `git add -A` is a normal thing to
+# type. These appeared mid-session on 2026-09-09 and would have been swept into
+# the next commit; they were checked for credentials and client data first and
+# were clean, which is luck rather than a property of the arrangement.
+#
+# .claude/ is deliberately NOT here: skills and settings in it are worth
+# sharing, and the day that changes it should be an explicit decision.
+.claude-flow/
+.swarm/
+ruvector.db
