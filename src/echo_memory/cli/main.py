@@ -13,7 +13,16 @@ from datetime import date
 from pathlib import Path
 
 from echo_memory.audit.get_audit_log import get_fact_history
-from echo_memory.cli import adopt, calibrate, health, initdb, reattribute_cmd, stop_gate, unmerge
+from echo_memory.cli import (
+    adopt,
+    calibrate,
+    health,
+    initdb,
+    merge,
+    reattribute_cmd,
+    stop_gate,
+    unmerge,
+)
 from echo_memory.cli import analyse as analyse_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import hooks as hooks_cmd
@@ -120,6 +129,16 @@ def _add_project_parsers(sub) -> None:
         help="also draw N random pairs from BELOW the review bar, the only way to "
              "learn what the bar is missing",
     )
+
+    mg = sub.add_parser(
+        "merge", help="fold one node into another, once confirmed to be one entity"
+    )
+    mg.add_argument("--into", metavar="ID", required=True, help="the node that survives")
+    mg.add_argument(
+        "--from", metavar="ID", required=True, dest="from",
+        help="the node folded in and deleted",
+    )
+    mg.add_argument("--session-id", metavar="ID", help="session to record in the audit log")
 
     un = sub.add_parser(
         "unmerge",
@@ -406,6 +425,7 @@ _PROJECT_COMMANDS = {
     "reattribute": reattribute_cmd.run,
     "unmerge": unmerge.run,
     "calibrate": calibrate.run,
+    "merge": merge.run,
     "notice": queue_cmd.run_notice,
     "pending": queue_cmd.run_pending,
 }
