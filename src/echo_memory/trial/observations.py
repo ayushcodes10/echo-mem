@@ -9,6 +9,7 @@ docs/designs/echo-memory-design.md's Success Criteria, criterion 6."""
 from datetime import date
 
 from echo_memory.infra.project import UNKNOWN as UNATTRIBUTED
+from echo_memory.ingestion.resolution import _node_in_group
 from echo_memory.ingestion.write_episode import MAX_STRING_LEN
 
 RECALL_SAVE = "recall_save"
@@ -103,6 +104,27 @@ def record(
             "instance only when a fact written by one tool saved re-explaining to another"
         )
 
+    if node_ids:
+        # Both nodes have to be in the scope the verdict is being filed under.
+        # A pair judgement is a claim about two entities in one graph, and the
+        # scanner that proposes pairs already refuses to cross a group
+        # boundary - but nothing checked an id typed by hand, which is how the
+        # trial's single recorded duplicate came to be two nodes in DIFFERENT
+        # scopes. 'Ayush' in solo and 'Ayush' in shared is correct scoping, not
+        # one entity split in two, and it sat in the tallies as the only
+        # duplicate this store has ever confirmed.
+        #
+        # Third instance of the same bug class this week: a caller-supplied
+        # node id taken on trust. The first two corrupted the graph; this one
+        # corrupted the measurement of the graph.
+        outsiders = [n for n in node_ids if not _node_in_group(conn, group_id, n)]
+        if outsiders:
+            raise TrialError(
+                f"node(s) {', '.join(map(str, outsiders))} are not in {group_id}. A pair "
+                "judgement is about two entities in one scope; the same name in solo and "
+                "shared is correct scoping, not a duplicate."
+            )
+
     if kind == RECALL_SAVE:
         row = conn.execute(
             """INSERT INTO public.trial_observation
@@ -177,7 +199,7 @@ def counts(conn, group_ids: list[str]) -> dict:
                   ) AS unattributed,
                   count(*) AS total
            FROM public.trial_observation
-           WHERE group_id = ANY(%s)
+           WHERE group_id = ANY(%s) AND retracted_at IS NULL
            GROUP BY kind""",
         (UNATTRIBUTED, UNATTRIBUTED, UNATTRIBUTED, UNATTRIBUTED, group_ids),
     ).fetchall()
@@ -186,8 +208,15 @@ def counts(conn, group_ids: list[str]) -> dict:
         for kind, cross_tool, unattributed, total in rows
     }
 
+    (retracted,) = conn.execute(
+        """SELECT count(*) FROM public.trial_observation
+            WHERE group_id = ANY(%s) AND retracted_at IS NOT NULL""",
+        (group_ids,),
+    ).fetchone()
+
     saves = by_kind.get(RECALL_SAVE, {"cross_tool": 0, "unattributed": 0, "total": 0})
     return {
+        "retracted": retracted,
         "cross_tool_saves": saves["cross_tool"],
         "unattributed_saves": saves["unattributed"],
         "same_tool_saves": saves["total"] - saves["cross_tool"] - saves["unattributed"],
@@ -196,3 +225,42 @@ def counts(conn, group_ids: list[str]) -> dict:
         "dismissed_pairs": by_kind.get(NOT_DUPLICATE, {}).get("total", 0),
         "merges_ok": by_kind.get(MERGE_OK, {}).get("total", 0),
     }
+
+
+def retract(conn, observation_id: int, reason: str) -> dict:
+    """Stop an observation counting, without pretending it was never made.
+
+    Deleting the row edits the record of a trial and leaves nobody able to see
+    that a mistake happened. Leaving it leaves the exit gate reading a tally
+    that is wrong. Retraction is the third option: the row stays, the reason
+    stays with it, and the counts skip it.
+
+    The reason is required by a database constraint as well as by this
+    function, because a retraction with no reason is a deletion wearing a
+    different name.
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        raise TrialError(
+            "a retraction needs a reason: the point is that the record still "
+            "shows what was judged and why it stopped counting"
+        )
+    if len(reason) > MAX_NOTE_LEN:
+        raise TrialError(f"reason too long: {len(reason)} > {MAX_NOTE_LEN} characters")
+
+    row = conn.execute(
+        """UPDATE public.trial_observation
+              SET retracted_at = now(), retracted_reason = %s
+            WHERE id = %s AND retracted_at IS NULL
+        RETURNING id, kind::text""",
+        (reason, observation_id),
+    ).fetchone()
+    if row is None:
+        existing = conn.execute(
+            "SELECT retracted_at FROM public.trial_observation WHERE id = %s",
+            (observation_id,),
+        ).fetchone()
+        if existing is None:
+            raise TrialError(f"no observation {observation_id}")
+        raise TrialError(f"observation {observation_id} was already retracted")
+    return {"id": row[0], "kind": row[1]}

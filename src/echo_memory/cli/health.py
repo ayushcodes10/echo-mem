@@ -91,6 +91,33 @@ def _writers(conn, group_ids: list[str]) -> dict[str, int]:
     return counts
 
 
+def stale_writer(conn, group_ids: list[str]) -> str | None:
+    """The version that last wrote here, if it is not the version asking.
+
+    An MCP stdio server holds the code it imported at spawn: upgrading the
+    package, editable install or not, does not change what that process runs.
+    Nothing anywhere says so, and this store has paid for it twice - 30 facts
+    with no author over sixteen days, and 7 with no project. Both times the code
+    on disk was correct and the tests passed.
+
+    Comparing the newest audit entry's writer against this process's own version
+    is the only way to see it from outside. Older rows carry no version at all
+    and are skipped rather than guessed at: this must not answer confidently
+    about the period it cannot see.
+    """
+    from echo_memory import __version__
+
+    row = conn.execute(
+        """SELECT writer_version FROM public.audit_entry
+            WHERE group_id = ANY(%s) AND writer_version IS NOT NULL
+            ORDER BY "timestamp" DESC LIMIT 1""",
+        (group_ids,),
+    ).fetchone()
+    if row is None or row[0] == __version__:
+        return None
+    return str(row[0])
+
+
 def _connectivity(graph: dict) -> dict:
     """How connected the graph actually is, reported by median rather than mean.
 
@@ -171,6 +198,7 @@ def collect(conn, config, today: datetime | None = None) -> dict:
         "duplicates": report["counts"]["duplicates"],
         "bad_merges": report["counts"]["bad_merges"],
         "reads": read_stats,
+        "stale_writer": stale_writer(conn, group_ids),
     }
 
 
@@ -224,6 +252,24 @@ def findings(h: dict) -> tuple[list[str], list[str], list[str]]:
     # median node had one edge.
     if h["clusters"] > 1 and h.get("leaf_share", 1.0) < 0.5:
         strong.append(f"{h['clusters']} distinct clusters, so structure is forming")
+
+    # First, because it explains other findings rather than adding to them: a
+    # stale writer is why a store has facts with no author or no project, and
+    # every other line here is describing its output.
+    if h.get("stale_writer"):
+        from echo_memory import __version__
+
+        attention.append(
+            f"the last write came from version {h['stale_writer']}, but "
+            f"{__version__} is installed"
+        )
+        rec.append(
+            "An MCP stdio server holds the code it imported when the client "
+            "started it, so upgrading the package - editable install or not - "
+            "changes nothing until the client is restarted. That gap has cost "
+            "this project 30 facts with no author and 7 with no project. "
+            "Restart the client that owns the server."
+        )
 
     quiet = h["days_since_write"]
     if not h["facts"]:

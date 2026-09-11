@@ -49,9 +49,18 @@ def _names_for(conn, node_ids: list[str]) -> dict[str, str]:
         $$, %s) AS (node_id agtype, name agtype, type agtype)""",
         (json.dumps({"ids": [int(nid) for nid in node_ids]}),),
     ).fetchall()
-    return {
-        str(node_id): f"{_unquote(name)} ({_unquote(type_)})" for node_id, name, type_ in rows
-    }
+    # Name and type kept apart. The display form carries the type because a
+    # reader needs it to judge a pair, and _exact_match does not look at type
+    # at all - so a certainty test has to compare what the resolver compares,
+    # which is the bare name.
+    return {str(node_id): (_unquote(name), _unquote(type_)) for node_id, name, type_ in rows}
+
+
+def _display(name_and_type: tuple[str, str] | None) -> str:
+    if name_and_type is None:
+        return "?"
+    name, type_ = name_and_type
+    return f"{name} ({type_})"
 
 
 def _projects_by_node(conn, group_id: str) -> dict[str, set[str]]:
@@ -135,11 +144,23 @@ def duplicate_candidates(
     candidates = []
     for pair, score in open_pairs.items():
         shared = projects.get(pair[0], set()) & projects.get(pair[1], set())
+        a, b = names.get(pair[0]), names.get(pair[1])
         candidates.append(
             {
                 "node_ids": list(pair),
-                "names": [names.get(pair[0], "?"), names.get(pair[1], "?")],
+                "names": [_display(a), _display(b)],
                 "similarity": score,
+                # The one duplicate signal this store's own calibration
+                # supports. Two nodes with the same name in one scope are the
+                # same entity by the resolver's own definition - _exact_match
+                # would have returned one for a mention of the other - so this
+                # is not a similarity judgement at all. Everything else sits in
+                # [0.477, 0.927] where confirmed-same and confirmed-distinct
+                # pairs overlap and the AUC interval includes chance; mixing
+                # the two into one ranked list buries the certainty in a
+                # hundred coin flips, which is how a live duplicate written
+                # this morning sat unnoticed at the top of the queue.
+                "certain": bool(a and b and a[0].lower() == b[0].lower()),
                 "same_project": bool(shared),
                 "projects": sorted(
                     projects.get(pair[0], set()) | projects.get(pair[1], set())
@@ -148,8 +169,11 @@ def duplicate_candidates(
         )
     if not all_projects:
         candidates = [c for c in candidates if c["same_project"]]
-    # Same-project first, then most similar within each group.
-    return sorted(candidates, key=lambda c: (not c["same_project"], -c["similarity"]))
+    # Certain first, then same-project, then most similar within each group.
+    return sorted(
+        candidates,
+        key=lambda c: (not c["certain"], not c["same_project"], -c["similarity"]),
+    )
 
 
 def unreviewed_resolutions(conn, group_id: str, include_exact: bool = False) -> list[dict]:
@@ -175,7 +199,7 @@ def unreviewed_resolutions(conn, group_id: str, include_exact: bool = False) -> 
             "audit_entry_id": r[0],
             "timestamp": r[1],
             "node_id": r[2],
-            "node_name": names.get(r[2], "?"),
+            "node_name": _display(names.get(r[2])),
             "resolution_detail": r[3],
             "summary": r[4],
             "session_id": r[5],

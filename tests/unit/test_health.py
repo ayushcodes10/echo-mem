@@ -169,3 +169,27 @@ def test_a_store_with_no_reads_says_so_rather_than_dividing_by_zero():
     }))
 
     assert "no reads recorded in 7d" in text
+
+
+# --- the writer that is not the code on disk ----------------------------------
+
+
+def test_a_stale_writer_is_named_first_and_explained():
+    """An MCP stdio server holds the code it imported at spawn, so upgrading the
+    package changes nothing until the client restarts. That gap cost this store
+    30 facts with no author and 7 with no project, and nothing anywhere said so.
+
+    First in the list because it explains other findings rather than adding to
+    them: every other line is describing the stale writer's output."""
+    _, attention, rec = health.findings(h(stale_writer="0.1.0"))
+
+    assert attention[0].startswith("the last write came from version 0.1.0")
+    assert any("Restart the client" in r for r in rec)
+
+
+def test_a_current_writer_says_nothing():
+    """The steady state is silence. A version line on every run is noise that
+    teaches people to skip the section it lives in."""
+    attention = health.findings(h(stale_writer=None))[1]
+
+    assert not any("version" in a for a in attention)

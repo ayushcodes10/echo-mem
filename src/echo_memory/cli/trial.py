@@ -32,6 +32,13 @@ def render_start(result: dict) -> str:
     return f"Trial started on {result['started_on']}, {result['cap_days']}-day cap."
 
 
+def render_retracted(result: dict, reason: str) -> str:
+    return (
+        f"Retracted {_KIND_LABELS.get(result['kind'], result['kind'])} "
+        f"#{result['id']}. It stays in the record and stops counting: {reason}"
+    )
+
+
 def render_recorded(kind: str, observation_id: int, note: str) -> str:
     return f"Recorded {_KIND_LABELS[kind]} #{observation_id}: {note}"
 
@@ -89,6 +96,14 @@ def render_criterion_six(report: dict, indent: str = "  ", show_hint: bool = Tru
         f"{indent}[{'x' if met['bad_merges'] else ' '}] {counts['bad_merges']} "
         f"confirmed bad merges (must be {observations.MAX_BAD_MERGES})"
     )
+    if counts.get("retracted"):
+        # Shown rather than silently netted out. A retracted judgement is still
+        # part of what happened in the trial, and a tally that quietly shrank
+        # is indistinguishable from one that was edited.
+        lines.append(
+            f"{indent}    {counts['retracted']} observation(s) retracted and not "
+            "counted (`echo-memory trial log` shows them with the reason)"
+        )
 
     if report["n_open_pairs"] or report["n_unreviewed"]:
         waiting = []
@@ -121,8 +136,27 @@ def render_check(report: dict) -> str:
         any_open = True
         lines.append(f"{scope}:")
 
+        certain = [p for p in pairs if p.get("certain")]
+        if certain:
+            lines.append(
+                "  Same name, same scope - these ARE one entity by the resolver's own "
+                "rule, not a similarity guess:"
+            )
+            for pair in certain:
+                a_id, b_id = pair["node_ids"]
+                lines.append(f"    {pair['names'][0]}  ==  {pair['names'][1]}")
+                lines.append(
+                    f"      merge:  echo-memory --scope {scope} trial dup "
+                    f'{a_id} {b_id} "<why>"'
+                )
+            lines.append("")
+
+        pairs = [p for p in pairs if not p.get("certain")]
         if pairs:
-            lines.append("  Similar nodes that stayed separate - one entity split in two?")
+            lines.append(
+                "  Similar nodes that stayed separate - one entity split in two? "
+                "(3% of these have been, `echo-memory calibrate`)"
+            )
             for pair in pairs:
                 a_id, b_id = pair["node_ids"]
                 a_name, b_name = pair["names"]
@@ -207,6 +241,15 @@ def run(args, config, conn) -> int:
             conn, config, include_exact=args.include_exact, all_projects=args.all_projects
         )
         print(render_check(report), end="")
+        return 0
+
+    if args.trial_command == "retract":
+        try:
+            result = observations.retract(conn, args.observation_id, args.reason)
+        except observations.TrialError as e:
+            print(f"error: {e}")
+            return 1
+        print(render_retracted(result, args.reason.strip()))
         return 0
 
     if args.trial_command == "log":
