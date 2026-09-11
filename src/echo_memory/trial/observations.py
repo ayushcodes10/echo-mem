@@ -9,6 +9,7 @@ docs/designs/echo-memory-design.md's Success Criteria, criterion 6."""
 from datetime import date
 
 from echo_memory.infra.project import UNKNOWN as UNATTRIBUTED
+from echo_memory.ingestion.resolution import _node_in_group
 from echo_memory.ingestion.write_episode import MAX_STRING_LEN
 
 RECALL_SAVE = "recall_save"
@@ -102,6 +103,27 @@ def record(
             "a recall save needs both written_by and recalled_by: criterion 6 counts an "
             "instance only when a fact written by one tool saved re-explaining to another"
         )
+
+    if node_ids:
+        # Both nodes have to be in the scope the verdict is being filed under.
+        # A pair judgement is a claim about two entities in one graph, and the
+        # scanner that proposes pairs already refuses to cross a group
+        # boundary - but nothing checked an id typed by hand, which is how the
+        # trial's single recorded duplicate came to be two nodes in DIFFERENT
+        # scopes. 'Ayush' in solo and 'Ayush' in shared is correct scoping, not
+        # one entity split in two, and it sat in the tallies as the only
+        # duplicate this store has ever confirmed.
+        #
+        # Third instance of the same bug class this week: a caller-supplied
+        # node id taken on trust. The first two corrupted the graph; this one
+        # corrupted the measurement of the graph.
+        outsiders = [n for n in node_ids if not _node_in_group(conn, group_id, n)]
+        if outsiders:
+            raise TrialError(
+                f"node(s) {', '.join(map(str, outsiders))} are not in {group_id}. A pair "
+                "judgement is about two entities in one scope; the same name in solo and "
+                "shared is correct scoping, not a duplicate."
+            )
 
     if kind == RECALL_SAVE:
         row = conn.execute(

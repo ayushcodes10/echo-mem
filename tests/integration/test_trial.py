@@ -139,6 +139,39 @@ def test_unattributed_facts_elsewhere_do_not_invalidate_a_real_save(migrated_db)
     assert report["met"]["saves"], "three evidenced saves were refused by unrelated facts"
 
 
+def test_a_pair_judgement_cannot_span_two_scopes(migrated_db):
+    """The trial's single recorded duplicate turned out to be 'Ayush' in solo
+    and 'Ayush' in shared - correct scoping, not one entity split in two, sat
+    in the tallies as the only duplicate this store ever confirmed. The pair
+    scanner never crosses a group boundary; an id typed by hand did."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+
+    mine = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH (n:Node {{group_id: $gid}}) RETURN id(n) LIMIT 2
+        $$, %s) AS (i agtype)""",
+        (json.dumps({"gid": config.group_id("shared")}),),
+    ).fetchall()
+    assert len(mine) == 2, "the fixture did not produce two nodes in shared"
+
+    # Filing a shared-scope pair under the solo scope: both ids are real nodes
+    # the same person owns, and neither belongs to the scope being judged.
+    with pytest.raises(observations.TrialError) as e:
+        observations.record(
+            conn, config.group_id("solo"), observations.DUPLICATE_NODE,
+            "same name in two scopes",
+            node_ids=[str(mine[0][0]), str(mine[1][0])],
+        )
+    assert "not in" in str(e.value)
+
+    # The same call with both nodes inside the scope is still fine.
+    assert observations.record(
+        conn, config.group_id("shared"), observations.NOT_DUPLICATE, "reviewed",
+        node_ids=[str(mine[0][0]), str(mine[1][0])],
+    )["id"]
+
+
 def test_an_observation_needs_a_note(migrated_db):
     conn = connect(migrated_db)
     with pytest.raises(observations.TrialError):
