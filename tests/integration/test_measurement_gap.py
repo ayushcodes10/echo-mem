@@ -8,12 +8,15 @@ to a terminal and type a CLI command. `write_episode` fires dozens of times a
 day precisely because an agent can call it inline. See the CEO plan
 2026-08-23-close-the-measurement-gap.md."""
 
+import json
+
 import pytest
 from fake_embedder import REFERENCE, VectorEmbedder, unit_vector_at_angle
 
 from echo_memory import server
 from echo_memory.cli.main import main
 from echo_memory.infra.config import Config
+from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.db import connect
 from echo_memory.trial import check, observations
 
@@ -198,11 +201,25 @@ def test_other_observation_kinds_still_raise_on_conflict(migrated_db):
     import psycopg
 
     conn = connect(migrated_db)
-    pair = observations.sort_pair(["10", "20"])
-    observations.record(conn, "g", observations.NOT_DUPLICATE, "distinct", node_ids=pair)
+    # Real nodes in the group being judged. The ids used to be invented, which
+    # worked only because nothing checked them - the same gap that let the
+    # trial's one recorded duplicate be a pair from two different scopes.
+    group = "g"
+    ids = [
+        str(value)
+        for value in conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH}', $$
+                CREATE (a:Node {{name: 'one', group_id: $gid}}),
+                       (b:Node {{name: 'two', group_id: $gid}})
+                RETURN id(a), id(b) $$, %s) AS (a agtype, b agtype)""",
+            (json.dumps({"gid": group}),),
+        ).fetchone()
+    ]
+    pair = observations.sort_pair(ids)
+    observations.record(conn, group, observations.NOT_DUPLICATE, "distinct", node_ids=pair)
 
     with pytest.raises(psycopg.errors.UniqueViolation):
-        observations.record(conn, "g", observations.DUPLICATE_NODE, "same", node_ids=pair)
+        observations.record(conn, group, observations.DUPLICATE_NODE, "same", node_ids=pair)
 
 
 def test_record_reports_whether_it_created_anything(migrated_db):
