@@ -139,6 +139,55 @@ def test_unattributed_facts_elsewhere_do_not_invalidate_a_real_save(migrated_db)
     assert report["met"]["saves"], "three evidenced saves were refused by unrelated facts"
 
 
+def test_an_identical_name_is_flagged_as_certain_not_ranked_among_guesses(migrated_db):
+    """Two nodes with one name in one scope are the same entity by the
+    resolver's own rule - _exact_match would return one for a mention of the
+    other - so it is not a similarity judgement at all. Everything else in the
+    queue sits in [0.477, 0.927] where confirmed-same and confirmed-distinct
+    pairs overlap, and mixing the two buries the certainty: a duplicate written
+    this morning sat at the top of a hundred coin flips and nobody saw it.
+
+    Built by renaming a second node onto the first's name, which is the state
+    the resolver's `resolved_to="new"` path used to produce directly.
+    """
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    group_id = config.group_id("shared")
+
+    original, twin = (
+        str(r[0])
+        for r in conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH}', $$
+                MATCH (n:Node {{group_id: $gid}})
+                WHERE n.name IN ['AGE', 'Apache AGE'] RETURN id(n) $$, %s)
+                AS (i agtype)""",
+            (json.dumps({"gid": group_id}),),
+        ).fetchall()
+    )
+    conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH (n:Node) WHERE id(n) = $nid SET n.name = 'AGE' RETURN id(n)
+        $$, %s) AS (i agtype)""",
+        (json.dumps({"nid": int(twin)}),),
+    ).fetchall()
+    # The rename does not move the stored vector, so give it the one two
+    # identical names would actually produce.
+    conn.execute(
+        """UPDATE public.node_embedding SET embedding = (
+               SELECT embedding FROM public.node_embedding WHERE node_id::text = %s)
+            WHERE node_id::text = %s""",
+        (original, twin),
+    )
+
+    found = check.duplicate_candidates(conn, group_id)
+    certain = [c for c in found if c["certain"]]
+
+    assert len(certain) == 1, f"identical names not flagged: {[c['names'] for c in found]}"
+    assert certain[0]["names"] == ["AGE (tool)", "AGE (tool)"]
+    # And it leads, rather than sitting wherever cosine happened to put it.
+    assert found[0]["certain"] is True
+
+
 def test_a_pair_judgement_cannot_span_two_scopes(migrated_db):
     """The trial's single recorded duplicate turned out to be 'Ayush' in solo
     and 'Ayush' in shared - correct scoping, not one entity split in two, sat

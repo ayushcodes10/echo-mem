@@ -121,8 +121,27 @@ def render_check(report: dict) -> str:
         any_open = True
         lines.append(f"{scope}:")
 
+        certain = [p for p in pairs if p.get("certain")]
+        if certain:
+            lines.append(
+                "  Same name, same scope - these ARE one entity by the resolver's own "
+                "rule, not a similarity guess:"
+            )
+            for pair in certain:
+                a_id, b_id = pair["node_ids"]
+                lines.append(f"    {pair['names'][0]}  ==  {pair['names'][1]}")
+                lines.append(
+                    f"      merge:  echo-memory --scope {scope} trial dup "
+                    f'{a_id} {b_id} "<why>"'
+                )
+            lines.append("")
+
+        pairs = [p for p in pairs if not p.get("certain")]
         if pairs:
-            lines.append("  Similar nodes that stayed separate - one entity split in two?")
+            lines.append(
+                "  Similar nodes that stayed separate - one entity split in two? "
+                "(3% of these have been, `echo-memory calibrate`)"
+            )
             for pair in pairs:
                 a_id, b_id = pair["node_ids"]
                 a_name, b_name = pair["names"]
