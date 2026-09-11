@@ -173,6 +173,18 @@ def _create_edge(
             f"refusing to write a fact with no agent_id (got {agent_id!r}). "
             "Every fact records who wrote it; see server.py's _author_of."
         )
+    # Same null-drop, one property over, and it went unnoticed because the
+    # consequence is quieter than a missing author. Seven facts in this store
+    # carry no project key at all - six of them written the day this was found.
+    # A fact with no project gives its nodes no project, and duplicate_candidates
+    # drops any pair with no project in common, so the entity becomes invisible
+    # to the review queue built to catch exactly this kind of thing.
+    #
+    # Coerced rather than refused: 'unknown' is what migration 0003 backfilled
+    # and what the project filter already understands, so the honest
+    # representation of "nobody said" exists. Absent is not that value - it is
+    # the absence of any value, which nothing downstream can filter on.
+    project = project or PROJECT_UNKNOWN
     # Both endpoints must belong to this group. resolution.py already refuses a
     # resolved_to from another scope, so reaching here with a foreign node means
     # some other path produced the id - which is exactly when a second check
@@ -348,10 +360,23 @@ def write_episode(
             # Deferring costs nothing. The follow-up call carries the same entities,
             # so anything genuinely needed is created then, alongside the fact that
             # gives it an edge.
+            # An entity no ready fact uses gets no node, whatever the reason.
+            #
+            # Deferring the ambiguous case was the original fix and it left the
+            # other half open: an entity listed in `entities` that NO fact
+            # mentions at all was still created, because `mentioned_by_any`
+            # only excused the ones a held-back fact referenced. A caller that
+            # names four entities and writes facts about three gets a fourth
+            # node with no edges - unreachable by query_memory, which searches
+            # facts, and counted forever after in every pair the duplicate
+            # scanner has to consider. Two such nodes are in this store, and
+            # one of them was made by this very session.
+            #
+            # There is no follow-up call that rescues it either: nothing
+            # references it, so nothing will ever give it an edge.
             used_by_ready = {f["source"] for f in ready_facts} | {f["target"] for f in ready_facts}
-            mentioned_by_any = {f["source"] for f in facts} | {f["target"] for f in facts}
             for name in outcome.new_entities:
-                if name not in used_by_ready and name in mentioned_by_any:
+                if name not in used_by_ready:
                     continue
                 entity = entities_by_name[name]
                 name_to_node_id[name] = _create_node(
