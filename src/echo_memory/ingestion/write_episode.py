@@ -406,23 +406,28 @@ def write_episode(
             # Deferring costs nothing. The follow-up call carries the same entities,
             # so anything genuinely needed is created then, alongside the fact that
             # gives it an edge.
-            # An entity no ready fact uses gets no node, whatever the reason.
+            # Within an episode that asserts facts, an entity no fact mentions
+            # is noise and gets no node.
             #
             # Deferring the ambiguous case was the original fix and it left the
             # other half open: an entity listed in `entities` that NO fact
-            # mentions at all was still created, because `mentioned_by_any`
-            # only excused the ones a held-back fact referenced. A caller that
-            # names four entities and writes facts about three gets a fourth
-            # node with no edges - unreachable by query_memory, which searches
-            # facts, and counted forever after in every pair the duplicate
-            # scanner has to consider. Two such nodes are in this store, and
-            # one of them was made by this very session.
+            # mentions was still created, because the excuse only covered ones a
+            # held-back fact referenced. A caller that names four entities and
+            # writes facts about three got a fourth node with no edges -
+            # unreachable by query_memory, which searches facts, and present in
+            # every pair the duplicate scanner considers from then on. Two such
+            # nodes were in this store and one was made by the session that
+            # found them. Nothing rescues them later either, because nothing
+            # references them.
             #
-            # There is no follow-up call that rescues it either: nothing
-            # references it, so nothing will ever give it an edge.
+            # An episode with NO facts at all is a different act and is honoured:
+            # the call's whole content is "these entities exist", and a later
+            # fact mentioning one of those names resolves onto it. Refusing that
+            # would make the call a silent no-op.
             used_by_ready = {f["source"] for f in ready_facts} | {f["target"] for f in ready_facts}
+            registration_only = not facts
             for name in outcome.new_entities:
-                if name not in used_by_ready:
+                if not registration_only and name not in used_by_ready:
                     continue
                 entity = entities_by_name[name]
                 name_to_node_id[name] = _create_or_find_node(

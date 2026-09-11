@@ -172,6 +172,12 @@ def test_an_identical_name_is_flagged_as_certain_not_ranked_among_guesses(migrat
             (json.dumps({"gid": group_id}),),
         ).fetchall()
     )
+    # Migration 0016 makes this state impossible to create, which is the point
+    # of it - but a store upgrading from before that migration can already hold
+    # one, and 0016 refuses to run until every collision has been merged. This
+    # listing is how those are found, so the index comes off to build the state
+    # it exists to describe. The fixture rebuilds the schema regardless.
+    conn.execute(f'DROP INDEX {GRAPH}.node_name_per_group_idx')
     conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             MATCH (n:Node) WHERE id(n) = $nid SET n.name = 'AGE' RETURN id(n)
