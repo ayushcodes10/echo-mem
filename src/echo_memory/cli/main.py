@@ -13,7 +13,7 @@ from datetime import date
 from pathlib import Path
 
 from echo_memory.audit.get_audit_log import get_fact_history
-from echo_memory.cli import adopt, health, initdb, reattribute_cmd, stop_gate, unmerge
+from echo_memory.cli import adopt, calibrate, health, initdb, reattribute_cmd, stop_gate, unmerge
 from echo_memory.cli import analyse as analyse_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import hooks as hooks_cmd
@@ -109,6 +109,16 @@ def _add_project_parsers(sub) -> None:
             "whose session evidences one. Never guesses - a session with no "
             "attributed fact, or two, is reported as unrecoverable"
         ),
+    )
+
+    cal = sub.add_parser(
+        "calibrate",
+        help="what this store's own judgements say about the resolution thresholds",
+    )
+    cal.add_argument(
+        "--sample-below", type=int, metavar="N",
+        help="also draw N random pairs from BELOW the review bar, the only way to "
+             "learn what the bar is missing",
     )
 
     un = sub.add_parser(
@@ -395,6 +405,7 @@ _PROJECT_COMMANDS = {
     "dashboard": dashboard_cmd.run,
     "reattribute": reattribute_cmd.run,
     "unmerge": unmerge.run,
+    "calibrate": calibrate.run,
     "notice": queue_cmd.run_notice,
     "pending": queue_cmd.run_pending,
 }

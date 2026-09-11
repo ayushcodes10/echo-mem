@@ -28,8 +28,21 @@ from echo_memory.infra.db import GRAPH_NAME as GRAPH
 # MATHS.local.md §5. LOW_THRESHOLD lowered so real near-misses like the AGE
 # case get surfaced as ambiguous instead of silently missed; HIGH_THRESHOLD
 # left as-is since no measured true-duplicate reached it, so it already
-# behaves conservatively for this kind of short-identifier text. Still
-# placeholders pending real calibration against the v1a trial's data.
+# behaves conservatively for this kind of short-identifier text.
+#
+# Calibrated against the v1a trial's data on 2026-09-11, which is what these
+# were waiting for, and the answer was not a new number. 5 confirmed-same pairs
+# against 155 confirmed-distinct ones give AUC 0.766 with a 95% interval of
+# [0.437, 0.968]: the interval includes chance, and the two classes overlap on
+# [0.477, 0.927], which is the whole usable range. Name similarity alone is not
+# demonstrably a duplicate detector on this corpus, so moving either number on
+# five positives would be fitting noise. Re-run it with `echo-memory calibrate`
+# as the labelled set grows; the honest bar for retuning is enough positives
+# that the interval clears 0.5.
+#
+# One threshold decision the data does support is at the silent-merge boundary,
+# and it is handled by _differing_numeric_tokens rather than by moving
+# HIGH_THRESHOLD - see that function.
 LOW_THRESHOLD = 0.45
 HIGH_THRESHOLD = 0.92
 
