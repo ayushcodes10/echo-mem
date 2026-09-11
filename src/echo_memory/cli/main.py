@@ -403,6 +403,13 @@ def _add_trial_parser(sub) -> None:
     merge_ok.add_argument("audit_entry_id", type=int)
     merge_ok.add_argument("note", nargs="?", default="reviewed, correct merge")
 
+    retract_parser = trial.add_parser(
+        "retract",
+        help="stop an observation counting, keeping the record of it and why",
+    )
+    retract_parser.add_argument("observation_id", type=int, help="as shown by `trial log`")
+    retract_parser.add_argument("reason", help="why it should not count")
+
     check_parser = trial.add_parser("check", help="criterion 6 status and what's awaiting review")
     check_parser.add_argument(
         "--all", action="store_true", dest="include_exact",

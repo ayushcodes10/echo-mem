@@ -38,6 +38,7 @@ def _seed(migrated_db, scope="shared"):
             "Postgresql": SAME_ENTITY,
             "the spike confirmed AGE traversal is fast enough": REFERENCE,
             "Postgres is the storage substrate": REFERENCE,
+            "Postgres holds the graph": REFERENCE,
         }
     )
     server.startup(config=config, embedder=embedder)
@@ -48,9 +49,16 @@ def _seed(migrated_db, scope="shared"):
             {"name": "Apache AGE", "type": "tool"},
             {"name": "Postgres", "type": "tool"},
         ],
-        [{"source": "AGE", "target": "Apache AGE", "relation_type": "same_as",
-          "fact": "the spike confirmed AGE traversal is fast enough",
-          "confidence": "extracted"}],
+        [
+            {"source": "AGE", "target": "Apache AGE", "relation_type": "same_as",
+             "fact": "the spike confirmed AGE traversal is fast enough",
+             "confidence": "extracted"},
+            # Postgres needs a fact of its own: an entity no fact mentions is
+            # no longer given a node, so listing it alone would leave the
+            # Postgresql merge with nothing to resolve against.
+            {"source": "Postgres", "target": "AGE", "relation_type": "hosts",
+             "fact": "Postgres holds the graph", "confidence": "extracted"},
+        ],
     )
     server.write_episode(
         scope, "sess-2",
@@ -396,3 +404,79 @@ def test_status_reports_criterion_six(migrated_db, monkeypatch, capsys):
     assert "Criterion 6, the v1a -> v1b exit criteria" in out
     assert "[ ] 0/3 recall saves to a different tool" in out
     assert "awaiting review - run `echo-memory trial check`" in out
+
+
+def test_a_retracted_observation_stays_in_the_record_and_stops_counting(migrated_db):
+    """The trial's only recorded duplicate was two nodes in two scopes -
+    correct scoping, judged in good faith on ids nothing validated at the time.
+    Deleting the row edits the record of a trial; leaving it leaves the exit
+    gate reading a wrong tally. Retraction is the third option."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    group_id = config.group_id("shared")
+    pair = [
+        str(r[0])
+        for r in conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH}', $$
+                MATCH (n:Node {{group_id: $gid}}) RETURN id(n) LIMIT 2 $$, %s)
+                AS (i agtype)""",
+            (json.dumps({"gid": group_id}),),
+        ).fetchall()
+    ]
+    assert len(pair) == 2
+
+    recorded = observations.record(
+        conn, group_id, observations.DUPLICATE_NODE, "judged in error",
+        node_ids=observations.sort_pair(pair),
+    )
+    assert observations.counts(conn, [group_id])["duplicates"] == 1
+
+    observations.retract(conn, recorded["id"], "the two nodes are in different scopes")
+
+    counts = observations.counts(conn, [group_id])
+    assert counts["duplicates"] == 0
+    assert counts["retracted"] == 1
+
+    # The row and the reason are still there.
+    row = conn.execute(
+        """SELECT note, retracted_reason FROM public.trial_observation WHERE id = %s""",
+        (recorded["id"],),
+    ).fetchone()
+    assert row[0] == "judged in error"
+    assert "different scopes" in row[1]
+
+
+def test_a_retraction_needs_a_reason(migrated_db):
+    """A retraction with no reason is a deletion wearing a different name."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    recorded = observations.record(
+        conn, config.group_id("shared"), observations.RECALL_SAVE, "a save",
+        written_by="codex", recalled_by="claude-code",
+    )
+
+    with pytest.raises(observations.TrialError):
+        observations.retract(conn, recorded["id"], "   ")
+
+    assert observations.counts(conn, [config.group_id("shared")])["cross_tool_saves"] == 1
+
+
+def test_an_observation_is_not_retracted_twice(migrated_db):
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    recorded = observations.record(
+        conn, config.group_id("shared"), observations.RECALL_SAVE, "a save",
+        written_by="codex", recalled_by="claude-code",
+    )
+    observations.retract(conn, recorded["id"], "recorded against the wrong tool")
+
+    with pytest.raises(observations.TrialError) as e:
+        observations.retract(conn, recorded["id"], "again")
+    assert "already retracted" in str(e.value)
+
+
+def test_retracting_something_that_does_not_exist_says_so(migrated_db):
+    conn = connect(migrated_db)
+    with pytest.raises(observations.TrialError) as e:
+        observations.retract(conn, 999999, "a reason")
+    assert "no observation" in str(e.value)
