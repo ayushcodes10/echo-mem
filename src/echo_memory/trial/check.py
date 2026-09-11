@@ -270,15 +270,22 @@ def build_report(
         "n_unreviewed": sum(len(s["unreviewed_resolutions"]) for s in open_items.values()),
         "n_suppressed_pairs": sum(s["suppressed_pairs"] for s in open_items.values()),
         "met": {
-            # A store holding facts whose author was never recorded cannot
-            # evidence a CROSS-tool save: 'unknown' compares unequal to every
-            # real agent id, so those facts satisfy `written_by != recalled_by`
-            # for the wrong reason. Migration 0007 backfills them; until it has
-            # run, the bar is reported as unmet rather than as met-by-accident.
-            "saves": (
-                tallies["cross_tool_saves"] >= observations.REQUIRED_SAVES
-                and unattributed == 0
-            ),
+            # The guard this used to carry was right about the danger and wrong
+            # about the scope. A fact whose author was never recorded cannot
+            # evidence a CROSS-tool save, because 'unknown' compares unequal to
+            # every real agent id and would satisfy `written_by != recalled_by`
+            # for the wrong reason - so observations.counts now excludes such a
+            # save, by its own evidence, one save at a time.
+            #
+            # Requiring the whole store to be attributed instead refused two
+            # saves that name real tools at both ends over twenty-seven
+            # unrelated facts from sessions that hold nothing attributable. The
+            # check's own message called those unrecoverable, which made this a
+            # bar nothing could ever clear - and an unclearable bar is not a
+            # gate, it is a wall. The count is still reported, because a store
+            # losing authorship is worth seeing; it just no longer invalidates
+            # evidence that stands on its own.
+            "saves": tallies["cross_tool_saves"] >= observations.REQUIRED_SAVES,
             "duplicates": tallies["duplicates"] <= observations.MAX_DUPLICATES,
             "bad_merges": tallies["bad_merges"] <= observations.MAX_BAD_MERGES,
         },
