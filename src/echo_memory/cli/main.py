@@ -13,7 +13,7 @@ from datetime import date
 from pathlib import Path
 
 from echo_memory.audit.get_audit_log import get_fact_history
-from echo_memory.cli import adopt, health, initdb, reattribute_cmd, stop_gate
+from echo_memory.cli import adopt, health, initdb, reattribute_cmd, stop_gate, unmerge
 from echo_memory.cli import analyse as analyse_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import hooks as hooks_cmd
@@ -110,6 +110,18 @@ def _add_project_parsers(sub) -> None:
             "attributed fact, or two, is reported as unrecoverable"
         ),
     )
+
+    un = sub.add_parser(
+        "unmerge",
+        help="take back an alias a node absorbed from a different entity",
+    )
+    un.add_argument(
+        "--list", action="store_true", dest="list_aliases",
+        help="show every node answering to another node's name",
+    )
+    un.add_argument("--node", metavar="ID", help="the node holding the wrong alias")
+    un.add_argument("--alias", metavar="NAME", help="the alias to take back")
+    un.add_argument("--session-id", metavar="ID", help="session to record in the audit log")
 
     notice = sub.add_parser(
         "notice", help="queue a memory file for ingestion (called by the capture hook)"
@@ -382,6 +394,7 @@ def _add_trial_parser(sub) -> None:
 _PROJECT_COMMANDS = {
     "dashboard": dashboard_cmd.run,
     "reattribute": reattribute_cmd.run,
+    "unmerge": unmerge.run,
     "notice": queue_cmd.run_notice,
     "pending": queue_cmd.run_pending,
 }
