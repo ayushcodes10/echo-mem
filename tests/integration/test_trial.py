@@ -3,6 +3,7 @@ Postgres+AGE+pgvector database: recording observations, the duplicate/merge
 scans that decide what a human still has to look at, and criterion 6's
 tallies. See conftest.py for the migrated_db fixture and DB-reachability skip."""
 
+import json
 from datetime import date
 
 import pytest
@@ -11,6 +12,7 @@ from fake_embedder import REFERENCE, VectorEmbedder, unit_vector_at_angle
 from echo_memory import server
 from echo_memory.cli.main import main
 from echo_memory.infra.config import Config
+from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.db import connect
 from echo_memory.trial import check, observations
 
@@ -89,6 +91,52 @@ def test_only_cross_tool_saves_count_toward_the_bar(migrated_db):
     counts = observations.counts(conn, [group_id])
     assert counts["cross_tool_saves"] == 1
     assert counts["same_tool_saves"] == 1
+
+
+def test_a_save_whose_author_was_never_recorded_counts_for_neither(migrated_db):
+    """'unknown' is unequal to every real agent id, so counting it as
+    cross-tool would satisfy `written_by != recalled_by` because one side is
+    missing rather than because two tools were involved."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    group_id = config.group_id("shared")
+
+    observations.record(conn, group_id, observations.RECALL_SAVE, "a fact with no author",
+                        written_by="unknown", recalled_by="cursor")
+
+    counts = observations.counts(conn, [group_id])
+    assert counts["cross_tool_saves"] == 0
+    assert counts["same_tool_saves"] == 0
+    assert counts["unattributed_saves"] == 1
+
+
+def test_unattributed_facts_elsewhere_do_not_invalidate_a_real_save(migrated_db):
+    """The bar used to require the whole store to be attributed, which refused
+    saves naming real tools at both ends over unrelated facts the check itself
+    called unrecoverable - a bar nothing could clear. The evidence for a save
+    is that save's own two agent ids."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    group_id = config.group_id("shared")
+    observations.start_trial(conn, date(2026, 8, 21))
+
+    # A fact somewhere else in the store that lost its author, exactly as the
+    # stale MCP server left thirty of them.
+    conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH ()-[e:FACT {{group_id: $gid}}]->()
+            SET e.agent_id = 'unknown' RETURN id(e) LIMIT 1
+        $$, %s) AS (i agtype)""",
+        (json.dumps({"gid": group_id}),),
+    ).fetchall()
+
+    for i in range(3):
+        observations.record(conn, group_id, observations.RECALL_SAVE, f"real save {i}",
+                            written_by="claude-code", recalled_by="codex")
+
+    report = check.build_report(conn, config, today=date(2026, 8, 23))
+    assert report["unattributed_facts"] >= 1, "the test did not create the condition"
+    assert report["met"]["saves"], "three evidenced saves were refused by unrelated facts"
 
 
 def test_an_observation_needs_a_note(migrated_db):

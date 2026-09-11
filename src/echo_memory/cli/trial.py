@@ -59,23 +59,27 @@ def render_criterion_six(report: dict, indent: str = "  ", show_hint: bool = Tru
             f"(started {trial['started_on']}, {trial['days_left']} left)"
         )
 
-    saves_note = ""
+    uncounted = []
     if counts["same_tool_saves"]:
-        saves_note = (
-            f" (+{counts['same_tool_saves']} same-tool, which the criterion doesn't count)"
-        )
+        uncounted.append(f"{counts['same_tool_saves']} same-tool")
+    if counts.get("unattributed_saves"):
+        uncounted.append(f"{counts['unattributed_saves']} with no recorded author")
+    saves_note = (
+        f" (+{', '.join(uncounted)}, which the criterion doesn't count)" if uncounted else ""
+    )
     lines.append(
         f"{indent}[{'x' if met['saves'] else ' '}] {counts['cross_tool_saves']}"
         f"/{observations.REQUIRED_SAVES} recall saves to a different tool{saves_note}"
     )
-    # An unmet bar has to name its cause. A reader who sees 3/3 saves and an
-    # unticked box would otherwise assume a display bug rather than a store
-    # that cannot yet evidence what the bar measures.
+    # Reported, not blocking. A save is excluded when its own evidence is
+    # missing (see observations.counts); facts elsewhere in the store that lost
+    # their author are a health problem worth seeing and say nothing about
+    # whether these particular saves happened.
     if report.get("unattributed_facts"):
         lines.append(
             f"{indent}    ! {report['unattributed_facts']} fact(s) still carry "
-            f"agent_id '{UNKNOWN_PROJECT}', so a cross-tool save cannot be evidenced "
-            "- they predate attribution and cannot be recovered"
+            f"agent_id '{UNKNOWN_PROJECT}' and cannot evidence a save - recover the "
+            "ones whose session says who wrote them with `reattribute --agent`"
         )
     lines.append(
         f"{indent}[{'x' if met['duplicates'] else ' '}] {counts['duplicates']} "

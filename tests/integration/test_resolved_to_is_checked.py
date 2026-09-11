@@ -23,7 +23,7 @@ while pointing at somebody else's entity.
 
 from __future__ import annotations
 
-from fake_embedder import REFERENCE, VectorEmbedder
+from fake_embedder import REFERENCE, VectorEmbedder, unit_vector_at_angle
 
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.db import connect
@@ -138,3 +138,123 @@ def test_a_rejected_resolution_writes_nothing_at_all(migrated_db):
             $$) AS (i agtype)"""
         ).fetchall()
     assert rows == [], "the rejected episode left a node behind"
+
+
+# --- the id was owned, and still wrong ---------------------------------------
+#
+# Everything above checks that the caller owns the node. The incident this
+# store actually recorded passed that check: both guessed ids belonged to the
+# author, in a different project. Owning a node is not the same as it being
+# the right node, and a scope check alone would have let every one of those
+# facts through.
+
+GUESSED = "node_embedding table"
+MENTION = "Eigon billing profile"
+LESSON = "AGE stores a graphid, not a bigint"
+TAX = "Eigon invoices carry a GSTIN and a place of supply"
+
+# 0.04 is what the incident's own pair measures on the real embedder
+# ('Eigon billing profile' vs 'node_embedding table'); 0.50 is the hardest
+# legitimate confirmation on record ('AGE' vs 'Apache AGE', 0.497). The bar
+# sits between them.
+UNRELATED = unit_vector_at_angle(0.04)
+DISTANT_BUT_REAL = unit_vector_at_angle(0.50)
+
+
+def _incident_embedder():
+    return VectorEmbedder({
+        GUESSED: REFERENCE, LESSON: REFERENCE,
+        MENTION: UNRELATED, TAX: UNRELATED,
+    })
+
+
+def _seed_guessed_node(conn):
+    write_episode(
+        conn, ALICE, "s-lesson",
+        [{"name": GUESSED, "type": "table"}],
+        [{"source": GUESSED, "target": GUESSED, "relation_type": "is",
+          "fact": LESSON, "confidence": "extracted"}],
+        {GUESSED: {"resolved_to": "new"}},
+        _incident_embedder(), agent_id="claude-code",
+    )
+    row = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH (n:Node) WHERE n.name = '{GUESSED}' RETURN id(n)
+        $$) AS (i agtype)"""
+    ).fetchone()
+    return str(row[0])
+
+
+def _write_tax_fact_at(conn, node_id, embedder=None):
+    return write_episode(
+        conn, ALICE, "s-tax",
+        [{"name": MENTION, "type": "profile"}],
+        [{"source": MENTION, "target": MENTION, "relation_type": "is",
+          "fact": TAX, "confidence": "extracted"}],
+        {MENTION: {"resolved_to": node_id}},
+        embedder or _incident_embedder(), agent_id="claude-code",
+    )
+
+
+def test_an_owned_but_unrelated_node_is_refused(migrated_db):
+    """The incident, reproduced. Before this check the tax fact attached
+    itself to the embedding table's lesson and nothing objected."""
+    with connect(migrated_db) as conn:
+        guessed = _seed_guessed_node(conn)
+        result = _write_tax_fact_at(conn, guessed)
+
+        assert "error" in result, result
+        assert not result.get("edges_created")
+
+        landed = conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH}', $$
+                MATCH (a)-[e:FACT]->(b) WHERE id(b) = {int(guessed)}
+                RETURN e.fact
+            $$) AS (f agtype)"""
+        ).fetchall()
+
+    facts = {str(f[0]).strip('"') for f in landed}
+    assert facts == {LESSON}, f"a tax fact reached the embedding table: {facts}"
+
+
+def test_the_refusal_names_the_node_it_actually_points_at(migrated_db):
+    """A caller who guessed an id cannot tell what they hit without being told.
+    Naming it turns an opaque rejection into a one-step correction."""
+    with connect(migrated_db) as conn:
+        guessed = _seed_guessed_node(conn)
+        error = _write_tax_fact_at(conn, guessed)["error"]
+
+    assert GUESSED in error
+    assert "candidates" in error
+
+
+def test_a_distant_but_offered_candidate_still_resolves(migrated_db):
+    """The bar is 'would this server ever have offered it', not 'are these
+    obviously the same thing'. Real duplicates score low - 'AGE' against
+    'Apache AGE' is 0.497 - and refusing those would break the round-trip the
+    check exists to protect."""
+    embedder = VectorEmbedder({
+        GUESSED: REFERENCE, LESSON: REFERENCE,
+        MENTION: DISTANT_BUT_REAL, TAX: DISTANT_BUT_REAL,
+    })
+    with connect(migrated_db) as conn:
+        guessed = _seed_guessed_node(conn)
+        result = _write_tax_fact_at(conn, guessed, embedder=embedder)
+
+    assert result.get("edges_created"), result
+
+
+def test_an_exact_name_match_skips_the_similarity_check(migrated_db):
+    """Passing the id of a node whose name IS the mention is redundant, not
+    doubtful, and must not depend on an embedding lookup to be allowed."""
+    with connect(migrated_db) as conn:
+        guessed = _seed_guessed_node(conn)
+        result = write_episode(
+            conn, ALICE, "s-same-name",
+            [{"name": GUESSED, "type": "table"}],
+            [{"source": GUESSED, "target": GUESSED, "relation_type": "also_is",
+              "fact": LESSON, "confidence": "extracted"}],
+            {GUESSED: {"resolved_to": guessed}},
+            _incident_embedder(), agent_id="claude-code",
+        )
+    assert result.get("edges_created"), result

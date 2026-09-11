@@ -155,24 +155,68 @@ def _fuzzy_candidates(conn, group_id: str, embedding: list[float], limit: int = 
     ]
 
 
-def _node_in_group(conn, group_id: str, node_id: str) -> bool:
-    """Whether node_id names a Node this group owns.
+def _node_identity(conn, group_id: str, node_id: str) -> tuple[str, list[str]] | None:
+    """The name and aliases of a Node this group owns, or None.
 
-    Both halves matter. Existence alone would still let one tenant graft an
-    edge onto another's entity; group alone cannot be checked without the
-    lookup."""
+    Both halves of the ownership check matter. Existence alone would still let
+    one tenant graft an edge onto another's entity; group alone cannot be
+    checked without the lookup. The name comes back with it because the caller
+    then has to decide whether this node has anything to do with the mention -
+    see _referent_similarity."""
     try:
         wanted = int(node_id)
     except (TypeError, ValueError):
-        return False
+        return None
     row = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             MATCH (n:Node) WHERE id(n) = $nid AND n.group_id = $gid
-            RETURN id(n)
-        $$, %s) AS (node_id agtype)""",
+            RETURN n.name, n.aliases
+        $$, %s) AS (name agtype, aliases agtype)""",
         (json.dumps({"nid": wanted, "gid": group_id}),),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return None
+    aliases = json.loads(str(row[1])) if row[1] is not None else []
+    return str(row[0]).strip('"'), [str(a) for a in aliases or []]
+
+
+def _node_in_group(conn, group_id: str, node_id: str) -> bool:
+    return _node_identity(conn, group_id, node_id) is not None
+
+
+def _referent_similarity(conn, group_id: str, node_id: str, mention: str, embedder) -> float:
+    """How alike the mention and the named node are, on the same scale the
+    candidate list is ranked by.
+
+    Against the node's stored embedding where there is one, so the number is
+    literally the one _fuzzy_candidates would have produced. A node written
+    before embeddings existed, or one whose embedding failed, falls back to
+    embedding its name - a slightly different number for the same question,
+    which beats refusing to check at all."""
+    try:
+        wanted = int(node_id)
+    except (TypeError, ValueError):
+        return 0.0
+
+    query = embedder.embed(mention)
+    # node_id is AGE's graphid, which has no equality operator against bigint -
+    # the same type mismatch that once turned a targeted DELETE into a full
+    # one. Compared as text, exactly as _fuzzy_candidates selects it.
+    row = conn.execute(
+        """SELECT -(ne.embedding <#> %s::vector)
+             FROM public.node_embedding ne
+            WHERE ne.node_id::text = %s AND ne.group_id = %s""",
+        (query, str(wanted), group_id),
+    ).fetchone()
+    if row is not None:
+        return float(row[0])
+
+    identity = _node_identity(conn, group_id, node_id)
+    if identity is None:
+        return 0.0
+    stored = embedder.embed(identity[0])
+    norm = (sum(q * q for q in query) ** 0.5) * (sum(v * v for v in stored) ** 0.5)
+    return float(sum(q * v for q, v in zip(query, stored, strict=True)) / norm) if norm else 0.0
 
 
 def resolve_entities(
@@ -200,20 +244,14 @@ def resolve_entities(
                 # on trust - no check that it existed, was a Node, or belonged
                 # to the caller.
                 #
-                # That produced the two bad merges this store has confirmed. An
-                # id recalled from memory rather than read from the graph
-                # pointed at 'node_embedding table' and 'AGE graphid column
-                # type', so three facts about Indian tax compliance were
-                # attached to an embedding table's lesson. Nothing objected;
-                # the facts simply landed somewhere else.
-                #
-                # In the hosted service the same hole is a cross-tenant write.
-                # Demonstrated before this fix: one account passed another
-                # account's node id and successfully attached an edge to it,
-                # because _create_edge matches nodes by id alone with no group
-                # filter. The edge carried the writer's own group_id while
-                # pointing at somebody else's entity.
-                if not _node_in_group(conn, group_id, resolved_to):
+                # In the hosted service that hole is a cross-tenant write.
+                # Demonstrated before this check existed: one account passed
+                # another account's node id and successfully attached an edge
+                # to it, because _create_edge matches nodes by id alone with no
+                # group filter. The edge carried the writer's own group_id
+                # while pointing at somebody else's entity.
+                identity = _node_identity(conn, group_id, resolved_to)
+                if identity is None:
                     raise ResolutionError(
                         f"entity_resolutions[{name!r}] points at node "
                         f"{resolved_to!r}, which is not a node in this scope. "
@@ -221,6 +259,46 @@ def resolve_entities(
                         "candidates, or \"new\" - never one remembered from "
                         "an earlier turn."
                     )
+
+                # Owning the node is not the same as it being the right node,
+                # and the incident this store recorded was the second kind.
+                # Ids recalled from memory rather than read from the graph
+                # pointed at 'node_embedding table' and 'AGE graphid column
+                # type' - both nodes the caller owned, in a different project -
+                # so three facts about Indian tax compliance were attached to
+                # an embedding table's lesson. Nothing objected; the facts
+                # simply landed somewhere else. A scope check alone would have
+                # let every one of them through.
+                #
+                # The test is the one the server can actually justify: would it
+                # ever have offered this node as a candidate for this mention?
+                # Candidates are drawn above low_threshold, so a node below it
+                # cannot be an answer to a question this server asked, and an
+                # id that did not come from a candidate list came from
+                # somewhere that cannot be trusted with an entity's identity.
+                #
+                # Measured on the real embedder before choosing the bar: the
+                # incident's own pairs score 0.030 and 0.041, while the hardest
+                # legitimate confirmation on record ("AGE" / "Apache AGE")
+                # scores 0.497. An exact name or alias match skips the check
+                # entirely, since that is the one case where the id is
+                # redundant rather than doubtful.
+                node_name, aliases = identity
+                known = {node_name.lower(), *(a.lower() for a in aliases)}
+                if name.lower() not in known:
+                    similarity = _referent_similarity(
+                        conn, group_id, resolved_to, name, embedder
+                    )
+                    if similarity < low_threshold:
+                        raise ResolutionError(
+                            f"entity_resolutions[{name!r}] points at node "
+                            f"{resolved_to!r}, which is named {node_name!r}. "
+                            f"That is too unlike {name!r} (similarity "
+                            f"{similarity:.3f}, below {low_threshold}) for this "
+                            "server to have offered it as a candidate, so the id "
+                            "did not come from one. Pass an id from this call's "
+                            "own ambiguous_entities candidates, or \"new\"."
+                        )
                 outcome.resolved[name] = resolved_to
                 outcome.audit_events.append(
                     {

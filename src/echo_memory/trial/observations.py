@@ -8,6 +8,7 @@ docs/designs/echo-memory-design.md's Success Criteria, criterion 6."""
 
 from datetime import date
 
+from echo_memory.infra.project import UNKNOWN as UNATTRIBUTED
 from echo_memory.ingestion.write_episode import MAX_STRING_LEN
 
 RECALL_SAVE = "recall_save"
@@ -153,25 +154,43 @@ def counts(conn, group_ids: list[str]) -> dict:
     """Criterion 6's tallies. Recall saves are split cross-tool vs same-tool:
     only the cross-tool ones count toward the bar (the criterion says "to a
     different tool"), but a same-tool save is still real evidence recall works
-    and is worth seeing rather than silently dropping."""
+    and is worth seeing rather than silently dropping.
+
+    A save whose cited fact has no recorded author does not count either way.
+    'unknown' compares unequal to every real agent id, so counting it as
+    cross-tool would satisfy `written_by <> recalled_by` for exactly the wrong
+    reason - the two sides differ because one is missing, not because two tools
+    were involved. Checked here, per save, against the save's own evidence. The
+    gate used to check it globally instead, refusing every save in a store that
+    held any unattributed fact anywhere; that blocked two saves whose both ends
+    name real tools over twenty-seven unrelated facts that cannot be recovered,
+    which is a bar nothing could ever clear."""
     rows = conn.execute(
         """SELECT kind,
                   count(*) FILTER (
                       WHERE written_by IS NOT NULL AND recalled_by IS NOT NULL
                         AND written_by <> recalled_by
+                        AND written_by <> %s AND recalled_by <> %s
                   ) AS cross_tool,
+                  count(*) FILTER (
+                      WHERE written_by = %s OR recalled_by = %s
+                  ) AS unattributed,
                   count(*) AS total
            FROM public.trial_observation
            WHERE group_id = ANY(%s)
            GROUP BY kind""",
-        (group_ids,),
+        (UNATTRIBUTED, UNATTRIBUTED, UNATTRIBUTED, UNATTRIBUTED, group_ids),
     ).fetchall()
-    by_kind = {kind: {"cross_tool": cross_tool, "total": total} for kind, cross_tool, total in rows}
+    by_kind = {
+        kind: {"cross_tool": cross_tool, "unattributed": unattributed, "total": total}
+        for kind, cross_tool, unattributed, total in rows
+    }
 
-    saves = by_kind.get(RECALL_SAVE, {"cross_tool": 0, "total": 0})
+    saves = by_kind.get(RECALL_SAVE, {"cross_tool": 0, "unattributed": 0, "total": 0})
     return {
         "cross_tool_saves": saves["cross_tool"],
-        "same_tool_saves": saves["total"] - saves["cross_tool"],
+        "unattributed_saves": saves["unattributed"],
+        "same_tool_saves": saves["total"] - saves["cross_tool"] - saves["unattributed"],
         "duplicates": by_kind.get(DUPLICATE_NODE, {}).get("total", 0),
         "bad_merges": by_kind.get(BAD_MERGE, {}).get("total", 0),
         "dismissed_pairs": by_kind.get(NOT_DUPLICATE, {}).get("total", 0),
