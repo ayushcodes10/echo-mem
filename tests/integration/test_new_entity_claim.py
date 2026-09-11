@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 
+import psycopg
+import pytest
 from fake_embedder import REFERENCE, VectorEmbedder
 
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
@@ -128,3 +130,75 @@ def test_a_genuinely_new_name_is_still_new(migrated_db):
     with connect(migrated_db) as conn:
         _claim_new(conn, GROUP, FIRST)
         assert len(_nodes_named(conn, GROUP, NAME)) == 1
+
+
+# --- and when two writers both decide it is new --------------------------------
+
+
+def test_the_database_refuses_a_second_node_of_the_same_name(migrated_db):
+    """Migration 0016. Resolution reads before it writes and nothing makes that
+    atomic, so two writers can both see "no such node" before either commits.
+    The index is what makes the second one fail instead of succeeding into a
+    split entity."""
+    with connect(migrated_db) as conn:
+        _claim_new(conn, GROUP, FIRST)
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                f"""SELECT * FROM cypher('{GRAPH}', $$
+                    CREATE (n:Node {{name: $name, group_id: $gid}}) RETURN id(n)
+                $$, %s) AS (i agtype)""",
+                (json.dumps({"name": NAME, "gid": GROUP}),),
+            ).fetchall()
+
+
+def test_a_differently_cased_name_collides_too(migrated_db):
+    """_exact_match is case-insensitive, so a node it would have found must not
+    be creatable by a differently-cased write."""
+    with connect(migrated_db) as conn:
+        _claim_new(conn, GROUP, FIRST)
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                f"""SELECT * FROM cypher('{GRAPH}', $$
+                    CREATE (n:Node {{name: $name, group_id: $gid}}) RETURN id(n)
+                $$, %s) AS (i agtype)""",
+                (json.dumps({"name": NAME.upper(), "gid": GROUP}),),
+            ).fetchall()
+
+
+def test_another_scope_may_hold_the_same_name(migrated_db):
+    """The constraint is per scope. Two tenants naming the same thing is not a
+    collision, and an index that said otherwise would be a cross-tenant
+    failure."""
+    with connect(migrated_db) as conn:
+        _claim_new(conn, GROUP, FIRST)
+        assert _claim_new(conn, OTHER, SECOND).get("edges_created")
+
+
+def test_losing_the_race_resolves_instead_of_failing(migrated_db, monkeypatch):
+    """The loser of a race has already got the answer it wanted: the row the
+    winner committed is exactly what _exact_match would have returned a moment
+    later. Simulated by making the resolution read miss once, which is what a
+    concurrent writer looks like from inside one transaction."""
+    from echo_memory.ingestion import resolution
+    from echo_memory.ingestion import write_episode as we
+
+    with connect(migrated_db) as conn:
+        _claim_new(conn, GROUP, FIRST)
+        existing = _nodes_named(conn, GROUP, NAME)
+        assert len(existing) == 1
+
+        calls = {"n": 0}
+        real = resolution._exact_match
+
+        def blind_once(c, gid, name):
+            calls["n"] += 1
+            return None if calls["n"] == 1 else real(c, gid, name)
+
+        monkeypatch.setattr(resolution, "_exact_match", blind_once)
+        monkeypatch.setattr(we, "_exact_match", blind_once)
+
+        result = _claim_new(conn, GROUP, SECOND)
+
+        assert result.get("edges_created"), result
+        assert len(_nodes_named(conn, GROUP, NAME)) == 1
+        assert calls["n"] >= 2, "the fallback lookup never ran"

@@ -6,10 +6,16 @@ import json
 import time
 import uuid
 
+import psycopg
+
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.logging import get_logger, log_write_episode
 from echo_memory.infra.project import UNKNOWN as PROJECT_UNKNOWN
-from echo_memory.ingestion.resolution import ResolutionError, resolve_entities
+from echo_memory.ingestion.resolution import (
+    ResolutionError,
+    _exact_match,
+    resolve_entities,
+)
 from echo_memory.retrieval.query_memory import query_memory
 
 MAX_ENTITIES = 50
@@ -141,6 +147,38 @@ def _invalidate_edge(conn, edge_id: str, t_invalid: int) -> None:
         $$, %s) AS (r agtype)""",
         (json.dumps({"eid": int(edge_id), "t_invalid": t_invalid}),),
     )
+
+
+def _create_or_find_node(conn, group_id: str, name: str, type_: str, embedder) -> str:
+    """Create the node, unless another writer created it first.
+
+    Resolution decided this name was new by reading before writing, and nothing
+    makes that atomic. One writer and the read is a good enough proxy for the
+    truth; two - Claude Code and Cursor in the same second, or any two agents on
+    one hosted account - and both can see "no such node" before either commits.
+
+    Migration 0016's unique index makes the second write fail instead of
+    succeeding into a split entity. Catching it here turns the loser of the
+    race into a normal resolution: the row the winner committed is exactly what
+    _exact_match would have returned had the read happened a moment later.
+
+    The savepoint is what makes that possible. A unique violation aborts the
+    enclosing transaction in Postgres, so without one the whole episode is lost
+    to a race that has already resolved itself correctly.
+    """
+    try:
+        with conn.transaction():
+            return _create_node(conn, group_id, name, type_, embedder)
+    except psycopg.errors.UniqueViolation:
+        existing = _exact_match(conn, group_id, name)
+        if existing is None:
+            # The index fired and yet nothing matches: not a race, and not
+            # something to paper over.
+            raise
+        _logger.info(
+            "node_created_concurrently", extra={"group_id": group_id, "entity": name}
+        )
+        return existing[0]
 
 
 def _create_edge(
@@ -379,7 +417,7 @@ def write_episode(
                 if name not in used_by_ready:
                     continue
                 entity = entities_by_name[name]
-                name_to_node_id[name] = _create_node(
+                name_to_node_id[name] = _create_or_find_node(
                     conn, group_id, entity["name"], entity["type"], embedder
                 )
 
