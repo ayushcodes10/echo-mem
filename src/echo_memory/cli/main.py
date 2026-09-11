@@ -102,6 +102,14 @@ def _add_project_parsers(sub) -> None:
     )
     reattr.add_argument("--session", metavar="ID", help="session whose facts to reattribute")
     reattr.add_argument("--project", metavar="NAME", help="project to attribute them to")
+    reattr.add_argument(
+        "--agent", action="store_true",
+        help=(
+            "work on authorship instead of project: recover the agent_id of facts "
+            "whose session evidences one. Never guesses - a session with no "
+            "attributed fact, or two, is reported as unrecoverable"
+        ),
+    )
 
     notice = sub.add_parser(
         "notice", help="queue a memory file for ingestion (called by the capture hook)"
