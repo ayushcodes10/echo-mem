@@ -28,13 +28,28 @@ from echo_memory.infra.db import GRAPH_NAME as GRAPH
 # MATHS.local.md §5. LOW_THRESHOLD lowered so real near-misses like the AGE
 # case get surfaced as ambiguous instead of silently missed; HIGH_THRESHOLD
 # left as-is since no measured true-duplicate reached it, so it already
-# behaves conservatively for this kind of short-identifier text. Still
-# placeholders pending real calibration against the v1a trial's data.
+# behaves conservatively for this kind of short-identifier text.
+#
+# Calibrated against the v1a trial's data on 2026-09-11, which is what these
+# were waiting for, and the answer was not a new number. 5 confirmed-same pairs
+# against 155 confirmed-distinct ones give AUC 0.766 with a 95% interval of
+# [0.437, 0.968]: the interval includes chance, and the two classes overlap on
+# [0.477, 0.927], which is the whole usable range. Name similarity alone is not
+# demonstrably a duplicate detector on this corpus, so moving either number on
+# five positives would be fitting noise. Re-run it with `echo-memory calibrate`
+# as the labelled set grows; the honest bar for retuning is enough positives
+# that the interval clears 0.5.
+#
+# One threshold decision the data does support is at the silent-merge boundary,
+# and it is handled by _differing_numeric_tokens rather than by moving
+# HIGH_THRESHOLD - see that function.
 LOW_THRESHOLD = 0.45
 HIGH_THRESHOLD = 0.92
 
 _NEGATION_TOKENS = ("in", "un", "non", "not")
 _TRAILING_VERSION = re.compile(r"\d+[a-z]?$")
+# Any token carrying a digit, anywhere in the name: 'v2', '0007', 'zlhv81t8'.
+_DIGIT_TOKEN = re.compile(r"[a-z]*\d+[a-z0-9]*")
 
 
 def _blocked_from_silent_merge(name_a: str, name_b: str) -> bool:
@@ -57,6 +72,33 @@ def _blocked_from_silent_merge(name_a: str, name_b: str) -> bool:
     a_stripped = _TRAILING_VERSION.sub("", a)
     b_stripped = _TRAILING_VERSION.sub("", b)
     return bool(a_stripped and a_stripped == b_stripped)
+
+
+def _differing_numeric_tokens(name_a: str, name_b: str) -> bool:
+    """Whether two names disagree about a number, anywhere in them.
+
+    Checked only at the silent-merge boundary, and it is the one threshold
+    decision this store's labelled data actually supports. Exactly one
+    confirmed-distinct pair scores above HIGH_THRESHOLD -
+    'prod-api.dugoutlive.com' against 'prod-api-v2.dugoutlive.com' at 0.958 -
+    so a silent merge at 0.92 would have collapsed two production hosts into
+    one entity. Exactly one confirmed-same pair scores above it too,
+    'AWS Org SCP p-zlhv81t8' against 'AWS Organizations SCP p-zlhv81t8' at
+    0.927, and it survives this rule because both names carry the same
+    identifier and differ only by an abbreviation.
+
+    _TRAILING_VERSION already did this for a digit at the END of a name, which
+    catches PR-B3 against PR-B2 and misses a 'v2' in the middle of a hostname.
+    Same idea, no longer anchored.
+
+    A false positive here costs one ambiguity round trip: the pair drops to the
+    path it would have taken anyway at any similarity below HIGH, and a human
+    or agent decides. A false negative silently merges two entities, and this
+    store has three of those on record.
+    """
+    return set(_DIGIT_TOKEN.findall(name_a.lower())) != set(
+        _DIGIT_TOKEN.findall(name_b.lower())
+    )
 
 
 @dataclass
@@ -237,7 +279,33 @@ def resolve_entities(
             resolution = resolutions[name]
             resolved_to = resolution["resolved_to"]
             if resolved_to == "new":
-                outcome.new_entities.add(name)
+                # "new" is an assertion by the caller, and an exact name match
+                # in this scope contradicts it. The match wins, because
+                # case-insensitive name equality is this system's own
+                # definition of entity identity: without the resolutions dict
+                # the very same mention would have resolved to this node, and a
+                # caller's say-so must not create an entity the next mention
+                # will silently merge back anyway.
+                #
+                # Taken on trust until now, and the consequence is criterion
+                # 6's other bar. Two nodes named 'Eigon warm-base ALB sharing'
+                # exist in this author's store, written minutes apart by one
+                # session that said "new" both times - a duplicate created by
+                # entity resolution, produced by the path that skips entity
+                # resolution entirely.
+                exact = _exact_match(conn, group_id, name)
+                if exact is None:
+                    outcome.new_entities.add(name)
+                else:
+                    node_id, _matched = exact
+                    outcome.resolved[name] = node_id
+                    outcome.audit_events.append({
+                        "node_id": node_id,
+                        "resolution_detail": (
+                            "exact match; resolved_to=new was overridden because "
+                            "this scope already holds a node of that name"
+                        ),
+                    })
             else:
                 # The id has to be a real node in THIS group. It arrives from
                 # the calling agent, and until 2026-09-09 it was taken entirely
@@ -322,7 +390,12 @@ def resolve_entities(
         best = candidates[0] if candidates else None
         blocked = best is not None and _blocked_from_silent_merge(name, best.name)
 
-        if best is not None and best.similarity >= high_threshold and not blocked:
+        if (
+            best is not None
+            and best.similarity >= high_threshold
+            and not blocked
+            and not _differing_numeric_tokens(name, best.name)
+        ):
             outcome.resolved[name] = best.node_id
             outcome.audit_events.append(
                 {

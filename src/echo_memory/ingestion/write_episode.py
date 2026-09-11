@@ -6,10 +6,16 @@ import json
 import time
 import uuid
 
+import psycopg
+
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.logging import get_logger, log_write_episode
 from echo_memory.infra.project import UNKNOWN as PROJECT_UNKNOWN
-from echo_memory.ingestion.resolution import ResolutionError, resolve_entities
+from echo_memory.ingestion.resolution import (
+    ResolutionError,
+    _exact_match,
+    resolve_entities,
+)
 from echo_memory.retrieval.query_memory import query_memory
 
 MAX_ENTITIES = 50
@@ -143,6 +149,38 @@ def _invalidate_edge(conn, edge_id: str, t_invalid: int) -> None:
     )
 
 
+def _create_or_find_node(conn, group_id: str, name: str, type_: str, embedder) -> str:
+    """Create the node, unless another writer created it first.
+
+    Resolution decided this name was new by reading before writing, and nothing
+    makes that atomic. One writer and the read is a good enough proxy for the
+    truth; two - Claude Code and Cursor in the same second, or any two agents on
+    one hosted account - and both can see "no such node" before either commits.
+
+    Migration 0016's unique index makes the second write fail instead of
+    succeeding into a split entity. Catching it here turns the loser of the
+    race into a normal resolution: the row the winner committed is exactly what
+    _exact_match would have returned had the read happened a moment later.
+
+    The savepoint is what makes that possible. A unique violation aborts the
+    enclosing transaction in Postgres, so without one the whole episode is lost
+    to a race that has already resolved itself correctly.
+    """
+    try:
+        with conn.transaction():
+            return _create_node(conn, group_id, name, type_, embedder)
+    except psycopg.errors.UniqueViolation:
+        existing = _exact_match(conn, group_id, name)
+        if existing is None:
+            # The index fired and yet nothing matches: not a race, and not
+            # something to paper over.
+            raise
+        _logger.info(
+            "node_created_concurrently", extra={"group_id": group_id, "entity": name}
+        )
+        return existing[0]
+
+
 def _create_edge(
     conn,
     group_id: str,
@@ -173,6 +211,18 @@ def _create_edge(
             f"refusing to write a fact with no agent_id (got {agent_id!r}). "
             "Every fact records who wrote it; see server.py's _author_of."
         )
+    # Same null-drop, one property over, and it went unnoticed because the
+    # consequence is quieter than a missing author. Seven facts in this store
+    # carry no project key at all - six of them written the day this was found.
+    # A fact with no project gives its nodes no project, and duplicate_candidates
+    # drops any pair with no project in common, so the entity becomes invisible
+    # to the review queue built to catch exactly this kind of thing.
+    #
+    # Coerced rather than refused: 'unknown' is what migration 0003 backfilled
+    # and what the project filter already understands, so the honest
+    # representation of "nobody said" exists. Absent is not that value - it is
+    # the absence of any value, which nothing downstream can filter on.
+    project = project or PROJECT_UNKNOWN
     # Both endpoints must belong to this group. resolution.py already refuses a
     # resolved_to from another scope, so reaching here with a foreign node means
     # some other path produced the id - which is exactly when a second check
@@ -236,8 +286,16 @@ def _increment_write_episode_count(conn, group_id: str) -> int:
 
 
 def _write_audit_entry(conn, group_id: str, session_id: str, **fields) -> None:
-    columns = ["group_id", "session_id"] + list(fields.keys())
-    values = [group_id, session_id] + list(fields.values())
+    # Stamped by the process doing the writing, which is the only place that
+    # knows. An MCP stdio server holds the code it imported at spawn, so the
+    # version on disk says nothing about what is actually running - and that
+    # gap has already cost this store 30 facts with no author and 7 with no
+    # project. `health` compares this against its own version and says
+    # "restart your client" instead of leaving it to be found in the data.
+    from echo_memory import __version__
+
+    columns = ["group_id", "session_id", "writer_version"] + list(fields.keys())
+    values = [group_id, session_id, __version__] + list(fields.values())
     placeholders = ", ".join(["%s"] * len(values))
     conn.execute(
         f"INSERT INTO public.audit_entry ({', '.join(columns)}) VALUES ({placeholders})",
@@ -348,13 +406,31 @@ def write_episode(
             # Deferring costs nothing. The follow-up call carries the same entities,
             # so anything genuinely needed is created then, alongside the fact that
             # gives it an edge.
+            # Within an episode that asserts facts, an entity no fact mentions
+            # is noise and gets no node.
+            #
+            # Deferring the ambiguous case was the original fix and it left the
+            # other half open: an entity listed in `entities` that NO fact
+            # mentions was still created, because the excuse only covered ones a
+            # held-back fact referenced. A caller that names four entities and
+            # writes facts about three got a fourth node with no edges -
+            # unreachable by query_memory, which searches facts, and present in
+            # every pair the duplicate scanner considers from then on. Two such
+            # nodes were in this store and one was made by the session that
+            # found them. Nothing rescues them later either, because nothing
+            # references them.
+            #
+            # An episode with NO facts at all is a different act and is honoured:
+            # the call's whole content is "these entities exist", and a later
+            # fact mentioning one of those names resolves onto it. Refusing that
+            # would make the call a silent no-op.
             used_by_ready = {f["source"] for f in ready_facts} | {f["target"] for f in ready_facts}
-            mentioned_by_any = {f["source"] for f in facts} | {f["target"] for f in facts}
+            registration_only = not facts
             for name in outcome.new_entities:
-                if name not in used_by_ready and name in mentioned_by_any:
+                if not registration_only and name not in used_by_ready:
                     continue
                 entity = entities_by_name[name]
-                name_to_node_id[name] = _create_node(
+                name_to_node_id[name] = _create_or_find_node(
                     conn, group_id, entity["name"], entity["type"], embedder
                 )
 

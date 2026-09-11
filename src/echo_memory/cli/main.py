@@ -13,7 +13,16 @@ from datetime import date
 from pathlib import Path
 
 from echo_memory.audit.get_audit_log import get_fact_history
-from echo_memory.cli import adopt, health, initdb, reattribute_cmd, stop_gate, unmerge
+from echo_memory.cli import (
+    adopt,
+    calibrate,
+    health,
+    initdb,
+    merge,
+    reattribute_cmd,
+    stop_gate,
+    unmerge,
+)
 from echo_memory.cli import analyse as analyse_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import hooks as hooks_cmd
@@ -110,6 +119,26 @@ def _add_project_parsers(sub) -> None:
             "attributed fact, or two, is reported as unrecoverable"
         ),
     )
+
+    cal = sub.add_parser(
+        "calibrate",
+        help="what this store's own judgements say about the resolution thresholds",
+    )
+    cal.add_argument(
+        "--sample-below", type=int, metavar="N",
+        help="also draw N random pairs from BELOW the review bar, the only way to "
+             "learn what the bar is missing",
+    )
+
+    mg = sub.add_parser(
+        "merge", help="fold one node into another, once confirmed to be one entity"
+    )
+    mg.add_argument("--into", metavar="ID", required=True, help="the node that survives")
+    mg.add_argument(
+        "--from", metavar="ID", required=True, dest="from",
+        help="the node folded in and deleted",
+    )
+    mg.add_argument("--session-id", metavar="ID", help="session to record in the audit log")
 
     un = sub.add_parser(
         "unmerge",
@@ -374,6 +403,13 @@ def _add_trial_parser(sub) -> None:
     merge_ok.add_argument("audit_entry_id", type=int)
     merge_ok.add_argument("note", nargs="?", default="reviewed, correct merge")
 
+    retract_parser = trial.add_parser(
+        "retract",
+        help="stop an observation counting, keeping the record of it and why",
+    )
+    retract_parser.add_argument("observation_id", type=int, help="as shown by `trial log`")
+    retract_parser.add_argument("reason", help="why it should not count")
+
     check_parser = trial.add_parser("check", help="criterion 6 status and what's awaiting review")
     check_parser.add_argument(
         "--all", action="store_true", dest="include_exact",
@@ -395,6 +431,8 @@ _PROJECT_COMMANDS = {
     "dashboard": dashboard_cmd.run,
     "reattribute": reattribute_cmd.run,
     "unmerge": unmerge.run,
+    "calibrate": calibrate.run,
+    "merge": merge.run,
     "notice": queue_cmd.run_notice,
     "pending": queue_cmd.run_pending,
 }
