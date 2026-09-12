@@ -27,9 +27,18 @@ def render_start(result: dict) -> str:
     if result["already_started"]:
         return (
             f"Trial already started on {result['started_on']} "
-            f"({result['cap_days']}-day cap). Nothing changed."
+            f"({result['cap_days']}-day cap). Nothing changed. "
+            "Use --restart \"<why>\" to close it and begin a new one."
         )
-    return f"Trial started on {result['started_on']}, {result['cap_days']}-day cap."
+    previous = result.get("previous")
+    started = f"Trial started on {result['started_on']}, {result['cap_days']}-day cap."
+    if previous is None:
+        return started
+    return (
+        f"Closed the run that started {previous['started_on']} and {started[0].lower()}"
+        f"{started[1:]}\nIts observations stay in the record and stop counting "
+        "toward this one."
+    )
 
 
 def render_retracted(result: dict, reason: str) -> str:
@@ -233,7 +242,9 @@ def run(args, config, conn) -> int:
 
     if args.trial_command == "start":
         started_on = args.on or datetime.now(UTC).date()
-        print(render_start(observations.start_trial(conn, started_on, args.cap_days)))
+        print(render_start(observations.start_trial(
+            conn, started_on, args.cap_days, restart_reason=args.restart
+        )))
         return 0
 
     if args.trial_command == "check":
