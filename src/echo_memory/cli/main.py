@@ -25,6 +25,7 @@ from echo_memory.cli import (
     unmerge,
 )
 from echo_memory.cli import analyse as analyse_cmd
+from echo_memory.cli import connect as connect_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import hooks as hooks_cmd
 from echo_memory.cli import queue as queue_cmd
@@ -119,6 +120,19 @@ def _add_project_parsers(sub) -> None:
             "whose session evidences one. Never guesses - a session with no "
             "attributed fact, or two, is reported as unrecoverable"
         ),
+    )
+
+    conn_parser = sub.add_parser(
+        "connect",
+        help="use the hosted service instead of running a database yourself",
+    )
+    conn_parser.add_argument(
+        "api_key", nargs="?",
+        help="a key from https://api.echo-mem.com (shown once, when created)",
+    )
+    conn_parser.add_argument(
+        "--endpoint", metavar="URL",
+        help=f"a different deployment (default: {connect_cmd.DEFAULT_ENDPOINT})",
     )
 
     sub.add_parser(
@@ -457,6 +471,11 @@ def main(argv: list[str] | None = None) -> int:
     # the command that sets it up would be a circle.
     if args.command == "quickstart":
         return quickstart.run(args)
+
+    # Same reason as quickstart: a machine using the hosted service has no
+    # local database, so requiring a database URL to configure it is a circle.
+    if args.command == "connect":
+        return connect_cmd.run(args)
 
     try:
         config = load_config()
