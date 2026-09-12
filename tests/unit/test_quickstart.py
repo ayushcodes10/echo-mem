@@ -147,3 +147,33 @@ def test_clients_are_detected_from_disk_not_asked_for(tmp_path):
     found = quickstart.detected_clients(tmp_path)
 
     assert found == ["Claude Code", "Codex"]
+
+
+# --- the skill, once, for every project ---------------------------------------
+
+
+def test_a_global_install_writes_only_the_skill(tmp_path):
+    """`install` writes into a project because that is usually right: the
+    wiring committed beside the code. But a skill that lives in one repo has to
+    be installed again in the next, and when to write a memory is not
+    repo-specific. Only the skill travels - .mcp.json and AGENTS.md belong to a
+    repo and mean nothing in a home directory."""
+    from echo_memory.cli import install
+
+    done = install.install_global(tmp_path)
+
+    skill = tmp_path / ".claude/skills/echo-memory/SKILL.md"
+    assert skill.exists()
+    assert skill.read_text().strip()
+    assert done == [f"created  {skill}"]
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_installing_globally_twice_is_a_no_op(tmp_path):
+    from echo_memory.cli import install
+
+    install.install_global(tmp_path)
+    again = install.install_global(tmp_path)
+
+    assert again[0].startswith("unchanged")

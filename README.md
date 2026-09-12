@@ -1,9 +1,39 @@
 # Echo Memory
 
-A long-horizon memory architecture for AI agents. Echo Memory is built to remember
-everything an agent has ever learned, in the best possible way, and to keep fetching and
-writing that memory efficiently no matter how much history accumulates, for coding
-tools, chatbots, DevOps agents, or any other agentic system, local or deployed.
+Shared memory for AI coding agents. What Claude Code learns, Codex and Cursor can recall
+— in one graph, on your own machine, with every write auditable.
+
+Apache 2.0. No LLM call on the write path, so recording a memory costs nothing to run.
+
+## Install
+
+Run it yourself — nothing leaves your machine:
+
+```bash
+pipx install echo-mem
+echo-memory quickstart
+```
+
+That starts the database, applies the schema, and prints the one line that registers it
+with your tools. Docker is the only prerequisite; the Postgres image is published, so
+nothing is compiled.
+
+Or use the hosted service and run no database at all:
+
+```bash
+pipx install echo-mem
+echo-memory connect <key>          # a key from https://api.echo-mem.com
+```
+
+Either way, restart your client afterwards. An MCP server holds the code and config it
+started with.
+
+Then, once per machine, so the agent knows *when* to record and recall rather than only
+that the tools exist:
+
+```bash
+echo-memory install --global
+```
 
 ## Why
 
@@ -66,46 +96,26 @@ is the target this architecture is built toward, not yet something v1a itself pr
 proves basic recall works before v1b adds causal typing and multi-hop graph retrieval, and
 before v1.1 adds the org-wide tenancy the broader vision depends on.
 
-## Getting started
+## Setting it up by hand
 
-The core recall loop is built and running: `write_episode`, `query_memory`,
-`get_audit_log`, an MCP server wiring them together, and an `echo-memory` CLI (`why`,
-`export`). Full setup is in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md); short version:
-
-```bash
-git clone git@github.com:ayushcodes10/echo-mem.git && cd echo-mem
-docker compose up -d                       # Postgres + pgvector + Apache AGE
-python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
-alembic upgrade head
-
-claude mcp add --scope user echo-memory \
-  -e ECHO_MEMORY_USER_ID=your-user-id \
-  -e ECHO_MEMORY_AGENT_ID=claude-code \
-  -e ECHO_MEMORY_DATABASE_URL="postgresql://postgres:postgres@localhost:5433/echo_memory" \
-  -- "$(pwd)/.venv/bin/python" -m echo_memory.server
-```
-
-Start a new Claude Code session and `write_episode`/`query_memory`/`record_recall_save`/
-`get_audit_log` are available across every project, not just this repo.
+`quickstart` is the short way. If you would rather see every step, or you are working on
+Echo Memory itself, [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) has the long version:
+clone, `docker compose up -d`, `pip install -e ".[dev]"`, `alembic upgrade head`, and the
+`claude mcp add` line with its environment.
 
 **Wiring a second tool? Give it its own `ECHO_MEMORY_AGENT_ID`.** Cursor should say
-`cursor`, Claude Desktop `claude-desktop`. Memory is shared either way, but a fact
-records which tool learned it, and two tools claiming the same id makes cross-tool
-recall impossible to see afterwards. `echo-memory adopt` wires every MCP client on the
-machine at once, each with its own id, and shows you the diff before writing
-anything. `echo-memory install --for both` does the same for one project.
+`cursor`, Claude Desktop `claude-desktop`. Memory is shared either way, but a fact records
+which tool learned it, and two tools claiming the same id makes cross-tool recall
+impossible to see afterwards. `echo-memory adopt` wires every MCP client on the machine at
+once, each with its own id, and shows the diff before writing anything.
 
-Prefer it scoped to one project - a single Claude project, a Cursor workspace, a repo
-whose memory shouldn't mingle with the rest? `echo-memory install [path] --for
-claude|cursor|both` writes a project-scoped MCP config plus a skill (or, for Cursor, an
-always-applied rule) telling the agent when to record and when to recall. See
-[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for Cursor/per-repo setup, the
-`echo-memory` CLI, and running tests; see
-[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for using Echo Memory from an agent
-that doesn't speak MCP (a chatbot, a DevOps agent, a booking agent, or any custom
-tool-calling loop); and see
-[`docs/designs/echo-memory-design.md`](docs/designs/echo-memory-design.md) for the
-current build plan and progress.
+Scoped to one project instead — a single Claude project, a Cursor workspace, a repo whose
+memory should not mingle with the rest? `echo-memory install [path]` writes a
+project-scoped MCP config plus a skill (or, for Cursor, an always-applied rule), committed
+alongside the code.
+
+See [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for using Echo Memory from an agent
+that does not speak MCP — a chatbot, a DevOps agent, or any custom tool-calling loop.
 
 ## The graph
 

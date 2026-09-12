@@ -171,6 +171,30 @@ alwaysApply: true
 """
 
 
+def install_global(home: Path) -> list[str]:
+    """The skill, once, for every project on this machine.
+
+    `install` writes into a project because that is usually what is wanted: the
+    wiring committed alongside the code, visible to everyone who clones it. But
+    a skill that only exists in one repo has to be installed again in the next
+    one, and the instruction it carries - when to write a memory, when to
+    recall - is not repo-specific at all.
+
+    Claude Code reads ~/.claude/skills the same way it reads a project's, so
+    the same file in the user directory covers every project at once. Only the
+    skill: .mcp.json and AGENTS.md belong to a repo and have no meaning in a
+    home directory.
+    """
+    skill_path = home / SKILL_DIR / "SKILL.md"
+    skill_path.parent.mkdir(parents=True, exist_ok=True)
+    text = skill_text()
+    state = "unchanged" if skill_path.exists() and skill_path.read_text() == text else (
+        "updated" if skill_path.exists() else "created"
+    )
+    skill_path.write_text(text)
+    return [f"{state}  {skill_path}"]
+
+
 def install(root: Path, config, targets: tuple[str, ...], project: str | None = None) -> list[str]:
     root = root.resolve()
     project = project or detect_project(str(root), env={})

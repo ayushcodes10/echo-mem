@@ -356,6 +356,11 @@ def _add_project_parsers(sub) -> None:
         "install", help="wire Echo Memory into one project instead of every project"
     )
     inst.add_argument(
+        "--global", action="store_true", dest="user_global",
+        help="install the skill once for every project, in ~/.claude/skills, "
+             "instead of into one repo",
+    )
+    inst.add_argument(
         "--no-bootstrap", action="store_true",
         help="skip the first-run sweep for work that already exists on this machine",
     )
@@ -695,6 +700,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "install":
+        if getattr(args, "user_global", False):
+            for line in install.install_global(Path.home()):
+                print(line)
+            print(
+                "\nThe skill now applies in every project. MCP registration is still "
+                "per-client:\n  claude mcp add --scope user echo-memory -- echo-memory serve"
+            )
+            return 0
         targets = (
             ("claude", "cursor", "codex") if args.targets == "all" else (args.targets,)
         )
