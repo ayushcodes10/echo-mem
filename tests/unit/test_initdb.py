@@ -32,8 +32,24 @@ def test_every_migration_is_reachable_from_the_package():
     assert "0007" in revisions, "the newest migration must ship, not just the old ones"
 
 
-def test_the_database_url_is_passed_through():
-    assert initdb._config(URL).get_main_option("sqlalchemy.url") == URL
+def test_the_database_url_names_the_driver():
+    """A bare postgresql:// makes SQLAlchemy reach for psycopg2, which nothing
+    here depends on, so Alembic fails with ModuleNotFoundError - a message that
+    reads as a broken install rather than a URL missing four characters. The
+    rewrite used to live only in migrations/env.py, behind an environment
+    variable the CLI always set and no other caller did: quickstart could not
+    complete a single migration."""
+    rewritten = initdb._config(URL).get_main_option("sqlalchemy.url")
+
+    assert rewritten == URL.replace("postgresql://", "postgresql+psycopg://")
+
+
+def test_a_url_that_already_names_a_driver_is_left_alone():
+    """Somebody who passes postgresql+psycopg2:// has chosen a driver; turning
+    it into postgresql+psycopg+psycopg2:// would be a URL nothing can parse."""
+    explicit = "postgresql+psycopg2://postgres:postgres@localhost:5433/echo_memory"
+
+    assert initdb.psycopg3_url(explicit) == explicit
 
 
 def test_a_missing_age_extension_explains_the_setup_step():

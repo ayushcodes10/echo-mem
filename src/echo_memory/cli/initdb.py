@@ -37,13 +37,32 @@ _EXTENSION_HINTS = {
 }
 
 
+def psycopg3_url(database_url: str) -> str:
+    """Name the driver SQLAlchemy should use, rather than letting it guess.
+
+    A bare `postgresql://` makes SQLAlchemy reach for psycopg2, which nothing
+    here depends on - this package pins psycopg[binary]>=3 - so the failure is
+    `ModuleNotFoundError: No module named 'psycopg2'` from inside Alembic,
+    which reads as a broken install rather than a URL missing four characters.
+
+    This used to live only in migrations/env.py, applied when
+    ECHO_MEMORY_DATABASE_URL was set. That made the coupling invisible from the
+    CLI, which always sets it, and fatal for every other caller: echo-mem-cloud
+    carries a comment about discovering it, and `quickstart` - the command whose
+    entire job is a first run - could not complete a single migration.
+    """
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return database_url
+
+
 def _config(database_url: str) -> AlembicConfig:
     """Point Alembic at the migrations inside the installed package rather than
     at a repo-relative path, which is what makes this work after a pip install."""
     migrations = resources.files("echo_memory") / "migrations"
     cfg = AlembicConfig()
     cfg.set_main_option("script_location", str(migrations))
-    cfg.set_main_option("sqlalchemy.url", database_url)
+    cfg.set_main_option("sqlalchemy.url", psycopg3_url(database_url))
     return cfg
 
 
