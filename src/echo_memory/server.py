@@ -5,6 +5,8 @@ not a network listener at all, let alone one bound beyond localhost; see
 the design doc's Constraints ("v1 is single-user, local-only")."""
 
 import json
+import threading
+import time
 
 import psycopg
 from mcp.server.mcpserver import MCPServer
@@ -55,6 +57,7 @@ class ServerState:
     mutating process-wide state that other tests might also touch."""
 
     config: Config
+    warming = None
     pool: object
     embedder: Embedder
 
@@ -68,6 +71,40 @@ def startup(config: Config | None = None, embedder: Embedder | None = None) -> N
     _state.config = config or load_config()
     _state.pool = make_pool(_state.config.database_url)
     _state.embedder = embedder or LocalEmbedder()
+
+    # In the background, so the client's handshake is not held for seven
+    # seconds, and so the load happens while the user is still typing rather
+    # than inside their first question.
+    #
+    # Claude Desktop's server log on 2026-09-12 shows what it costs otherwise:
+    # query_memory at 6099ms and 5994ms against other calls at 5ms. The model
+    # is lazy on purpose - a CLI that prints a queue must not download one -
+    # but a long-lived server knows it will need it and has an idle moment at
+    # startup to pay for it.
+    warm = getattr(_state.embedder, "warm", None)
+    _state.warming = None
+    if warm is not None:
+        # Kept on the state rather than fired and forgotten: a caller that
+        # needs the load finished - a test, or a one-shot script - can join it,
+        # and a daemon thread that logs after its process has moved on is how
+        # a background task turns into confusing output somewhere else.
+        _state.warming = threading.Thread(target=_warm, args=(warm,), daemon=True)
+        _state.warming.start()
+
+
+def _warm(warm) -> None:
+    """Never raises. A model that fails to preload will fail again on the first
+    real call, where the caller can be told about it; killing a background
+    thread with a traceback on stderr would only corrupt an MCP server's log."""
+    try:
+        started = time.perf_counter()
+        warm()
+        _logger.info(
+            "embedder_warm",
+            extra={"duration_ms": (time.perf_counter() - started) * 1000},
+        )
+    except Exception:  # see docstring
+        _logger.warning("embedder_warm_failed", exc_info=True)
 
 
 @server.tool()

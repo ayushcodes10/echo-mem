@@ -101,21 +101,33 @@ def stale_writer(conn, group_ids: list[str]) -> str | None:
     on disk was correct and the tests passed.
 
     Comparing the newest audit entry's writer against this process's own version
-    is the only way to see it from outside. Older rows carry no version at all
-    and are skipped rather than guessed at: this must not answer confidently
-    about the period it cannot see.
+    is the only way to see it from outside.
+
+    A null is uninformative only before the column existed, which is what
+    schema_moment records. After that moment a write with no version is not a
+    gap in the record, it is the record: the writer predates the column. The
+    first version of this check skipped every null and so could not see the
+    very servers it was built for.
     """
     from echo_memory import __version__
 
     row = conn.execute(
-        """SELECT writer_version FROM public.audit_entry
-            WHERE group_id = ANY(%s) AND writer_version IS NOT NULL
-            ORDER BY "timestamp" DESC LIMIT 1""",
+        """SELECT ae.writer_version
+             FROM public.audit_entry ae
+             LEFT JOIN public.schema_moment m ON m.name = 'writer_version_expected'
+            WHERE ae.group_id = ANY(%s)
+              AND (ae.writer_version IS NOT NULL
+                   OR (m.occurred_at IS NOT NULL AND ae."timestamp" > m.occurred_at))
+            ORDER BY ae."timestamp" DESC LIMIT 1""",
         (group_ids,),
     ).fetchone()
     if row is None or row[0] == __version__:
         return None
-    return str(row[0])
+    # A write with no version, made after this database gained the column, is
+    # proof the writer predates it. Skipping those was the original mistake:
+    # the server that caused 30 authorless facts stamps nothing at all, so it
+    # was invisible to the detector built to find it.
+    return str(row[0]) if row[0] is not None else "before versions were recorded"
 
 
 def _connectivity(graph: dict) -> dict:
