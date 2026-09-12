@@ -190,6 +190,23 @@ def gate_conversion(conn) -> dict:
     model a choice about what is worth remembering, and there is no hook for
     that.
 
+    **Three outcomes, not two, and the third is the honest majority.**
+
+      wrote     a fact was written by that session after the firing
+      closed    a queued document was closed - the gate's own instruction for
+                content already recorded
+      unknown   neither. The logs cannot say whether anything was owed.
+
+    The last one is not a failure and was reported as one. A session that made
+    118 edits and wrote nothing looks damning, but edit count is evidence of
+    ACTIVITY, not of an unmet need to remember: nothing here establishes that
+    any of those edits produced something worth keeping. Calling every non-write
+    a miss assumes the denominator this instrument cannot measure. A reviewer
+    made that point about the paper and it applies to the metric itself.
+
+    So what is reported is new-write incidence and correct disposition, with
+    the remainder named as unresolved rather than counted against anything.
+
     A firing counts as converted if a fact was written OR a queued document was
     closed after it. Writing alone was the first version and it was wrong in a
     way the gate demonstrated within the hour: its own instruction says that
@@ -204,9 +221,14 @@ def gate_conversion(conn) -> dict:
     made before migration 0020 have no recorded author, so every firing older
     than it can only be credited through a write. Read it as a floor.
     """
-    fired = conn.execute("SELECT session_id, at FROM public.stop_gate_fired").fetchall()
+    fired = conn.execute(
+        "SELECT session_id, at, n_files FROM public.stop_gate_fired"
+    ).fetchall()
     converted = 0
-    for session_id, at in fired:
+    wrote_n = 0
+    closed_n = 0
+    had_queue = 0
+    for session_id, at, n_files in fired:
         wrote = conn.execute(
             """SELECT 1 FROM public.audit_entry
                WHERE session_id = %s AND mutation_type = 'created' AND timestamp > %s
@@ -218,9 +240,24 @@ def gate_conversion(conn) -> dict:
                WHERE ingested_by_session = %s AND ingested_at > %s LIMIT 1""",
             (session_id, at),
         ).fetchone()
+        if wrote:
+            wrote_n += 1
+        if closed:
+            closed_n += 1
         if wrote or closed:
             converted += 1
-    return {"fired": len(fired), "converted": converted}
+        if n_files:
+            had_queue += 1
+    return {
+        "fired": len(fired),
+        "converted": converted,
+        "wrote": wrote_n,
+        "closed": closed_n,
+        # Firings where a document was actually queued, so something was known
+        # to be owed. The rest fired on "did work, recorded nothing", where
+        # whether anything was worth keeping is exactly what is not established.
+        "with_queue": had_queue,
+    }
 
 
 def collect(conn, config, today: datetime | None = None) -> dict:
@@ -480,13 +517,14 @@ def render(h: dict) -> str:
     # how this project came to believe structural capture was solved.
     g = h.get("gate") or {}
     if g.get("fired"):
+        unresolved = g["fired"] - g["converted"]
         lines.append(
-            f"  stop gate fired {g['fired']}x, {g['converted']} followed by a fact "
-            f"from the same session"
+            f"  stop gate fired {g['fired']}x: {g['wrote']} wrote a fact, "
+            f"{g['closed']} closed a queued document, {unresolved} unresolved"
         )
         lines.append(
-            "    a later session writing the same knowledge is not counted here, "
-            "so this is a floor"
+            f"    {g['with_queue']} of {g['fired']} fired with something queued; for the "
+            "rest, whether anything was worth keeping is not established"
         )
         lines.append("")
 

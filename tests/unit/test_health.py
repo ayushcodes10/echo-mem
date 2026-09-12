@@ -193,3 +193,25 @@ def test_a_current_writer_says_nothing():
     attention = health.findings(h(stale_writer=None))[1]
 
     assert not any("version" in a for a in attention)
+
+
+def test_the_gate_line_separates_three_outcomes_not_two():
+    """A firing that resolved by closing an already-recorded document is not a
+    failure, and neither is one where nothing was demonstrably owed. The first
+    version of this metric counted only new writes and reported 1 of 8, which a
+    reviewer identified as the wrong success definition while the paper quoting
+    it also said so.
+
+    Edit count is evidence of ACTIVITY, not of an unmet need to remember. A
+    session with 118 edits and no facts looks damning and establishes nothing
+    about whether anything in those edits was worth keeping, so the remainder
+    is named unresolved rather than counted against the mechanism."""
+    out = health.render(h(
+        gate={"fired": 8, "converted": 1, "wrote": 1, "closed": 0, "with_queue": 4}
+    ))
+
+    assert "1 wrote a fact" in out
+    assert "0 closed a queued document" in out
+    assert "7 unresolved" in out
+    assert "4 of 8 fired with something queued" in out
+    assert "not established" in out
