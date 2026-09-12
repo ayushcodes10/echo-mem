@@ -294,9 +294,9 @@ def _add_project_parsers(sub) -> None:
         help="also score the configurations each retrieval change was chosen against",
     )
     ev.add_argument(
-        "--shape", choices=["all", "entity_pair", "entity_single", "prose"],
+        "--shape", choices=["all", "entity_pair", "entity_single", "prose", "multihop"],
         default="all",
-        help="query shape (default: all three; one shape alone can invert a conclusion)",
+        help="query shape (default: all four; one shape alone can invert a conclusion)",
     )
     bench.add_argument(
         "--group", metavar="ID", default="benchmark:scratch",
