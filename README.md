@@ -14,8 +14,8 @@ pipx install echo-mem
 echo-memory quickstart
 ```
 
-That starts the database, applies the schema, and prints the one line that registers it
-with your tools. Docker is the only prerequisite; the Postgres image is published, so
+That starts the database, applies the schema, and prints the `claude mcp add` command
+that registers it with your tools, filled in with the port it actually used. Docker is the only prerequisite; the Postgres image is published, so
 nothing is compiled.
 
 Or use the hosted service and run no database at all:
