@@ -367,6 +367,11 @@ def _add_trial_parser(sub) -> None:
         help="start date, if the trial really began before you got round to recording it",
     )
     start.add_argument(
+        "--restart", metavar="WHY",
+        help="close the open run and begin a new one, recording why the old "
+             "one stopped counting",
+    )
+    start.add_argument(
         "--cap-days", type=int, default=observations.DEFAULT_CAP_DAYS,
         help=f"hard cap in days (default: {observations.DEFAULT_CAP_DAYS})",
     )

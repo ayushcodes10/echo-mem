@@ -162,16 +162,20 @@ def test_an_identical_name_is_flagged_as_certain_not_ranked_among_guesses(migrat
     conn = connect(migrated_db)
     group_id = config.group_id("shared")
 
-    original, twin = (
-        str(r[0])
-        for r in conn.execute(
+    def _by_name(name):
+        row = conn.execute(
             f"""SELECT * FROM cypher('{GRAPH}', $$
-                MATCH (n:Node {{group_id: $gid}})
-                WHERE n.name IN ['AGE', 'Apache AGE'] RETURN id(n) $$, %s)
-                AS (i agtype)""",
-            (json.dumps({"gid": group_id}),),
-        ).fetchall()
-    )
+                MATCH (n:Node {{group_id: $gid}}) WHERE n.name = $name RETURN id(n)
+            $$, %s) AS (i agtype)""",
+            (json.dumps({"gid": group_id, "name": name}),),
+        ).fetchone()
+        assert row is not None, f"the fixture produced no {name!r}"
+        return str(row[0])
+
+    # By name, not by row order: MATCH returns them in whatever order it likes,
+    # and renaming the wrong one of the pair is a no-op that leaves this test
+    # passing or failing on which id the planner happened to emit first.
+    original, twin = _by_name("AGE"), _by_name("Apache AGE")
     # Migration 0016 makes this state impossible to create, which is the point
     # of it - but a store upgrading from before that migration can already hold
     # one, and 0016 refuses to run until every collision has been merged. This
@@ -486,3 +490,78 @@ def test_retracting_something_that_does_not_exist_says_so(migrated_db):
     with pytest.raises(observations.TrialError) as e:
         observations.retract(conn, 999999, "a reason")
     assert "no observation" in str(e.value)
+
+
+# --- one run's tally is not another's ------------------------------------------
+
+
+def test_a_tally_is_taken_over_the_open_run_only(migrated_db):
+    """Criterion 6 asks what happened "over a trial of real cross-tool usage,
+    capped at 3 weeks", not what has ever been recorded. A new run inheriting
+    the last one's bad merges would begin already failed; inheriting its recall
+    saves would begin already flattered."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    group_id = config.group_id("shared")
+    observations.start_trial(conn, date(2026, 8, 21))
+
+    observations.record(conn, group_id, observations.RECALL_SAVE, "an old save",
+                        written_by="codex", recalled_by="claude-code")
+    conn.execute(
+        """UPDATE public.trial_observation SET "timestamp" = '2026-08-25'::timestamptz"""
+    )
+    assert observations.counts(conn, [group_id], since=date(2026, 8, 21))["cross_tool_saves"] == 1
+
+    restarted = observations.start_trial(
+        conn, date(2026, 9, 12), restart_reason="the instrument was broken throughout"
+    )
+    assert restarted["previous"]["started_on"] == date(2026, 8, 21)
+
+    report = check.build_report(conn, config, today=date(2026, 9, 12))
+    assert report["trial"]["started_on"] == date(2026, 9, 12)
+    assert report["trial"]["day"] == 1
+    assert report["counts"]["cross_tool_saves"] == 0, "the new run inherited the old tally"
+    assert report["counts"]["before_this_run"] == 1
+
+
+def test_the_closed_run_is_still_in_the_record(migrated_db):
+    """Overwriting it would destroy the record of what the first trial
+    measured, which is the one thing a trial is for."""
+    _seed(migrated_db)
+    conn = connect(migrated_db)
+    observations.start_trial(conn, date(2026, 8, 21))
+    observations.start_trial(conn, date(2026, 9, 12), restart_reason="every bad merge came from a hole now closed")
+
+    past = observations.past_trials(conn)
+    assert len(past) == 1
+    assert past[0]["started_on"] == date(2026, 8, 21)
+    assert past[0]["ended_on"] == date(2026, 9, 12)
+    assert "now closed" in past[0]["ended_reason"]
+
+
+def test_only_one_run_is_open_at_a_time(migrated_db):
+    """Enforced by the database rather than trusted: two open runs would make
+    "the trial" an ambiguous term in the one place it has to be exact."""
+    import psycopg
+
+    _seed(migrated_db)
+    conn = connect(migrated_db)
+    observations.start_trial(conn, date(2026, 8, 21))
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        conn.execute(
+            "INSERT INTO public.trial_run (started_on, cap_days) VALUES ('2026-09-12', 21)"
+        )
+
+
+def test_starting_again_without_a_reason_changes_nothing(migrated_db):
+    """A repeated command must never move a clock by accident."""
+    _seed(migrated_db)
+    conn = connect(migrated_db)
+    observations.start_trial(conn, date(2026, 8, 21))
+
+    again = observations.start_trial(conn, date(2026, 9, 12))
+
+    assert again["already_started"] is True
+    assert again["started_on"] == date(2026, 8, 21)
+    assert observations.past_trials(conn) == []
