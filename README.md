@@ -224,3 +224,8 @@ the [Contributor License Agreement](CLA.md) — once, in the PR thread.
 ## License
 
 Apache License 2.0. See [`LICENSE`](LICENSE).
+
+<!-- The MCP registry proves you own a PyPI package by finding this line in the
+     package's own description. It has to survive into the built distribution,
+     which is why it lives in the README rather than in a workflow. -->
+mcp-name: io.github.ayushcodes10/echo-mem
