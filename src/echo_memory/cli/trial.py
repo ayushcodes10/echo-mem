@@ -87,6 +87,19 @@ def render_criterion_six(report: dict, indent: str = "  ", show_hint: bool = Tru
         f"{indent}[{'x' if met['saves'] else ' '}] {counts['cross_tool_saves']}"
         f"/{observations.REQUIRED_SAVES} recall saves to a different tool{saves_note}"
     )
+    # What the number does and does not establish, against the number itself.
+    #
+    # The server derives both tool identities from evidence it holds and, since
+    # migration 0021, checks that a read actually returned the cited fact. What
+    # it cannot check is the benefit: the agent chose the fact and judged that
+    # it saved a re-explanation. A reviewer of the paper drawn from these
+    # numbers drew that line, and it belongs where the number is read.
+    if counts["cross_tool_saves"]:
+        corroborated = counts.get("corroborated_saves", 0)
+        lines.append(
+            f"{indent}    {corroborated} of {counts['cross_tool_saves']} corroborated by "
+            "the read log; the benefit is the agent's own judgement"
+        )
     # Reported, not blocking. A save is excluded when its own evidence is
     # missing (see observations.counts); facts elsewhere in the store that lost
     # their author are a health problem worth seeing and say nothing about
@@ -115,11 +128,6 @@ def render_criterion_six(report: dict, indent: str = "  ", show_hint: bool = Tru
     # checks either. A reviewer of the paper written from these numbers made
     # the distinction and it belongs where the number is read, not only in the
     # paper.
-    if counts["cross_tool_saves"]:
-        lines.append(
-            f"{indent}    provenance on these is verified; the benefit is the "
-            "agent's own judgement"
-        )
     if counts.get("retracted"):
         # Shown rather than silently netted out. A retracted judgement is still
         # part of what happened in the trial, and a tally that quietly shrank
