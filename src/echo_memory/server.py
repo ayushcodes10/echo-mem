@@ -216,6 +216,10 @@ def query_memory(scope: str, query: str | None = None, top_k: int = 10, digest: 
                 # main read surface the one nobody could account for.
                 project=_state.config.project,
                 agent_id=_state.config.agent_id,
+                # Which facts, not just how many. A count cannot answer
+                # "was this one delivered", which is the question
+                # record_recall_save has to ask of its own evidence.
+                fact_ids=[f.get("fact_id") for f in result.get("facts") or []],
             )
             _bootstrap_once(conn)
             queued = capture.pending(conn)
@@ -376,6 +380,10 @@ def record_recall_save(
     assert neither. Both used to be caller-supplied, and each in turn let the
     model being graded type its own evidence.
 
+    The server also checks its read log for the fact you cite, and refuses an
+    id no read in this scope has ever returned. Pass the id you were given,
+    not one you remember.
+
     If the fact's author and you are the same tool, the save is recorded but
     does not count - recalling your own note from ten minutes ago is not the
     thing being measured.
@@ -419,10 +427,32 @@ def record_recall_save(
                     "Nothing recovers this - the session that knew is gone. Cite "
                     "a different fact."
                 )}
+            # Was this fact ever actually given to anybody?
+            #
+            # Both tool identities are derived rather than asserted, but until
+            # now nothing checked the caller had RECEIVED the fact it cites -
+            # the id was looked up directly, so an agent could name a fact it
+            # never queried for. A reviewer of the paper written from this
+            # work made the point, and it was the strongest objection of the
+            # seven.
+            #
+            # Refused only when NO read in this scope ever returned it. A
+            # weaker grade of evidence is recorded rather than rejected,
+            # because most of this store's reads predate the column that would
+            # corroborate them and a check that refuses every honest save
+            # would destroy the criterion it is meant to strengthen.
+            delivery = _reads.delivered(conn, group_id, fact_id, recalled_by)
+            if delivery is None and _reads.has_delivery_log(conn, group_id):
+                return {"error": (
+                    f"no read in this scope ever returned fact {fact_id}, so it "
+                    "cannot evidence a recall. Cite the fact_id from a "
+                    "query_memory result you actually received in this session."
+                )}
             try:
                 recorded = _observations.record(
                     conn, group_id, _observations.RECALL_SAVE, note,
                     written_by=written_by, recalled_by=recalled_by,
+                    delivery=delivery,
                 )
             except _observations.TrialError as e:
                 return {"error": str(e)}
@@ -437,6 +467,7 @@ def record_recall_save(
             "observation_id": recorded["id"], "newly_recorded": recorded["created"],
             "written_by": written_by, "recalled_by": recalled_by,
             "cross_tool": cross_tool, "group_id": group_id,
+            "delivery": delivery,
         },
     )
     result = {
@@ -450,6 +481,11 @@ def record_recall_save(
         "written_by": written_by,
         "recalled_by": recalled_by,
         "counts_toward_gate": cross_tool,
+        # How strongly the read log corroborates the claim: "agent" if a read
+        # by this tool returned the fact, "group" if some read in the scope
+        # did, null if the log cannot say. The benefit is still the agent's
+        # judgement; this is about whether the recall happened at all.
+        "delivery": delivery,
         "cross_tool_saves": counts["cross_tool_saves"],
         "required": _observations.REQUIRED_SAVES,
     }

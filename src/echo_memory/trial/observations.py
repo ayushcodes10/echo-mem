@@ -119,6 +119,7 @@ def record(
     recalled_by: str | None = None,
     node_ids: list[str] | None = None,
     audit_entry_id: int | None = None,
+    delivery: str | None = None,
 ) -> dict:
     """Record one observation. Returns {"id": int, "created": bool}.
 
@@ -167,12 +168,12 @@ def record(
     if kind == RECALL_SAVE:
         row = conn.execute(
             """INSERT INTO public.trial_observation
-                   (kind, group_id, note, written_by, recalled_by)
-               VALUES (%s, %s, %s, %s, %s)
+                   (kind, group_id, note, written_by, recalled_by, delivery)
+               VALUES (%s, %s, %s, %s, %s, %s)
                ON CONFLICT (group_id, written_by, note) WHERE kind = 'recall_save'
                    DO NOTHING
                RETURNING id""",
-            (kind, group_id, note, written_by, recalled_by),
+            (kind, group_id, note, written_by, recalled_by, delivery),
         ).fetchone()
         if row is not None:
             return {"id": row[0], "created": True}
@@ -268,8 +269,23 @@ def counts(conn, group_ids: list[str], since: date | None = None) -> dict:
         (group_ids, since, since),
     ).fetchone()
 
+    # How many cross-tool saves the read log corroborates. Counted separately
+    # from the bar itself: a save with no delivery evidence is not fraudulent,
+    # it predates the column that would have recorded it, and conflating the
+    # two would retroactively invalidate the record.
+    (corroborated,) = conn.execute(
+        """SELECT count(*) FROM public.trial_observation
+            WHERE group_id = ANY(%s) AND retracted_at IS NULL
+              AND kind = %s AND delivery IS NOT NULL
+              AND written_by IS DISTINCT FROM recalled_by
+              AND written_by <> %s AND recalled_by <> %s
+              AND (%s::date IS NULL OR "timestamp" >= %s::date)""",
+        (group_ids, RECALL_SAVE, UNATTRIBUTED, UNATTRIBUTED, since, since),
+    ).fetchone()
+
     saves = by_kind.get(RECALL_SAVE, {"cross_tool": 0, "unattributed": 0, "total": 0})
     return {
+        "corroborated_saves": corroborated,
         "retracted": retracted,
         "before_this_run": before,
         "cross_tool_saves": saves["cross_tool"],

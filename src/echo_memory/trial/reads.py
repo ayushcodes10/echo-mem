@@ -30,6 +30,7 @@ def record(
     project: str | None = None,
     session_id: str | None = None,
     agent_id: str | None = None,
+    fact_ids: list[str] | None = None,
 ) -> None:
     """Never raises. A prompt must reach the agent whether or not this works.
 
@@ -39,9 +40,11 @@ def record(
     try:
         conn.execute(
             """INSERT INTO public.read_event
-                   (group_id, kind, n_facts, injected_chars, project, session_id, agent_id)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            (group_id, kind, n_facts, injected_chars, project, session_id, agent_id),
+                   (group_id, kind, n_facts, injected_chars, project, session_id,
+                    agent_id, returned_fact_ids)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (group_id, kind, n_facts, injected_chars, project, session_id, agent_id,
+             [str(f) for f in fact_ids] if fact_ids else None),
         )
     except Exception as e:  # noqa: BLE001 - see docstring: never blocks a prompt
         _logger.warning("read_event_not_recorded", extra={"error": str(e)})
@@ -119,3 +122,64 @@ def by_project(conn, group_ids: list[str], days: int = 7) -> list[dict]:
         }
         for r in rows
     ]
+
+
+# How strongly a claimed recall is corroborated by the read log.
+DELIVERED_TO_AGENT = "agent"
+DELIVERED_TO_GROUP = "group"
+
+
+def delivered(conn, group_id: str, fact_id: str, agent_id: str | None) -> str | None:
+    """Whether a read in this scope ever returned this fact, and to whom.
+
+    Three answers, and the middle one is the point:
+
+      "agent"  a read BY THIS TOOL returned it. The claim is corroborated.
+      "group"  some read in this scope returned it, by a tool the log did not
+               record. Weaker, and the honest answer while most reads are
+               unattributed.
+      None     no read ever returned it. The caller is citing a fact it was
+               never given, which is the case worth refusing.
+
+    Best-effort like everything else here: a store mid-migration answers None
+    for every fact, so the caller treats an unavailable log as no evidence
+    rather than as proof of abuse. See record_recall_save.
+    """
+    try:
+        rows = conn.execute(
+            """SELECT coalesce(agent_id, '') FROM public.read_event
+               WHERE group_id = %s AND returned_fact_ids @> ARRAY[%s]::text[]""",
+            (group_id, str(fact_id)),
+        ).fetchall()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("delivery_lookup_failed", extra={"error": str(e)})
+        return None
+    if not rows:
+        return None
+    if agent_id and any(r[0] == agent_id for r in rows):
+        return DELIVERED_TO_AGENT
+    return DELIVERED_TO_GROUP
+
+
+def has_delivery_log(conn, group_id: str) -> bool:
+    """Whether this scope has ever recorded which facts a read returned.
+
+    The guard on refusing. Before migration 0021 no read stored its fact ids,
+    so `delivered` answers None for every fact in a store that has not read
+    anything since - and refusing on that would reject every honest save on
+    every existing install the moment it upgraded. A check that fires hardest
+    on the people who have been using the thing longest is not a check.
+
+    Once one read has been logged with its ids, absence of evidence for a
+    particular fact starts to mean something.
+    """
+    try:
+        row = conn.execute(
+            """SELECT 1 FROM public.read_event
+               WHERE group_id = %s AND returned_fact_ids IS NOT NULL LIMIT 1""",
+            (group_id,),
+        ).fetchone()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("delivery_log_check_failed", extra={"error": str(e)})
+        return False
+    return row is not None

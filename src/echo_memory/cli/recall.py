@@ -175,6 +175,13 @@ def record_read(conn, config, result: dict, context: str, session_id: str | None
         conn, config.group_id("shared"), reads.HOOK,
         n_facts=len(result.get("facts") or []), injected_chars=len(context),
         project=config.project, session_id=session_id,
+        # agent_id was available here and never passed, which is why 434 of
+        # this store's 458 reads carry no tool: the hook is the busiest read
+        # surface by an order of magnitude, and it was the anonymous one. It
+        # also decides whether a recall save can be corroborated against the
+        # tool that made the read rather than only against the scope.
+        agent_id=config.agent_id,
+        fact_ids=[f.get("fact_id") for f in result.get("facts") or []],
     )
 
 
