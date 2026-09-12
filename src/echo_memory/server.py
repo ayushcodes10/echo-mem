@@ -129,15 +129,11 @@ def write_episode(
     facts: list[dict],
     entity_resolutions: dict | None = None,
 ) -> dict:
-    """Record something worth remembering later: a decision, a correction,
-    a stated preference, or context that would otherwise have to be
-    re-explained to a different tool or a future session. Call this
-    proactively and immediately when you notice one - don't wait to be
-    asked, don't batch it for later. A missed memory costs more than an
-    extra call.
-
-    You extract the entities and facts yourself; this server never calls
-    an LLM.
+    """Record something worth remembering later: a decision, a correction, a
+    stated preference, or context that would otherwise be re-explained to
+    another tool or a later session. Call it the moment you notice one, not
+    batched and not at the end - a missed memory costs more than an extra
+    call. You extract the entities and facts; this server never calls an LLM.
 
     entities: [{"name": "Postgres", "type": "tool"}, ...]
       name  non-empty, unique within this call
@@ -156,13 +152,9 @@ def write_episode(
     ambiguous_entities, to say which candidate a mention meant:
     {"mention": {"resolved_to": "<node_id>" | "new"}}. Omit otherwise.
 
-    The reply may carry related_entities: entities already in this scope
-    that appear in facts close to what you just wrote, each with the fact
-    that made it relevant. They are a prompt to reuse a name rather than
-    invent a near-synonym - the next time you write about one of those
-    subjects, name the existing entity. Nothing is written from them and no
-    reply is needed. Reusing names is what makes the graph connected enough
-    to walk; a store of one-fact entities can be searched but not traversed.
+    related_entities in the reply: names this scope already uses for what
+    you just wrote. Reuse them next time rather than coin a near-synonym.
+    Advisory - nothing is written from them and no reply is needed.
 
     Example:
     write_episode(scope="solo", session_id="s1",
