@@ -1,0 +1,51 @@
+# Publish the database image, so nobody has to compile Apache AGE to try this.
+#
+# The one hard prerequisite of self-hosting is a Postgres that has both
+# pgvector and Apache AGE, and no managed provider offers AGE - not RDS,
+# Aurora, Cloud SQL, Neon or Supabase. Until this workflow existed the only
+# way to get one was `docker build` against docker/postgres.Dockerfile, which
+# compiles AGE from source: minutes of build on a first run, and a wall for
+# anyone evaluating the project who has never heard of AGE.
+#
+# Multi-arch on purpose. The Dockerfile's own comment records why: apache/age
+# publishes amd64 only, and under QEMU on Apple Silicon a spike measured
+# traversals 25-140x slower than native and produced a false NO-GO. An image
+# that is fast on the reviewer's laptop has to be built for their laptop.
+name: postgres image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docker/postgres.Dockerfile
+      - .github/workflows/postgres-image.yml
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/postgres.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Pinned by the AGE release the Dockerfile clones, so a published
+          # tag always says which AGE it contains.
+          tags: |
+            ghcr.io/ayushcodes10/echo-mem-postgres:pg16-age1.5.0
+            ghcr.io/ayushcodes10/echo-mem-postgres:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

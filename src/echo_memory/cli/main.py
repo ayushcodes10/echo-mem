@@ -19,11 +19,13 @@ from echo_memory.cli import (
     health,
     initdb,
     merge,
+    quickstart,
     reattribute_cmd,
     stop_gate,
     unmerge,
 )
 from echo_memory.cli import analyse as analyse_cmd
+from echo_memory.cli import connect as connect_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import hooks as hooks_cmd
 from echo_memory.cli import queue as queue_cmd
@@ -118,6 +120,24 @@ def _add_project_parsers(sub) -> None:
             "whose session evidences one. Never guesses - a session with no "
             "attributed fact, or two, is reported as unrecoverable"
         ),
+    )
+
+    conn_parser = sub.add_parser(
+        "connect",
+        help="use the hosted service instead of running a database yourself",
+    )
+    conn_parser.add_argument(
+        "api_key", nargs="?",
+        help="a key from https://api.echo-mem.com (shown once, when created)",
+    )
+    conn_parser.add_argument(
+        "--endpoint", metavar="URL",
+        help=f"a different deployment (default: {connect_cmd.DEFAULT_ENDPOINT})",
+    )
+
+    sub.add_parser(
+        "quickstart",
+        help="start the database, apply the schema, and say what to do next",
     )
 
     cal = sub.add_parser(
@@ -336,6 +356,11 @@ def _add_project_parsers(sub) -> None:
         "install", help="wire Echo Memory into one project instead of every project"
     )
     inst.add_argument(
+        "--global", action="store_true", dest="user_global",
+        help="install the skill once for every project, in ~/.claude/skills, "
+             "instead of into one repo",
+    )
+    inst.add_argument(
         "--no-bootstrap", action="store_true",
         help="skip the first-run sweep for work that already exists on this machine",
     )
@@ -445,6 +470,17 @@ _PROJECT_COMMANDS = {
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # Before load_config, deliberately. quickstart exists for a machine where
+    # nothing is configured yet, so requiring ECHO_MEMORY_DATABASE_URL to reach
+    # the command that sets it up would be a circle.
+    if args.command == "quickstart":
+        return quickstart.run(args)
+
+    # Same reason as quickstart: a machine using the hosted service has no
+    # local database, so requiring a database URL to configure it is a circle.
+    if args.command == "connect":
+        return connect_cmd.run(args)
 
     try:
         config = load_config()
@@ -664,6 +700,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "install":
+        if getattr(args, "user_global", False):
+            for line in install.install_global(Path.home()):
+                print(line)
+            print(
+                "\nThe skill now applies in every project. MCP registration is still "
+                "per-client:\n  claude mcp add --scope user echo-memory -- echo-memory serve"
+            )
+            return 0
         targets = (
             ("claude", "cursor", "codex") if args.targets == "all" else (args.targets,)
         )
