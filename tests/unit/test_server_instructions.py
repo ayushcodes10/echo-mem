@@ -53,3 +53,14 @@ def test_the_tools_are_actually_there():
     silence: the model is told to call something that does not exist."""
     for tool in LOOP_TOOLS:
         assert callable(getattr(server, tool, None)), f"{tool} is advertised but missing"
+
+
+def test_the_server_reports_a_version():
+    """MCPServer defaults version to "", so a client that shows which server it
+    is talking to displays a blank. The first question about a memory bug is
+    which version wrote the fact, and the answer has to come from somewhere."""
+    from echo_memory import __version__
+    from echo_memory.server import server
+
+    assert server.version == __version__
+    assert server._lowlevel_server.create_initialization_options().server_version
