@@ -28,6 +28,13 @@ Three metrics, and the second two matter more than the first.
              returning everything is not better, and this is the number that
              says so.
 
+**One metric cannot judge every change.** Each case has a single right answer,
+so this measures ranking and nothing else. MMR was added for diversity among
+the returned facts, which a single-answer metric is blind to by construction:
+the tables show it costs ranking on every shape, which is why it is off, and
+they say nothing about whether it delivered the diversity it was added for.
+Read a removal here as "it costs ranking", never as "it does nothing".
+
 **Query shape decides the answer, so it is not a detail.** The first version of
 this harness asked every question as "<source> <target>". Once entity names
 were embedded into each fact, that query became a literal substring of the text
@@ -405,5 +412,40 @@ def render(results: list[Result]) -> str:
 
     lines.append("")
     lines.append("? marks an interval that includes zero: the difference is noise.")
+    lines.append(
+        "Intervals are a seeded paired bootstrap over per-case differences "
+        f"({BOOTSTRAP_RESAMPLES} resamples,"
+    )
+    lines.append(
+        "  2.5th/97.5th percentile), not the per-shape SE below each table - "
+        "both configurations"
+    )
+    lines.append(
+        "  scored the same cases in the same order, so the variance that matters "
+        "is that of"
+    )
+    lines.append("  the difference. Bootstrap because reciprocal ranks are 1, 1/2, 1/3 ... 0.")
+    lines.append("")
+    lines.append(
+        "EVERY QUERY HERE IS DERIVED FROM ITS OWN ANSWER, so absolute scores measure "
+        "how easy"
+    )
+    lines.append(
+        "  that derivation is, not retrieval quality. entity_single is worse than "
+        "leaky: one"
+    )
+    lines.append(
+        "  fact is marked correct for a name that may appear in thirty, and the "
+        "other twenty-"
+    )
+    lines.append(
+        "  nine relevant ones score as failures. Compare rows. A number from this "
+        "table does"
+    )
+    lines.append(
+        "  not belong in a claim about quality without hand-written questions and "
+        "relevance"
+    )
+    lines.append("  labels that permit more than one right answer.")
     lines.append("Absolute values describe this store only. Compare rows, not numbers.")
     return "\n".join(lines)
