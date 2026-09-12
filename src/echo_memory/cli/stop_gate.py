@@ -137,8 +137,13 @@ def render_unrecorded_reason(work: dict) -> str:
     ])
 
 
-def render_reason(result: dict, bin_path: str | None = None) -> str:
+def render_reason(
+    result: dict, bin_path: str | None = None, session_id: str | None = None
+) -> str:
     binary = bin_path or cli_path()
+    # Omitted rather than faked when unknown: a wrong session id on the closure
+    # is worse than none, because it credits the wrong firing.
+    session_flag = f"--session {session_id} " if session_id else ""
     files = result["files"]
     shown, extra = files[:MAX_LISTED], len(files) - min(len(files), MAX_LISTED)
     lines = [
@@ -166,7 +171,11 @@ def render_reason(result: dict, bin_path: str | None = None) -> str:
         # without a line that wraps six times. The trailing marker appears
         # whenever there is anything beyond what is spelled out, so the
         # command is never mistaken for the complete list.
-        f"  {binary} pending --done "
+        # --session is on the printed line rather than left to the caller,
+        # because closing a document is one of the two valid answers to this
+        # prompt and an unattributed closure cannot be counted as one. See
+        # health.gate_conversion.
+        f"  {binary} pending {session_flag}--done "
         + " ".join(files[:2])
         + (" ..." if len(files) > 2 else ""),
         "",
@@ -203,11 +212,15 @@ def render_reason(result: dict, bin_path: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def render_hook_output(result: dict, bin_path: str | None = None) -> str:
+def render_hook_output(
+    result: dict, bin_path: str | None = None, session_id: str | None = None
+) -> str:
     """The JSON shape Claude Code reads from a Stop hook. `block` returns
     control to the agent with `reason` as its next instruction, which is the
     whole point: this has to act, not ask."""
-    return json.dumps({"decision": "block", "reason": render_reason(result, bin_path)})
+    return json.dumps(
+        {"decision": "block", "reason": render_reason(result, bin_path, session_id)}
+    )
 
 
 def run(args, config, conn) -> int:
@@ -218,7 +231,10 @@ def run(args, config, conn) -> int:
     result = gate(conn, config.project)
     if result["n"]:
         record_gated(conn, session_id, config.project, result["n"])
-        print(render_hook_output(result) if args.hook_json else render_reason(result))
+        print(
+            render_hook_output(result, session_id=session_id) if args.hook_json
+            else render_reason(result, session_id=session_id)
+        )
         return 0
 
     # No queued files does not mean nothing was owed. It usually means this

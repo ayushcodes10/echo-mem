@@ -105,6 +105,21 @@ def render_criterion_six(report: dict, indent: str = "  ", show_hint: bool = Tru
         f"{indent}[{'x' if met['bad_merges'] else ' '}] {counts['bad_merges']} "
         f"confirmed bad merges (must be {observations.MAX_BAD_MERGES})"
     )
+    # What the saves bar does and does not establish, next to the bar itself.
+    #
+    # The server derives both tool identities from evidence it holds - the
+    # writer from the cited edge, the reader from the configured agent id - so
+    # "two different tools were involved" is verified and cannot be asserted by
+    # the caller. That every step before it is not: the agent chose which fact
+    # to cite and judged that it saved a re-explanation, and nothing here
+    # checks either. A reviewer of the paper written from these numbers made
+    # the distinction and it belongs where the number is read, not only in the
+    # paper.
+    if counts["cross_tool_saves"]:
+        lines.append(
+            f"{indent}    provenance on these is verified; the benefit is the "
+            "agent's own judgement"
+        )
     if counts.get("retracted"):
         # Shown rather than silently netted out. A retracted judgement is still
         # part of what happened in the trial, and a tally that quietly shrank

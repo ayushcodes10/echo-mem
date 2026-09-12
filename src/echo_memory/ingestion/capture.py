@@ -75,11 +75,19 @@ def pending(conn, project: str | None = None) -> list[dict]:
     ]
 
 
-def mark_ingested(conn, paths: list[str]) -> int:
+def mark_ingested(conn, paths: list[str], session_id: str | None = None) -> int:
+    """Close queued documents, recording who closed them.
+
+    The session matters because closing is one of the two valid answers to a
+    Stop-gate firing - the other is writing the facts - and the gate's
+    conversion rate cannot be computed from a timestamp alone. See migration
+    0020, and the two wrong numbers that produced it.
+    """
     if not paths:
         return 0
     return conn.execute(
-        """UPDATE public.pending_ingest SET ingested_at = now()
+        """UPDATE public.pending_ingest
+           SET ingested_at = now(), ingested_by_session = %s
            WHERE path = ANY(%s) AND ingested_at IS NULL""",
-        (paths,),
+        (session_id, paths),
     ).rowcount

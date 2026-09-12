@@ -3,7 +3,8 @@
 Shared memory for AI coding agents. What Claude Code learns, Codex and Cursor can recall
 — in one graph, on your own machine, with every write auditable.
 
-Apache 2.0. No LLM call on the write path, so recording a memory costs nothing to run.
+Apache 2.0. The server makes no LLM call on the write path, so storing a memory adds no
+inference cost of its own.
 
 ## Install
 
@@ -59,8 +60,10 @@ that keeps working at long horizons, not just at day one:
 - **Auditable by design.** Every change to memory is logged, with a plain-language reason
   you can read back (`echo-memory why <fact_id>`). Memory that consolidates and edits
   itself is only trustworthy if you can see why.
-- **A write path that costs nothing to run.** Extraction happens in the calling agent,
-  never on the server, so recording a memory makes zero LLM calls. Measured locally with
+- **A write path that adds no inference.** Extraction happens in the calling agent, never
+  on the server, so recording a memory makes zero *additional* LLM calls. The work does
+  not vanish - it moves to a model that already has the conversation in context - and the
+  figures below measure the server receiving facts, not the extraction that produced them. Measured locally with
   `echo-memory benchmark`: **write 15ms median, query 8ms, digest 1ms, $0.00 inference
   cost per episode.** The tradeoff is explicit and worth stating: the agent must arrive
   with entities and facts already extracted, which is more work for the caller and the

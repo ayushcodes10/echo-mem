@@ -15,6 +15,12 @@ from echo_memory.retrieval.fusion import LIST_DEPTH, reciprocal_rank_fusion
 from echo_memory.retrieval.fusion import K as RRF_K
 
 DEFAULT_TOP_K = 10
+
+# Facts whose entities seed the traversal. Wider is not obviously better: the
+# tenth-ranked fact's neighbours are a long way from the question, and every
+# seed adds its whole neighbourhood to a list that then has to outrank the
+# content channels.
+GRAPH_SEEDS = 5
 MAX_TOP_K = 100
 
 # Score floors: a ranker with nothing useful to say shouldn't cast a rank-1
@@ -215,6 +221,53 @@ def _vector_candidates(
     return [edge_id for edge_id, score in rows if score >= floor]
 
 
+
+def _graph_candidates(
+    conn, group_id: str, seed_edge_ids: list[str], limit: int
+) -> list[str]:
+    """Facts one hop from the facts a query already found.
+
+    The graph has been stored since the first migration and the read path has
+    never walked it: retrieval is a vector list and a lexical list fused, and
+    AGE holds a structure nothing reads. This is the third list.
+
+    A question like "how are X and Y related?" has no single fact as its
+    answer, and the multihop shape of the eval scores exactly that at MRR 0.212
+    against 0.672-0.970 for the one-hop shapes. Expanding from what was found
+    is the cheapest thing that could close it: if a query retrieves a fact
+    about X, the facts sharing X's node are the next place the answer can be.
+
+    Ranked by the seed they came from, so a neighbour of the best-ranked fact
+    outranks a neighbour of the fifth. Seeds themselves are excluded - they are
+    already in the other lists, and re-ranking a fact against itself is what
+    reciprocal rank fusion is for.
+    """
+    if not seed_edge_ids:
+        return []
+    rows = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            UNWIND $ids AS eid
+            MATCH (a)-[e:FACT]->(b) WHERE id(e) = eid
+            MATCH (n)-[n2:FACT]-(m)
+            WHERE (id(n) = id(a) OR id(n) = id(b))
+              AND n2.group_id = $gid AND n2.t_invalid IS NULL
+            RETURN eid, id(n2)
+        $$, %s) AS (seed agtype, edge_id agtype)""",
+        (json.dumps({"ids": [int(i) for i in seed_edge_ids], "gid": group_id}),),
+    ).fetchall()
+
+    order = {edge_id: i for i, edge_id in enumerate(seed_edge_ids)}
+    found: dict[str, int] = {}
+    for seed, edge_id in rows:
+        neighbour = str(edge_id)
+        if neighbour in order:
+            continue
+        rank = order.get(str(seed), len(order))
+        if neighbour not in found or rank < found[neighbour]:
+            found[neighbour] = rank
+    return [e for e, _ in sorted(found.items(), key=lambda kv: kv[1])][:limit]
+
+
 def _any_term_tsquery(terms: list[str]) -> tuple[str, list[str]]:
     """An OR-of-terms tsquery, built by OR-ing per-term plainto_tsquery calls.
 
@@ -358,7 +411,7 @@ def query_memory(
     conn, group_id: str, query: str | None, top_k: int, embedder,
     digest: bool = False, lexical_only: bool = False,
     *, use_mmr: bool = False, floor: float | None = None, vector_only: bool = False,
-    rrf_k: int | None = None,
+    rrf_k: int | None = None, graph_hops: int = 0,
 ) -> dict:
     """top_k has no default here: DEFAULT_TOP_K=10 is applied at the MCP tool
     schema layer (PR5), which is the natural place to declare it, rather
@@ -431,9 +484,16 @@ def query_memory(
         lexical_ids = [] if vector_only else _lexical_any_candidates(
             conn, group_id, query, LIST_DEPTH
         )
-        fused = reciprocal_rank_fusion(
-            [vector_ids, lexical_ids], k=rrf_k if rrf_k is not None else RRF_K
-        )
+        k = rrf_k if rrf_k is not None else RRF_K
+        content = reciprocal_rank_fusion([vector_ids, lexical_ids], k=k)
+        lists = [vector_ids, lexical_ids]
+        if graph_hops:
+            # Seeded from the two content channels fused, so the expansion
+            # follows what the query actually matched rather than whatever the
+            # vector list alone happened to put first.
+            seeds = sorted(content, key=content.get, reverse=True)[:GRAPH_SEEDS]
+            lists.append(_graph_candidates(conn, group_id, seeds, LIST_DEPTH))
+        fused = reciprocal_rank_fusion(lists, k=k) if graph_hops else content
         by_score = sorted(fused, key=fused.get, reverse=True)
         # Diversify before truncating, not after: the point is to choose which
         # top_k, and slicing first throws away the candidates MMR would swap in.

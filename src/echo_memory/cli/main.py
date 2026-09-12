@@ -191,6 +191,11 @@ def _add_project_parsers(sub) -> None:
     pending.add_argument(
         "--done", nargs="+", metavar="PATH", help="mark these paths as ingested"
     )
+    pending.add_argument(
+        "--session", metavar="ID",
+        help="the session closing them; the Stop gate puts this on the line it "
+             "prints, so a closure can be credited to the firing that asked for it",
+    )
 
     hooks_parser = sub.add_parser(
         "install-hooks",
@@ -294,9 +299,9 @@ def _add_project_parsers(sub) -> None:
         help="also score the configurations each retrieval change was chosen against",
     )
     ev.add_argument(
-        "--shape", choices=["all", "entity_pair", "entity_single", "prose"],
+        "--shape", choices=["all", "entity_pair", "entity_single", "prose", "multihop"],
         default="all",
-        help="query shape (default: all three; one shape alone can invert a conclusion)",
+        help="query shape (default: all four; one shape alone can invert a conclusion)",
     )
     bench.add_argument(
         "--group", metavar="ID", default="benchmark:scratch",
@@ -617,6 +622,7 @@ def main(argv: list[str] | None = None) -> int:
                 ("static floor 0.15", {"floor": 0.15}),
                 ("vector only", {"vector_only": True}),
                 ("lexical only", {"lexical_only": True}),
+                ("+ graph hop", {"graph_hops": 1}),
             ]
 
         results = []

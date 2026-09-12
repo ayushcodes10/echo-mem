@@ -11,6 +11,7 @@ import psycopg
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.logging import get_logger, log_write_episode
 from echo_memory.infra.project import UNKNOWN as PROJECT_UNKNOWN
+from echo_memory.ingestion.neighbourhood import MAX_FACTS_CONSULTED, related_entities
 from echo_memory.ingestion.resolution import (
     ResolutionError,
     _exact_match,
@@ -523,4 +524,28 @@ def write_episode(
     }
     if onboarding_sample is not None:
         result["onboarding_sample"] = onboarding_sample
+
+    # Computed after the transaction commits, and never inside it: this is
+    # advice about the next episode, and a failure to produce it must not cost
+    # the episode that was already written.
+    if edges_created and ready_facts:
+        try:
+            # The bare fact text, not embedding_text: stored vectors carry
+            # "<source> <target>. <fact>", so querying with the sentence alone
+            # is the eval's `prose` shape, which measures R@1 0.949 and MRR
+            # 0.970 on this store - the best-performing configuration of any
+            # retrieval channel here, and the one that cannot leak through the
+            # entity names.
+            related = related_entities(
+                conn, group_id, [embedder.embed(f["fact"]) for f in ready_facts[:MAX_FACTS_CONSULTED]],
+                written_node_ids=[str(v) for v in name_to_node_id.values()],
+            )
+        except Exception:
+            # Nothing here is load-bearing. A store mid-migration, an embedder
+            # that just lost its model, a Cypher shape an older AGE dislikes -
+            # none of them is a reason to make a successful write look failed.
+            _logger.debug("related_entities_failed", exc_info=True)
+            related = []
+        if related:
+            result["related_entities"] = related
     return result

@@ -168,6 +168,61 @@ def _orphans(graph: dict) -> list[dict]:
     return [n for n in graph["nodes"] if n["id"] not in connected]
 
 
+
+def gate_conversion(conn) -> dict:
+    """How often the Stop gate produced a fact, not how often it fired.
+
+    The project's own headline finding compared 0 of 16 memory files converted
+    against hooks firing 24 of 24. Those are different outcomes - one is
+    end-to-end capture, the other is a trigger - and a reviewer of the paper
+    drawn from this record rejected the comparison on exactly that ground. He
+    was right, and this is the number that replaces it: both sides measured as
+    knowledge actually stored.
+
+    The Stop gate is the strongest mechanism here. It returns a block decision,
+    which refuses to let a session end and hands control back with the unwritten
+    list as the next instruction. If structural enforcement produces writes
+    anywhere, it produces them here.
+
+    Measured 2026-09-13 on this store: 7 firings, 1 followed by a fact from the
+    same session. Structural TRIGGERING is reliable - the gate fired every time
+    it should. Structural CAPTURE is not, because the last step still hands a
+    model a choice about what is worth remembering, and there is no hook for
+    that.
+
+    A firing counts as converted if a fact was written OR a queued document was
+    closed after it. Writing alone was the first version and it was wrong in a
+    way the gate demonstrated within the hour: its own instruction says that
+    when a file's content is already recorded the right action is to mark it
+    done, not write it twice. A session that did exactly that scored as a
+    failure. A metric that punishes the behaviour its own instruction asks for
+    measures compliance with itself, not capture.
+
+    Undercounts by construction even so, in two ways. A fact written later,
+    under a different session id, is not attributed to the gate that asked for
+    it - 16 files were once drained by hand ten days afterwards. And closures
+    made before migration 0020 have no recorded author, so every firing older
+    than it can only be credited through a write. Read it as a floor.
+    """
+    fired = conn.execute("SELECT session_id, at FROM public.stop_gate_fired").fetchall()
+    converted = 0
+    for session_id, at in fired:
+        wrote = conn.execute(
+            """SELECT 1 FROM public.audit_entry
+               WHERE session_id = %s AND mutation_type = 'created' AND timestamp > %s
+               LIMIT 1""",
+            (session_id, at),
+        ).fetchone()
+        closed = conn.execute(
+            """SELECT 1 FROM public.pending_ingest
+               WHERE ingested_by_session = %s AND ingested_at > %s LIMIT 1""",
+            (session_id, at),
+        ).fetchone()
+        if wrote or closed:
+            converted += 1
+    return {"fired": len(fired), "converted": converted}
+
+
 def collect(conn, config, today: datetime | None = None) -> dict:
     """Everything health reports, as data. Rendering is separate so `--json`
     and the human view can never drift."""
@@ -211,6 +266,7 @@ def collect(conn, config, today: datetime | None = None) -> dict:
         "bad_merges": report["counts"]["bad_merges"],
         "reads": read_stats,
         "stale_writer": stale_writer(conn, group_ids),
+        "gate": gate_conversion(conn),
     }
 
 
@@ -417,6 +473,21 @@ def render(h: dict) -> str:
         lines.append("")
     elif r:
         lines.append(f"  no reads recorded in {r['days']}d")
+        lines.append("")
+
+    # Capture, measured on the outcome rather than on the trigger. A hook that
+    # fires is not a fact that exists, and reporting the firing count alone is
+    # how this project came to believe structural capture was solved.
+    g = h.get("gate") or {}
+    if g.get("fired"):
+        lines.append(
+            f"  stop gate fired {g['fired']}x, {g['converted']} followed by a fact "
+            f"from the same session"
+        )
+        lines.append(
+            "    a later session writing the same knowledge is not counted here, "
+            "so this is a floor"
+        )
         lines.append("")
 
     if strong:

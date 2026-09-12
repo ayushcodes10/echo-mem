@@ -28,6 +28,13 @@ Three metrics, and the second two matter more than the first.
              returning everything is not better, and this is the number that
              says so.
 
+**One metric cannot judge every change.** Each case has a single right answer,
+so this measures ranking and nothing else. MMR was added for diversity among
+the returned facts, which a single-answer metric is blind to by construction:
+the tables show it costs ranking on every shape, which is why it is off, and
+they say nothing about whether it delivered the diversity it was added for.
+Read a removal here as "it costs ranking", never as "it does nothing".
+
 **Query shape decides the answer, so it is not a detail.** The first version of
 this harness asked every question as "<source> <target>". Once entity names
 were embedded into each fact, that query became a literal substring of the text
@@ -82,7 +89,13 @@ BOOTSTRAP_RESAMPLES = 5000
 SHAPE_ENTITY_PAIR = "entity_pair"
 SHAPE_ENTITY_SINGLE = "entity_single"
 SHAPE_PROSE = "prose"
-SHAPES = (SHAPE_ENTITY_PAIR, SHAPE_ENTITY_SINGLE, SHAPE_PROSE)
+SHAPE_MULTIHOP = "multihop"
+SHAPES = (SHAPE_ENTITY_PAIR, SHAPE_ENTITY_SINGLE, SHAPE_PROSE, SHAPE_MULTIHOP)
+
+# A single hub can be incident to 35 facts, which is 595 ordered pairs. Left
+# uncapped, one project node would supply most of the sample and the score
+# would describe that node rather than the store.
+MULTIHOP_PER_HUB = 6
 
 # Words of the fact to keep for a prose query. Long enough to carry the
 # subject, short enough that it is a question rather than the answer.
@@ -97,6 +110,13 @@ class Case:
     gold_edge_id: str
     gold_fact: str
     shape: str = SHAPE_ENTITY_PAIR
+    # A multi-hop question is only answerable once BOTH facts are in hand, so
+    # its case carries a second required edge. Scoring then asks at what rank
+    # the question became answerable, not at what rank the first clue arrived:
+    # a run that returns one half at rank 1 and never the other has answered
+    # nothing, and a metric that rewards it would make traversal look
+    # unnecessary.
+    also_required: str | None = None
 
 
 @dataclass
@@ -192,6 +212,62 @@ def _prose_query(fact: str, source: str, target: str) -> str:
     return " ".join(stripped.split()[:PROSE_WORDS])
 
 
+
+def _multihop_cases(rows, limit: int | None) -> list[Case]:
+    """Questions that no single fact answers.
+
+    Two entities X and Y that are NOT directly connected, but both appear in
+    facts about a third entity M. "How are X and Y related?" is the question
+    this system's own README uses to describe multi-hop retrieval - "how did we
+    end up here?" - and it is the one shape the harness could not previously
+    see, because every other case's gold answer is a single edge.
+
+    X and Y must not already be adjacent: if one fact joins them, the question
+    is single-hop and belongs in the shapes above.
+
+    Built from the edge list in Python rather than from a pattern predicate,
+    because AGE's Cypher support for NOT (x)-[]-(y) is not something to depend
+    on for a measurement.
+    """
+    adjacency: dict[str, set[str]] = {}
+    incident: dict[str, list[tuple[str, str, str, str]]] = {}
+    for edge_id, source_id, source, target_id, target, fact in rows:
+        if source_id == target_id:
+            continue
+        adjacency.setdefault(source_id, set()).add(target_id)
+        adjacency.setdefault(target_id, set()).add(source_id)
+        incident.setdefault(source_id, []).append((edge_id, target_id, target, fact))
+        incident.setdefault(target_id, []).append((edge_id, source_id, source, fact))
+
+    cases: list[Case] = []
+    for middle in sorted(incident):
+        arms = incident[middle]
+        if len(arms) < 2:
+            continue
+        made = 0
+        for i in range(len(arms)):
+            for j in range(i + 1, len(arms)):
+                e1, x_id, x_name, f1 = arms[i]
+                e2, y_id, y_name, _f2 = arms[j]
+                if x_id == y_id or e1 == e2:
+                    continue
+                if y_id in adjacency.get(x_id, ()):
+                    continue
+                if not x_name or not y_name:
+                    continue
+                cases.append(Case(
+                    query=f"{x_name} {y_name}",
+                    gold_edge_id=e1, gold_fact=f1, also_required=e2,
+                    shape=SHAPE_MULTIHOP,
+                ))
+                made += 1
+                if made >= MULTIHOP_PER_HUB:
+                    break
+            if made >= MULTIHOP_PER_HUB:
+                break
+    return cases[:limit] if limit else cases
+
+
 def build_cases(
     conn, group_id: str, limit: int | None = None, shape: str = SHAPE_ENTITY_PAIR
 ) -> list[Case]:
@@ -208,20 +284,26 @@ def build_cases(
     """
     if shape not in SHAPES:
         raise ValueError(f"shape must be one of {SHAPES}, got {shape!r}")
-    rows = conn.execute(
+    raw = conn.execute(
         f"""SELECT * FROM cypher('{GRAPH}', $$
             MATCH (a:Node)-[e:FACT]->(b:Node)
             WHERE e.group_id = $gid AND e.t_invalid IS NULL
-            RETURN id(e), a.name, b.name, e.fact
-        $$, %s) AS (edge_id agtype, a agtype, b agtype, fact agtype)""",
+            RETURN id(e), id(a), a.name, id(b), b.name, e.fact
+        $$, %s) AS (edge_id agtype, a_id agtype, a agtype,
+                     b_id agtype, b agtype, fact agtype)""",
         (json.dumps({"gid": group_id}),),
     ).fetchall()
+    rows = [
+        (str(edge_id), str(a_id), str(a).strip('"'), str(b_id), str(b).strip('"'),
+         str(fact).strip('"'))
+        for edge_id, a_id, a, b_id, b, fact in raw
+    ]
+
+    if shape == SHAPE_MULTIHOP:
+        return _multihop_cases(rows, limit)
 
     cases: list[Case] = []
-    for edge_id, a, b, fact in rows:
-        source = str(a).strip('"')
-        target = str(b).strip('"')
-        text = str(fact).strip('"')
+    for edge_id, _a_id, source, _b_id, target, text in rows:
         if not source or not target or source == target:
             continue
         if shape == SHAPE_ENTITY_PAIR:
@@ -252,11 +334,18 @@ def run(conn, group_id: str, embedder, cases: list[Case], name: str, **kwargs) -
             result.empty += 1
         result.returned_chars.append(sum(len(f.get("fact") or "") for f in facts))
 
-        rank = None
+        needed = {case.gold_edge_id}
+        if case.also_required:
+            needed.add(case.also_required)
+        at: dict[str, int] = {}
         for i, fact in enumerate(facts, start=1):
-            if str(fact.get("fact_id")) == case.gold_edge_id:
-                rank = i
-                break
+            fid = str(fact.get("fact_id"))
+            if fid in needed and fid not in at:
+                at[fid] = i
+        # The rank the question became answerable at: the later of the required
+        # facts. For every single-hop shape this is exactly the old behaviour,
+        # because `needed` holds one edge.
+        rank = max(at.values()) if len(at) == len(needed) else None
         if rank is None:
             result.reciprocal_ranks.append(0.0)
             continue
@@ -271,6 +360,7 @@ SHAPE_NOTES = {
     SHAPE_ENTITY_PAIR: "both entity names - LEAKY: names are embedded into every fact",
     SHAPE_ENTITY_SINGLE: "one entity name - the realistic shape",
     SHAPE_PROSE: "the fact's words, entity names stripped - cannot leak",
+    SHAPE_MULTIHOP: "two entities one hop apart - needs BOTH facts, so R@1 is 0 by construction",
 }
 
 
@@ -322,5 +412,40 @@ def render(results: list[Result]) -> str:
 
     lines.append("")
     lines.append("? marks an interval that includes zero: the difference is noise.")
+    lines.append(
+        "Intervals are a seeded paired bootstrap over per-case differences "
+        f"({BOOTSTRAP_RESAMPLES} resamples,"
+    )
+    lines.append(
+        "  2.5th/97.5th percentile), not the per-shape SE below each table - "
+        "both configurations"
+    )
+    lines.append(
+        "  scored the same cases in the same order, so the variance that matters "
+        "is that of"
+    )
+    lines.append("  the difference. Bootstrap because reciprocal ranks are 1, 1/2, 1/3 ... 0.")
+    lines.append("")
+    lines.append(
+        "EVERY QUERY HERE IS DERIVED FROM ITS OWN ANSWER, so absolute scores measure "
+        "how easy"
+    )
+    lines.append(
+        "  that derivation is, not retrieval quality. entity_single is worse than "
+        "leaky: one"
+    )
+    lines.append(
+        "  fact is marked correct for a name that may appear in thirty, and the "
+        "other twenty-"
+    )
+    lines.append(
+        "  nine relevant ones score as failures. Compare rows. A number from this "
+        "table does"
+    )
+    lines.append(
+        "  not belong in a claim about quality without hand-written questions and "
+        "relevance"
+    )
+    lines.append("  labels that permit more than one right answer.")
     lines.append("Absolute values describe this store only. Compare rows, not numbers.")
     return "\n".join(lines)

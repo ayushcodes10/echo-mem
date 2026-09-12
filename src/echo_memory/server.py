@@ -129,15 +129,11 @@ def write_episode(
     facts: list[dict],
     entity_resolutions: dict | None = None,
 ) -> dict:
-    """Record something worth remembering later: a decision, a correction,
-    a stated preference, or context that would otherwise have to be
-    re-explained to a different tool or a future session. Call this
-    proactively and immediately when you notice one - don't wait to be
-    asked, don't batch it for later. A missed memory costs more than an
-    extra call.
-
-    You extract the entities and facts yourself; this server never calls
-    an LLM.
+    """Record something worth remembering later: a decision, a correction, a
+    stated preference, or context that would otherwise be re-explained to
+    another tool or a later session. Call it the moment you notice one, not
+    batched and not at the end - a missed memory costs more than an extra
+    call. You extract the entities and facts; this server never calls an LLM.
 
     entities: [{"name": "Postgres", "type": "tool"}, ...]
       name  non-empty, unique within this call
@@ -155,6 +151,10 @@ def write_episode(
     entity_resolutions (optional): only after a call returned
     ambiguous_entities, to say which candidate a mention meant:
     {"mention": {"resolved_to": "<node_id>" | "new"}}. Omit otherwise.
+
+    related_entities in the reply: names this scope already uses for what
+    you just wrote. Reuse them next time rather than coin a near-synonym.
+    Advisory - nothing is written from them and no reply is needed.
 
     Example:
     write_episode(scope="solo", session_id="s1",
@@ -504,8 +504,13 @@ def pending_documents(project: str | None = None) -> dict:
 
 
 @server.tool()
-def mark_ingested(paths: list[str]) -> dict:
+def mark_ingested(paths: list[str], session_id: str | None = None) -> dict:
     """Close pending documents once their content is in the graph.
+
+    Pass the same session_id you pass write_episode. Closing a document is one
+    of the two valid answers to a capture prompt - the other is writing the
+    facts - so without it the gate that asked cannot tell a session that
+    complied from one that ignored it.
 
     The other half of pending_documents, and it exists because the queue could
     not be closed by the tool that had just drained it. On 2026-09-12 Codex
@@ -525,7 +530,7 @@ def mark_ingested(paths: list[str]) -> dict:
         with _state.pool.connection() as conn:
             queued = {q["path"] for q in capture.pending(conn, None)}
             known = [p for p in paths if p in queued]
-            marked = capture.mark_ingested(conn, known)
+            marked = capture.mark_ingested(conn, known, session_id)
     except psycopg.OperationalError as e:
         return _operational_error(e)
     return {
