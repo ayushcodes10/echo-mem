@@ -64,7 +64,7 @@ def test_an_existing_database_is_never_replaced(monkeypatch):
 
     monkeypatch.setattr(quickstart, "_run", fake_run)
 
-    assert quickstart.start_database() == "already running"
+    assert quickstart.start_database()[0] == "already running"
     assert not any("run" in c and "-d" in c for c in calls), "it created a second container"
 
 
@@ -79,7 +79,7 @@ def test_a_stopped_container_is_started_not_recreated(monkeypatch):
 
     monkeypatch.setattr(quickstart, "_run", fake_run)
 
-    assert quickstart.start_database() == "restarted"
+    assert quickstart.start_database()[0] == "restarted"
     assert ["docker", "start", quickstart.CONTAINER] in calls
     assert not any("-d" in c for c in calls), "a stopped container was recreated"
 
@@ -96,8 +96,9 @@ def test_a_fresh_machine_gets_a_container_with_a_named_volume(monkeypatch):
         return _completed()
 
     monkeypatch.setattr(quickstart, "_run", fake_run)
+    monkeypatch.setattr(quickstart, "port_is_free", lambda p: True)
 
-    assert quickstart.start_database() == "started"
+    assert quickstart.start_database()[0] == "started"
     create = next(c for c in calls if "-d" in c)
     assert f"{quickstart.CONTAINER}-data:/var/lib/postgresql/data" in create
     assert "unless-stopped" in create
@@ -177,3 +178,41 @@ def test_installing_globally_twice_is_a_no_op(tmp_path):
     again = install.install_global(tmp_path)
 
     assert again[0].startswith("unchanged")
+
+
+def test_a_taken_port_moves_up_instead_of_failing(monkeypatch):
+    """5433 is not a safe assumption on a machine that has met this project
+    before: the repo's own compose file maps it, so following the old README
+    and then running quickstart used to produce a raw Docker error as the first
+    experience of a command named quickstart."""
+    calls = []
+
+    def fake_run(args, timeout=60):
+        calls.append(args)
+        if args[:2] == ["docker", "inspect"]:
+            return _completed(returncode=1)
+        return _completed()
+
+    monkeypatch.setattr(quickstart, "_run", fake_run)
+    monkeypatch.setattr(quickstart, "port_is_free", lambda p: p >= 5435)
+
+    outcome, port = quickstart.start_database()
+
+    assert port == 5435
+    assert "5433 was taken" in outcome
+    assert "5435:5432" in next(c for c in calls if "-d" in c)
+
+
+def test_the_url_follows_the_port_actually_used():
+    """A connection string for a port nothing is listening on is worse than
+    printing none."""
+    assert quickstart.database_url(5437).endswith(":5437/echo_memory")
+
+
+def test_no_free_port_is_reported_not_looped(monkeypatch):
+    monkeypatch.setattr(quickstart, "port_is_free", lambda p: False)
+
+    with pytest.raises(quickstart.QuickstartError) as e:
+        quickstart.free_port(5433, tries=3)
+
+    assert "--port" in str(e.value)
