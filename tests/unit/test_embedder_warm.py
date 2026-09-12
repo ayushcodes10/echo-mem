@@ -58,8 +58,9 @@ def _config():
 def test_the_model_is_loaded_without_being_asked():
     embedder = _Embedder()
     server.startup(config=_config(), embedder=embedder)
+    server._state.warming.join(timeout=5)
 
-    assert embedder.warmed.wait(timeout=5), "nothing warmed the model"
+    assert embedder.warmed.is_set(), "nothing warmed the model"
 
 
 def test_startup_does_not_wait_for_it():
@@ -73,6 +74,7 @@ def test_startup_does_not_wait_for_it():
     elapsed = time.perf_counter() - started
 
     assert elapsed < 0.5, f"startup blocked for {elapsed:.2f}s"
+    server._state.warming.join(timeout=5)
 
 
 def test_a_failed_warm_up_does_not_take_the_server_with_it():
@@ -80,12 +82,13 @@ def test_a_failed_warm_up_does_not_take_the_server_with_it():
     where the caller can be told. A traceback from a background thread would
     only corrupt an MCP server's stderr, which is its log channel."""
     server.startup(config=_config(), embedder=_Embedder(fail=True))
+    server._state.warming.join(timeout=5)
 
-    time.sleep(0.2)
     assert server._state.embedder.embed("still works") is not None
 
 
 def test_an_embedder_with_no_warm_is_fine():
     server.startup(config=_config(), embedder=_Unwarmable())
 
+    assert server._state.warming is None
     assert server._state.embedder.embed("fine") is not None

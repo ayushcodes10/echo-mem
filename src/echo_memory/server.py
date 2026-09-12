@@ -57,6 +57,7 @@ class ServerState:
     mutating process-wide state that other tests might also touch."""
 
     config: Config
+    warming = None
     pool: object
     embedder: Embedder
 
@@ -81,8 +82,14 @@ def startup(config: Config | None = None, embedder: Embedder | None = None) -> N
     # but a long-lived server knows it will need it and has an idle moment at
     # startup to pay for it.
     warm = getattr(_state.embedder, "warm", None)
+    _state.warming = None
     if warm is not None:
-        threading.Thread(target=_warm, args=(warm,), daemon=True).start()
+        # Kept on the state rather than fired and forgotten: a caller that
+        # needs the load finished - a test, or a one-shot script - can join it,
+        # and a daemon thread that logs after its process has moved on is how
+        # a background task turns into confusing output somewhere else.
+        _state.warming = threading.Thread(target=_warm, args=(warm,), daemon=True)
+        _state.warming.start()
 
 
 def _warm(warm) -> None:
