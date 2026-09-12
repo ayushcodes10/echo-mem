@@ -117,27 +117,51 @@ def test_a_database_that_never_becomes_ready_is_reported_not_awaited(monkeypatch
     assert "docker logs" in str(e.value), "it did not say how to find out why"
 
 
+def _rendered(**over):
+    base = {
+        "database": "started", "port": 5433, "schema": "at head",
+        "clients": ["Claude Code"], "python": "/venv/bin/python",
+        "url": "postgresql://postgres:postgres@localhost:5433/echo_memory",
+        "hosted_hint": True,
+    }
+    return quickstart.render({**base, **over})
+
+
+def test_the_next_step_is_a_command_that_exists(tmp_path):
+    """The first version printed `echo-memory serve`, which is not a
+    subcommand, and passed none of the three variables the server needs - so
+    following it produced a client that fails at startup. A wrong next step is
+    worse than none: it spends the one moment somebody will debug."""
+    out = _rendered()
+
+    assert "echo-memory serve" not in out
+    assert "-m echo_memory.server" in out
+    for var in ("ECHO_MEMORY_USER_ID", "ECHO_MEMORY_AGENT_ID", "ECHO_MEMORY_DATABASE_URL"):
+        assert var in out, var
+
+
+def test_the_printed_url_matches_the_port_it_started_on(tmp_path):
+    """A connection string for a port nothing listens on is the same dead end
+    as no connection string."""
+    out = _rendered(port=5437, url="postgresql://postgres:postgres@localhost:5437/echo_memory")
+
+    assert ":5437/echo_memory" in out
+    assert ":5433/" not in out
+
+
 def test_the_next_step_names_the_restart(tmp_path):
     """An MCP server holds the code it imported when the client started it, so
     a registration nobody restarts into does nothing. That has cost this
     project two data bugs; it belongs in the one screen everyone reads."""
-    out = quickstart.render({
-        "database": "started", "port": 5433, "schema": "at head",
-        "clients": ["Claude Code"], "bin": "echo-memory", "hosted_hint": True,
-    })
+    out = _rendered()
 
-    assert "restart the client" in out.lower()
-    assert "echo-memory install" in out
+    assert "restart each client" in out.lower()
+    assert "echo-memory install --global" in out
     assert "api.echo-mem.com" in out
 
 
 def test_it_says_when_it_found_no_tools(tmp_path):
-    out = quickstart.render({
-        "database": "started", "port": 5433, "schema": "at head",
-        "clients": [], "bin": "echo-memory",
-    })
-
-    assert "no agent tools" in out
+    assert "no agent tools" in _rendered(clients=[])
 
 
 def test_clients_are_detected_from_disk_not_asked_for(tmp_path):

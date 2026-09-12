@@ -23,6 +23,7 @@ from __future__ import annotations
 import shutil
 import socket
 import subprocess
+import sys
 import time
 
 # Published multi-arch, so this is a pull rather than a compile. The tag names
@@ -179,31 +180,55 @@ def detected_clients(home) -> list[str]:
 
 
 def render(result: dict) -> str:
-    lines = ["Echo Memory is ready.", ""]
-    lines.append(f"  database   {result['database']} on port {result['port']}")
-    lines.append(f"  schema     {result['schema']}")
-    if result["clients"]:
-        lines.append(f"  found      {', '.join(result['clients'])}")
-    else:
-        lines.append("  found      no agent tools on this machine yet")
+    """The last screen anyone reads, so every command on it has to actually run.
+
+    The first version printed `echo-memory serve`, which is not a subcommand -
+    the server is `python -m echo_memory.server` - and passed none of the three
+    environment variables it needs, so following it produced a client that
+    fails at startup with a config error. A wrong next step is worse than no
+    next step: it spends the one moment somebody is willing to debug.
+    """
+    python = result.get("python") or "python"
+    url = result["url"]
+    lines = [
+        "Echo Memory is ready.",
+        "",
+        f"  database   {result['database']} on port {result['port']}",
+        f"  schema     {result['schema']}",
+    ]
+    lines.append(
+        f"  found      {', '.join(result['clients'])}" if result["clients"]
+        else "  found      no agent tools on this machine yet"
+    )
     lines += [
         "",
-        "Register it with a tool you use:",
+        "Register it with Claude Code. --scope user is once for this machine,",
+        "not once per project:",
         "",
-        f"  claude mcp add --scope user echo-memory -- {result['bin']} serve",
+        "  claude mcp add --scope user echo-memory \\",
+        "    -e ECHO_MEMORY_USER_ID=you \\",
+        "    -e ECHO_MEMORY_AGENT_ID=claude-code \\",
+        f'    -e ECHO_MEMORY_DATABASE_URL="{url}" \\',
+        f"    -- {python} -m echo_memory.server",
         "",
-        "or, inside a project, to commit the wiring alongside the code:",
+        "Other tools each want their own ECHO_MEMORY_AGENT_ID - cursor, codex,",
+        "claude-desktop. Two tools sharing an id makes a cross-tool recall",
+        "impossible to see afterwards. `echo-memory adopt` wires every client on",
+        "this machine at once and shows the diff first.",
         "",
-        "  echo-memory install",
+        "Then, so an agent knows when to record and recall rather than only that",
+        "the tools exist:",
         "",
-        "Then restart the client. An MCP server holds the code it imported when",
-        "the client started it, so a running one will not pick this up.",
+        "  echo-memory install --global",
+        "",
+        "Restart each client afterwards. An MCP server holds the code and config",
+        "it started with, so a running one will not pick this up.",
     ]
     if result.get("hosted_hint"):
         lines += [
             "",
-            "Prefer not to run a database at all? The hosted service needs no",
-            "local Postgres: https://api.echo-mem.com",
+            "Prefer not to run a database at all? The hosted service needs no local",
+            "Postgres: https://api.echo-mem.com",
         ]
     return "\n".join(lines) + "\n"
 
@@ -227,15 +252,17 @@ def run(args, _config=None, _conn=None) -> int:
         print(f"error: {e}")
         return 1
 
-    initdb.upgrade(database_url(port))
+    url = database_url(port)
+    initdb.upgrade(url)
 
     home = Path.home()
     print(render({
         "database": database,
         "port": port,
+        "url": url,
         "schema": "at head",
         "clients": detected_clients(home),
-        "bin": "echo-memory",
+        "python": sys.executable,
         "hosted_hint": True,
     }), end="")
     return 0
