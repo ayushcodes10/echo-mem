@@ -19,6 +19,7 @@ from echo_memory.cli import (
     health,
     initdb,
     merge,
+    quickstart,
     reattribute_cmd,
     stop_gate,
     unmerge,
@@ -118,6 +119,11 @@ def _add_project_parsers(sub) -> None:
             "whose session evidences one. Never guesses - a session with no "
             "attributed fact, or two, is reported as unrecoverable"
         ),
+    )
+
+    sub.add_parser(
+        "quickstart",
+        help="start the database, apply the schema, and say what to do next",
     )
 
     cal = sub.add_parser(
@@ -445,6 +451,12 @@ _PROJECT_COMMANDS = {
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # Before load_config, deliberately. quickstart exists for a machine where
+    # nothing is configured yet, so requiring ECHO_MEMORY_DATABASE_URL to reach
+    # the command that sets it up would be a circle.
+    if args.command == "quickstart":
+        return quickstart.run(args)
 
     try:
         config = load_config()
