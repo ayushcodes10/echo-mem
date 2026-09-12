@@ -40,7 +40,12 @@ server = MCPServer(
         "query_memory at the start of a session, and any other time recalling "
         "prior context would save the user from re-explaining something they "
         "likely already told a different tool or a past session - check here "
-        "before asking them to repeat themselves."
+        "before asking them to repeat themselves. Call pending_documents at "
+        "the start of a session too: it lists memory files this project has "
+        "written that the graph has not heard about yet. Read each one, "
+        "write_episode what it states, then mark_ingested to close it - "
+        "without that last step the file stays queued and the next session is "
+        "asked to do the same work again."
     ),
 )
 
@@ -419,6 +424,63 @@ def get_audit_log(scope: str, since: str | None = None) -> dict:
             return _get_audit_log(conn, group_id, since)
     except psycopg.OperationalError as e:
         return _operational_error(e)
+
+
+@server.tool()
+def pending_documents(project: str | None = None) -> dict:
+    """Memory files this project has written that are not in the graph yet.
+
+    A hook notices a file the moment it changes; turning it into entities and
+    facts needs a model, so it waits here for one. Read each path, call
+    write_episode with what it states, then mark_ingested to close it.
+
+    Claude Code is told about this queue at session start by a hook. Nothing
+    tells any other tool, so this is how they find out at all.
+    """
+    try:
+        with _state.pool.connection() as conn:
+            queued = capture.pending(conn, project or _state.config.project)
+    except psycopg.OperationalError as e:
+        return _operational_error(e)
+    return {
+        "project": project or _state.config.project,
+        "n": len(queued),
+        "documents": [
+            {"path": q["path"], "project": q["project"], "source": q["source"]}
+            for q in queued
+        ],
+    }
+
+
+@server.tool()
+def mark_ingested(paths: list[str]) -> dict:
+    """Close pending documents once their content is in the graph.
+
+    The other half of pending_documents, and it exists because the queue could
+    not be closed by the tool that had just drained it. On 2026-09-12 Codex
+    read a pending note, wrote its facts correctly, and reported: "Its pending
+    marker couldn't be cleared because the local echo-memory command wasn't
+    available." It was right - marking done was CLI-only, so a tool that could
+    do the hard half could not do the trivial one, and the file stayed queued
+    for a tool that happened to have a shell.
+
+    Paths that are not in the queue are reported rather than silently ignored,
+    because a mistyped path that returns success leaves a document queued
+    forever while the caller believes it is done.
+    """
+    if not paths:
+        return {"marked": 0, "not_queued": []}
+    try:
+        with _state.pool.connection() as conn:
+            queued = {q["path"] for q in capture.pending(conn, None)}
+            known = [p for p in paths if p in queued]
+            marked = capture.mark_ingested(conn, known)
+    except psycopg.OperationalError as e:
+        return _operational_error(e)
+    return {
+        "marked": marked,
+        "not_queued": [p for p in paths if p not in queued],
+    }
 
 
 if __name__ == "__main__":
