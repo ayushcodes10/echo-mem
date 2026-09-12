@@ -617,6 +617,7 @@ def main(argv: list[str] | None = None) -> int:
                 ("static floor 0.15", {"floor": 0.15}),
                 ("vector only", {"vector_only": True}),
                 ("lexical only", {"lexical_only": True}),
+                ("+ graph hop", {"graph_hops": 1}),
             ]
 
         results = []
