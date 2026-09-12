@@ -156,6 +156,14 @@ def write_episode(
     ambiguous_entities, to say which candidate a mention meant:
     {"mention": {"resolved_to": "<node_id>" | "new"}}. Omit otherwise.
 
+    The reply may carry related_entities: entities already in this scope
+    that appear in facts close to what you just wrote, each with the fact
+    that made it relevant. They are a prompt to reuse a name rather than
+    invent a near-synonym - the next time you write about one of those
+    subjects, name the existing entity. Nothing is written from them and no
+    reply is needed. Reusing names is what makes the graph connected enough
+    to walk; a store of one-fact entities can be searched but not traversed.
+
     Example:
     write_episode(scope="solo", session_id="s1",
       entities=[{"name": "Postgres", "type": "tool"},
