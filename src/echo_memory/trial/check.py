@@ -283,7 +283,9 @@ def build_report(
         for scope in ("solo", "shared")
     }
 
-    tallies = observations.counts(conn, group_ids)
+    tallies = observations.counts(
+        conn, group_ids, since=trial["started_on"] if trial else None
+    )
     unattributed = unattributed_facts(conn, group_ids)
     return {
         "unattributed_facts": unattributed,

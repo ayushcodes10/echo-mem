@@ -49,25 +49,64 @@ def sort_pair(node_ids: list[str]) -> list[str]:
     return sorted(node_ids)
 
 
-def start_trial(conn, started_on: date, cap_days: int = DEFAULT_CAP_DAYS) -> dict:
-    """Idempotent: a second call reports the existing start rather than moving
-    it. Restarting the clock is a decision worth making explicitly (drop the
-    row), not something a repeated command should do by accident."""
+def start_trial(
+    conn, started_on: date, cap_days: int = DEFAULT_CAP_DAYS, restart_reason: str | None = None
+) -> dict:
+    """Idempotent unless told otherwise: a second call reports the existing
+    start rather than moving it, because a repeated command must never move a
+    clock by accident.
+
+    `restart_reason` closes the open run and opens a new one. It is required
+    rather than optional for the same purpose a retraction's reason is: the
+    record has to show why a measurement stopped counting, or stopping counting
+    is indistinguishable from editing the result. The old run keeps its dates
+    and its observations keep their timestamps; only the window a tally is
+    taken over moves.
+    """
     existing = get_trial(conn)
-    if existing is not None:
+    if existing is not None and not restart_reason:
         return {**existing, "already_started": True}
-    conn.execute(
-        "INSERT INTO public.trial_run (started_on, cap_days) VALUES (%s, %s)",
+
+    previous = None
+    if existing is not None:
+        conn.execute(
+            """UPDATE public.trial_run SET ended_on = %s, ended_reason = %s
+                WHERE id = %s""",
+            (started_on, restart_reason.strip(), existing["id"]),
+        )
+        previous = existing
+
+    row = conn.execute(
+        "INSERT INTO public.trial_run (started_on, cap_days) VALUES (%s, %s) RETURNING id",
         (started_on, cap_days),
-    )
-    return {"started_on": started_on, "cap_days": cap_days, "already_started": False}
+    ).fetchone()
+    return {
+        "id": row[0], "started_on": started_on, "cap_days": cap_days,
+        "already_started": False, "previous": previous,
+    }
 
 
 def get_trial(conn) -> dict | None:
-    row = conn.execute("SELECT started_on, cap_days FROM public.trial_run LIMIT 1").fetchone()
+    """The open run. Closed ones are history and are not what a tally is taken
+    over."""
+    row = conn.execute(
+        """SELECT id, started_on, cap_days FROM public.trial_run
+            WHERE ended_on IS NULL ORDER BY started_on DESC LIMIT 1"""
+    ).fetchone()
     if row is None:
         return None
-    return {"started_on": row[0], "cap_days": row[1]}
+    return {"id": row[0], "started_on": row[1], "cap_days": row[2]}
+
+
+def past_trials(conn) -> list[dict]:
+    rows = conn.execute(
+        """SELECT started_on, ended_on, cap_days, ended_reason FROM public.trial_run
+            WHERE ended_on IS NOT NULL ORDER BY started_on"""
+    ).fetchall()
+    return [
+        {"started_on": r[0], "ended_on": r[1], "cap_days": r[2], "ended_reason": r[3]}
+        for r in rows
+    ]
 
 
 def record(
@@ -172,7 +211,7 @@ def list_observations(conn, group_ids: list[str]) -> list[dict]:
     ]
 
 
-def counts(conn, group_ids: list[str]) -> dict:
+def counts(conn, group_ids: list[str], since: date | None = None) -> dict:
     """Criterion 6's tallies. Recall saves are split cross-tool vs same-tool:
     only the cross-tool ones count toward the bar (the criterion says "to a
     different tool"), but a same-tool save is still real evidence recall works
@@ -186,7 +225,13 @@ def counts(conn, group_ids: list[str]) -> dict:
     gate used to check it globally instead, refusing every save in a store that
     held any unattributed fact anywhere; that blocked two saves whose both ends
     name real tools over twenty-seven unrelated facts that cannot be recovered,
-    which is a bar nothing could ever clear."""
+    which is a bar nothing could ever clear.
+
+    `since` is the open run's start date. Without it a tally is over everything
+    ever recorded, which is not what criterion 6 asks for - it asks for what
+    happened "over a trial of real cross-tool usage, capped at 3 weeks". A new
+    run that inherited the previous one's bad merges would begin already failed,
+    and one that inherited its recall saves would begin already flattered."""
     rows = conn.execute(
         """SELECT kind,
                   count(*) FILTER (
@@ -200,8 +245,9 @@ def counts(conn, group_ids: list[str]) -> dict:
                   count(*) AS total
            FROM public.trial_observation
            WHERE group_id = ANY(%s) AND retracted_at IS NULL
+             AND (%s::date IS NULL OR "timestamp" >= %s::date)
            GROUP BY kind""",
-        (UNATTRIBUTED, UNATTRIBUTED, UNATTRIBUTED, UNATTRIBUTED, group_ids),
+        (UNATTRIBUTED, UNATTRIBUTED, UNATTRIBUTED, UNATTRIBUTED, group_ids, since, since),
     ).fetchall()
     by_kind = {
         kind: {"cross_tool": cross_tool, "unattributed": unattributed, "total": total}
@@ -210,13 +256,22 @@ def counts(conn, group_ids: list[str]) -> dict:
 
     (retracted,) = conn.execute(
         """SELECT count(*) FROM public.trial_observation
-            WHERE group_id = ANY(%s) AND retracted_at IS NOT NULL""",
-        (group_ids,),
+            WHERE group_id = ANY(%s) AND retracted_at IS NOT NULL
+              AND (%s::date IS NULL OR "timestamp" >= %s::date)""",
+        (group_ids, since, since),
+    ).fetchone()
+
+    (before,) = conn.execute(
+        """SELECT count(*) FROM public.trial_observation
+            WHERE group_id = ANY(%s) AND retracted_at IS NULL
+              AND %s::date IS NOT NULL AND "timestamp" < %s::date""",
+        (group_ids, since, since),
     ).fetchone()
 
     saves = by_kind.get(RECALL_SAVE, {"cross_tool": 0, "unattributed": 0, "total": 0})
     return {
         "retracted": retracted,
+        "before_this_run": before,
         "cross_tool_saves": saves["cross_tool"],
         "unattributed_saves": saves["unattributed"],
         "same_tool_saves": saves["total"] - saves["cross_tool"] - saves["unattributed"],
