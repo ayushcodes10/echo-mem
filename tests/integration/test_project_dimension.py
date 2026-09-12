@@ -2,7 +2,7 @@
 back through the dashboard payload, reattributable for facts that predate it,
 and queued for capture. See conftest.py for the migrated_db fixture."""
 
-from fake_embedder import REFERENCE, VectorEmbedder
+from fake_embedder import REFERENCE, VectorEmbedder, unit_vector_at_angle
 
 from echo_memory import server
 from echo_memory.cli.dashboard import fetch_dashboard
@@ -26,7 +26,15 @@ def _seed(migrated_db, project="eigen", agent_id="claude-code", session="sess-1"
     )
     embedder = VectorEmbedder(
         {
-            "Eigon": REFERENCE, "remediation loop": REFERENCE, "Postgres": REFERENCE,
+            # Postgres is deliberately far from the others. Every name used to
+            # share one vector, so a second episode's new entity scored 1.0
+            # against an existing node and was absorbed by the silent merge.
+            # With SILENT_MERGE off it comes back ambiguous instead and the
+            # episode writes nothing - which is correct, and left this test
+            # with no second session to reattribute. The collision was never
+            # the subject here.
+            "Eigon": REFERENCE, "remediation loop": REFERENCE,
+            "Postgres": unit_vector_at_angle(0.10),
             "the loop never recorded an outcome": REFERENCE,
             "the loop now records outcomes": REFERENCE,
         }

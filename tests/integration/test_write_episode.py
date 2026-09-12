@@ -186,7 +186,17 @@ def test_ambiguous_similarity_defers_and_creates_no_edge(migrated_db):
     assert node_count == 1, "an ambiguous mention must not create a node until resolved"
 
 
-def test_high_similarity_silently_merges_and_appends_alias(migrated_db):
+def test_high_similarity_is_offered_for_confirmation_not_merged(migrated_db):
+    """It used to merge on its own above 0.92. SILENT_MERGE is off since
+    2026-09-13: calibration put precision at that bar at 50% over two reviewed
+    pairs, and the audit log showed the unattended path had fired exactly once
+    in the store's history - so it bought almost nothing and was the only way
+    two entities could be joined with nobody watching.
+
+    What must not change is the node count. A near-match still has to avoid
+    minting a second node for one entity, which is the duplicate bar the trial
+    counts; it now does that by waiting for an answer instead of guessing.
+    """
     conn = connect(migrated_db)
     embedder = VectorEmbedder(
         {
@@ -195,28 +205,52 @@ def test_high_similarity_silently_merges_and_appends_alias(migrated_db):
             "self-reference via alias": unit_vector_at_angle(0.5),
         }
     )
+    entities = [{"name": "postgres-db", "type": "tool"}, {"name": "Postgres", "type": "tool"}]
+    facts = [{
+        "source": "postgres-db", "target": "Postgres", "relation_type": "mentions",
+        "fact": "self-reference via alias", "confidence": "extracted",
+    }]
 
     write_episode(conn, "g1", "s1", [{"name": "Postgres", "type": "tool"}], [], {}, embedder)
+    asked = write_episode(conn, "g1", "s2", entities, facts, {}, embedder)
+
+    assert [a["mention"] for a in asked["ambiguous_entities"]] == ["postgres-db"]
+    assert asked["edges_created"] == []
+    (node_count,) = conn.execute("SELECT count(*) FROM public.node_embedding").fetchone()
+    assert node_count == 1, "an unanswered near-match must not create a second node"
+
+
+def test_a_confirmed_match_merges_and_appends_the_alias(migrated_db):
+    """The alias half is what makes a resolution a merge rather than a misfiled
+    fact, and it is the half that gets missed in cleanup - one store carried a
+    node answering to an unrelated name for eight days because of it."""
+    conn = connect(migrated_db)
+    embedder = VectorEmbedder(
+        {
+            "Postgres": REFERENCE,
+            "postgres-db": unit_vector_at_angle(0.95),
+            "self-reference via alias": unit_vector_at_angle(0.5),
+        }
+    )
+    entities = [{"name": "postgres-db", "type": "tool"}, {"name": "Postgres", "type": "tool"}]
+    facts = [{
+        "source": "postgres-db", "target": "Postgres", "relation_type": "mentions",
+        "fact": "self-reference via alias", "confidence": "extracted",
+    }]
+
+    write_episode(conn, "g1", "s1", [{"name": "Postgres", "type": "tool"}], [], {}, embedder)
+    asked = write_episode(conn, "g1", "s2", entities, facts, {}, embedder)
+    node_id = asked["ambiguous_entities"][0]["candidates"][0]["node_id"]
+
     result = write_episode(
-        conn, "g1", "s2",
-        [{"name": "postgres-db", "type": "tool"}, {"name": "Postgres", "type": "tool"}],
-        [
-            {
-                "source": "postgres-db",
-                "target": "Postgres",
-                "relation_type": "mentions",
-                "fact": "self-reference via alias",
-                "confidence": "extracted",
-            }
-        ],
-        {},
-        embedder,
+        conn, "g1", "s2", entities, facts,
+        {"postgres-db": {"resolved_to": node_id}}, embedder,
     )
 
     assert result["ambiguous_entities"] == []
     assert len(result["edges_created"]) == 1
     (node_count,) = conn.execute("SELECT count(*) FROM public.node_embedding").fetchone()
-    assert node_count == 1, "a high-confidence fuzzy match must not create a new node"
+    assert node_count == 1, "a confirmed match must not create a new node"
 
     (aliases,) = conn.execute(
         """SELECT * FROM cypher('echo_memory', $$

@@ -71,14 +71,23 @@ def test_each_round_writes_a_new_fact_rather_than_superseding(migrated_db):
 
 
 def test_render_names_the_zero_cost_and_the_cold_start(migrated_db):
+    """The zero is real and it is also easy to over-read. It says this server
+    calls no model; it does not say remembering something is free, because the
+    extraction still happens in the calling agent and is not counted here. A
+    reviewer read the abstract as the second claim, which is why the output
+    names the boundary rather than only the number."""
     result = benchmark.run(connect(migrated_db), GROUP, _embedder(), rounds=2)
 
     out = benchmark.render(result)
 
     assert "inference cost          $0.00" in out
     assert "cold start" in out
-    assert "Zero by construction" in out
     assert "once per session" in out
+
+    assert "Server-side cost" in out
+    assert "zero ADDITIONAL server-side inference" in out
+    assert "Extraction still happens" in out
+    assert "not that" in out and "free end to end" in out
 
 
 def test_cli_runs_a_benchmark(migrated_db, monkeypatch, capsys):
