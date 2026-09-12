@@ -1,5 +1,6 @@
-"""python -m echo_memory.server: wires write_episode, query_memory, and
-get_audit_log into one MCP server (see the design doc's MCP tool contract).
+"""python -m echo_memory.server: wires write_episode, query_memory,
+record_recall_save, get_audit_log, pending_documents and mark_ingested into one
+MCP server (see the design doc's MCP tool contract).
 Runs over stdio by default (mcp.server.mcpserver's MCPServer.run default),
 not a network listener at all, let alone one bound beyond localhost; see
 the design doc's Constraints ("v1 is single-user, local-only")."""
@@ -11,6 +12,7 @@ import time
 import psycopg
 from mcp.server.mcpserver import MCPServer
 
+from echo_memory import __version__
 from echo_memory.audit.get_audit_log import get_audit_log as _get_audit_log
 from echo_memory.infra.config import Config, ConfigError, load_config
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
@@ -27,6 +29,11 @@ from echo_memory.trial import reads as _reads
 
 server = MCPServer(
     name="echo-memory",
+    # MCPServer defaults this to "", so every client that shows which server
+    # it connected to displayed a blank - and the first question asked about a
+    # memory bug is which version wrote the fact. Same value write_episode
+    # stamps on every audit entry, so the handshake and the data agree.
+    version=__version__,
     instructions=(
         "Persistent memory across sessions and tools, backed by your own local "
         "database. Use it proactively, without being asked - don't wait for a "

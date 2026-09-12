@@ -64,7 +64,7 @@ def test_an_existing_database_is_never_replaced(monkeypatch):
 
     monkeypatch.setattr(quickstart, "_run", fake_run)
 
-    assert quickstart.start_database() == "already running"
+    assert quickstart.start_database()[0] == "already running"
     assert not any("run" in c and "-d" in c for c in calls), "it created a second container"
 
 
@@ -79,7 +79,7 @@ def test_a_stopped_container_is_started_not_recreated(monkeypatch):
 
     monkeypatch.setattr(quickstart, "_run", fake_run)
 
-    assert quickstart.start_database() == "restarted"
+    assert quickstart.start_database()[0] == "restarted"
     assert ["docker", "start", quickstart.CONTAINER] in calls
     assert not any("-d" in c for c in calls), "a stopped container was recreated"
 
@@ -96,8 +96,9 @@ def test_a_fresh_machine_gets_a_container_with_a_named_volume(monkeypatch):
         return _completed()
 
     monkeypatch.setattr(quickstart, "_run", fake_run)
+    monkeypatch.setattr(quickstart, "port_is_free", lambda p: True)
 
-    assert quickstart.start_database() == "started"
+    assert quickstart.start_database()[0] == "started"
     create = next(c for c in calls if "-d" in c)
     assert f"{quickstart.CONTAINER}-data:/var/lib/postgresql/data" in create
     assert "unless-stopped" in create
@@ -116,27 +117,51 @@ def test_a_database_that_never_becomes_ready_is_reported_not_awaited(monkeypatch
     assert "docker logs" in str(e.value), "it did not say how to find out why"
 
 
+def _rendered(**over):
+    base = {
+        "database": "started", "port": 5433, "schema": "at head",
+        "clients": ["Claude Code"], "python": "/venv/bin/python",
+        "url": "postgresql://postgres:postgres@localhost:5433/echo_memory",
+        "hosted_hint": True,
+    }
+    return quickstart.render({**base, **over})
+
+
+def test_the_next_step_is_a_command_that_exists(tmp_path):
+    """The first version printed `echo-memory serve`, which is not a
+    subcommand, and passed none of the three variables the server needs - so
+    following it produced a client that fails at startup. A wrong next step is
+    worse than none: it spends the one moment somebody will debug."""
+    out = _rendered()
+
+    assert "echo-memory serve" not in out
+    assert "-m echo_memory.server" in out
+    for var in ("ECHO_MEMORY_USER_ID", "ECHO_MEMORY_AGENT_ID", "ECHO_MEMORY_DATABASE_URL"):
+        assert var in out, var
+
+
+def test_the_printed_url_matches_the_port_it_started_on(tmp_path):
+    """A connection string for a port nothing listens on is the same dead end
+    as no connection string."""
+    out = _rendered(port=5437, url="postgresql://postgres:postgres@localhost:5437/echo_memory")
+
+    assert ":5437/echo_memory" in out
+    assert ":5433/" not in out
+
+
 def test_the_next_step_names_the_restart(tmp_path):
     """An MCP server holds the code it imported when the client started it, so
     a registration nobody restarts into does nothing. That has cost this
     project two data bugs; it belongs in the one screen everyone reads."""
-    out = quickstart.render({
-        "database": "started", "port": 5433, "schema": "at head",
-        "clients": ["Claude Code"], "bin": "echo-memory", "hosted_hint": True,
-    })
+    out = _rendered()
 
-    assert "restart the client" in out.lower()
-    assert "echo-memory install" in out
+    assert "restart each client" in out.lower()
+    assert "echo-memory install --global" in out
     assert "api.echo-mem.com" in out
 
 
 def test_it_says_when_it_found_no_tools(tmp_path):
-    out = quickstart.render({
-        "database": "started", "port": 5433, "schema": "at head",
-        "clients": [], "bin": "echo-memory",
-    })
-
-    assert "no agent tools" in out
+    assert "no agent tools" in _rendered(clients=[])
 
 
 def test_clients_are_detected_from_disk_not_asked_for(tmp_path):
@@ -177,3 +202,41 @@ def test_installing_globally_twice_is_a_no_op(tmp_path):
     again = install.install_global(tmp_path)
 
     assert again[0].startswith("unchanged")
+
+
+def test_a_taken_port_moves_up_instead_of_failing(monkeypatch):
+    """5433 is not a safe assumption on a machine that has met this project
+    before: the repo's own compose file maps it, so following the old README
+    and then running quickstart used to produce a raw Docker error as the first
+    experience of a command named quickstart."""
+    calls = []
+
+    def fake_run(args, timeout=60):
+        calls.append(args)
+        if args[:2] == ["docker", "inspect"]:
+            return _completed(returncode=1)
+        return _completed()
+
+    monkeypatch.setattr(quickstart, "_run", fake_run)
+    monkeypatch.setattr(quickstart, "port_is_free", lambda p: p >= 5435)
+
+    outcome, port = quickstart.start_database()
+
+    assert port == 5435
+    assert "5433 was taken" in outcome
+    assert "5435:5432" in next(c for c in calls if "-d" in c)
+
+
+def test_the_url_follows_the_port_actually_used():
+    """A connection string for a port nothing is listening on is worse than
+    printing none."""
+    assert quickstart.database_url(5437).endswith(":5437/echo_memory")
+
+
+def test_no_free_port_is_reported_not_looped(monkeypatch):
+    monkeypatch.setattr(quickstart, "port_is_free", lambda p: False)
+
+    with pytest.raises(quickstart.QuickstartError) as e:
+        quickstart.free_port(5433, tries=3)
+
+    assert "--port" in str(e.value)

@@ -135,9 +135,14 @@ def _add_project_parsers(sub) -> None:
         help=f"a different deployment (default: {connect_cmd.DEFAULT_ENDPOINT})",
     )
 
-    sub.add_parser(
+    qs = sub.add_parser(
         "quickstart",
         help="start the database, apply the schema, and say what to do next",
+    )
+    qs.add_argument(
+        "--port", type=int, metavar="N",
+        help=f"host port for the database (default: {quickstart.PORT}, "
+             "or the next free one above it)",
     )
 
     cal = sub.add_parser(

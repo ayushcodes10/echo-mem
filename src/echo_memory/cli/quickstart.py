@@ -21,7 +21,9 @@ it needed one is a command nobody should run.
 from __future__ import annotations
 
 import shutil
+import socket
 import subprocess
+import sys
 import time
 
 # Published multi-arch, so this is a pull rather than a compile. The tag names
@@ -29,7 +31,8 @@ import time
 IMAGE = "ghcr.io/ayushcodes10/echo-mem-postgres:pg16-age1.5.0"
 CONTAINER = "echo-memory-db"
 PORT = 5433
-DATABASE_URL = f"postgresql://postgres:postgres@localhost:{PORT}/echo_memory"
+def database_url(port: int = PORT) -> str:
+    return f"postgresql://postgres:postgres@localhost:{port}/echo_memory"
 
 # Long enough for a first-run pull and initdb on a slow disk, short enough that
 # a wedged container is reported rather than waited on forever.
@@ -68,34 +71,83 @@ def container_state(name: str = CONTAINER) -> str:
     return "running" if probe.stdout.strip() == "running" else "stopped"
 
 
-def start_database(image: str = IMAGE, name: str = CONTAINER, port: int = PORT) -> str:
+def port_is_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.4)
+        return s.connect_ex(("127.0.0.1", port)) != 0
+
+
+def free_port(preferred: int = PORT, tries: int = 20) -> int:
+    """The preferred port, or the next free one above it.
+
+    5433 is not a safe assumption on a machine that has met this project
+    before: the repository's own docker-compose.yml maps it, so anyone who
+    followed the old README and then ran this got a raw Docker error - "Bind
+    for 0.0.0.0:5433 failed: port is already allocated" - as their first
+    experience of a command named quickstart.
+    """
+    for candidate in range(preferred, preferred + tries):
+        if port_is_free(candidate):
+            return candidate
+    raise QuickstartError(
+        f"no free port between {preferred} and {preferred + tries - 1}. "
+        "Free one, or pass --port."
+    )
+
+
+def start_database(
+    image: str = IMAGE, name: str = CONTAINER, port: int = PORT
+) -> tuple[str, int]:
     """Start the database, or report that it is already up.
 
     Never replaces a running container. Somebody running this twice, or running
     it on a machine where a previous install is holding real memory, must not
     lose it to a command whose name suggests it only sets things up.
+
+    Returns the outcome and the port actually used, which may not be the one
+    asked for.
     """
     state = container_state(name)
     if state == "running":
-        return "already running"
+        return "already running", published_port(name) or port
     if state == "stopped":
         started = _run(["docker", "start", name], timeout=60)
         if started.returncode != 0:
             raise QuickstartError(f"could not start the existing {name}: {started.stderr.strip()}")
-        return "restarted"
+        return "restarted", published_port(name) or port
 
+    chosen = free_port(port)
     created = _run([
         "docker", "run", "-d", "--name", name,
         "--restart", "unless-stopped",
         "-e", "POSTGRES_PASSWORD=postgres",
         "-e", "POSTGRES_DB=echo_memory",
-        "-p", f"{port}:5432",
+        "-p", f"{chosen}:5432",
         "-v", f"{name}-data:/var/lib/postgresql/data",
         image,
     ], timeout=600)
     if created.returncode != 0:
         raise QuickstartError(f"could not start the database: {created.stderr.strip()}")
-    return "started"
+    return ("started" if chosen == port else f"started ({port} was taken)"), chosen
+
+
+def published_port(name: str = CONTAINER) -> int | None:
+    """Which host port an existing container is already published on.
+
+    Asked rather than assumed: a container started by an earlier run, or by
+    hand, may not be on the default, and printing a connection string for the
+    wrong port is worse than printing none.
+    """
+    probe = _run([
+        "docker", "inspect", "-f",
+        '{{ (index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort }}', name,
+    ], timeout=20)
+    if probe.returncode != 0:
+        return None
+    try:
+        return int(probe.stdout.strip())
+    except ValueError:
+        return None
 
 
 def wait_until_ready(name: str = CONTAINER, timeout_s: int = READY_TIMEOUT_S) -> None:
@@ -128,31 +180,55 @@ def detected_clients(home) -> list[str]:
 
 
 def render(result: dict) -> str:
-    lines = ["Echo Memory is ready.", ""]
-    lines.append(f"  database   {result['database']} on port {result['port']}")
-    lines.append(f"  schema     {result['schema']}")
-    if result["clients"]:
-        lines.append(f"  found      {', '.join(result['clients'])}")
-    else:
-        lines.append("  found      no agent tools on this machine yet")
+    """The last screen anyone reads, so every command on it has to actually run.
+
+    The first version printed `echo-memory serve`, which is not a subcommand -
+    the server is `python -m echo_memory.server` - and passed none of the three
+    environment variables it needs, so following it produced a client that
+    fails at startup with a config error. A wrong next step is worse than no
+    next step: it spends the one moment somebody is willing to debug.
+    """
+    python = result.get("python") or "python"
+    url = result["url"]
+    lines = [
+        "Echo Memory is ready.",
+        "",
+        f"  database   {result['database']} on port {result['port']}",
+        f"  schema     {result['schema']}",
+    ]
+    lines.append(
+        f"  found      {', '.join(result['clients'])}" if result["clients"]
+        else "  found      no agent tools on this machine yet"
+    )
     lines += [
         "",
-        "Register it with a tool you use:",
+        "Register it with Claude Code. --scope user is once for this machine,",
+        "not once per project:",
         "",
-        f"  claude mcp add --scope user echo-memory -- {result['bin']} serve",
+        "  claude mcp add --scope user echo-memory \\",
+        "    -e ECHO_MEMORY_USER_ID=you \\",
+        "    -e ECHO_MEMORY_AGENT_ID=claude-code \\",
+        f'    -e ECHO_MEMORY_DATABASE_URL="{url}" \\',
+        f"    -- {python} -m echo_memory.server",
         "",
-        "or, inside a project, to commit the wiring alongside the code:",
+        "Other tools each want their own ECHO_MEMORY_AGENT_ID - cursor, codex,",
+        "claude-desktop. Two tools sharing an id makes a cross-tool recall",
+        "impossible to see afterwards. `echo-memory adopt` wires every client on",
+        "this machine at once and shows the diff first.",
         "",
-        "  echo-memory install",
+        "Then, so an agent knows when to record and recall rather than only that",
+        "the tools exist:",
         "",
-        "Then restart the client. An MCP server holds the code it imported when",
-        "the client started it, so a running one will not pick this up.",
+        "  echo-memory install --global",
+        "",
+        "Restart each client afterwards. An MCP server holds the code and config",
+        "it started with, so a running one will not pick this up.",
     ]
     if result.get("hosted_hint"):
         lines += [
             "",
-            "Prefer not to run a database at all? The hosted service needs no",
-            "local Postgres: https://api.echo-mem.com",
+            "Prefer not to run a database at all? The hosted service needs no local",
+            "Postgres: https://api.echo-mem.com",
         ]
     return "\n".join(lines) + "\n"
 
@@ -170,21 +246,23 @@ def run(args, _config=None, _conn=None) -> int:
         return 1
 
     try:
-        database = start_database()
+        database, port = start_database(port=getattr(args, "port", None) or PORT)
         wait_until_ready()
     except QuickstartError as e:
         print(f"error: {e}")
         return 1
 
-    initdb.upgrade(DATABASE_URL)
+    url = database_url(port)
+    initdb.upgrade(url)
 
     home = Path.home()
     print(render({
         "database": database,
-        "port": PORT,
+        "port": port,
+        "url": url,
         "schema": "at head",
         "clients": detected_clients(home),
-        "bin": "echo-memory",
+        "python": sys.executable,
         "hosted_hint": True,
     }), end="")
     return 0
