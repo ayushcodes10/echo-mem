@@ -190,10 +190,19 @@ def gate_conversion(conn) -> dict:
     model a choice about what is worth remembering, and there is no hook for
     that.
 
-    Undercounts by construction: a fact written later, under a different
-    session id, is not attributed to the gate that asked for it. That has
-    happened - 16 files were drained by hand ten days afterwards - so read this
-    as a floor.
+    A firing counts as converted if a fact was written OR a queued document was
+    closed after it. Writing alone was the first version and it was wrong in a
+    way the gate demonstrated within the hour: its own instruction says that
+    when a file's content is already recorded the right action is to mark it
+    done, not write it twice. A session that did exactly that scored as a
+    failure. A metric that punishes the behaviour its own instruction asks for
+    measures compliance with itself, not capture.
+
+    Undercounts by construction even so, in two ways. A fact written later,
+    under a different session id, is not attributed to the gate that asked for
+    it - 16 files were once drained by hand ten days afterwards. And closures
+    made before migration 0020 have no recorded author, so every firing older
+    than it can only be credited through a write. Read it as a floor.
     """
     fired = conn.execute("SELECT session_id, at FROM public.stop_gate_fired").fetchall()
     converted = 0
@@ -204,7 +213,12 @@ def gate_conversion(conn) -> dict:
                LIMIT 1""",
             (session_id, at),
         ).fetchone()
-        if wrote:
+        closed = conn.execute(
+            """SELECT 1 FROM public.pending_ingest
+               WHERE ingested_by_session = %s AND ingested_at > %s LIMIT 1""",
+            (session_id, at),
+        ).fetchone()
+        if wrote or closed:
             converted += 1
     return {"fired": len(fired), "converted": converted}
 

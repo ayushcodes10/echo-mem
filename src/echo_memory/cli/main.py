@@ -191,6 +191,11 @@ def _add_project_parsers(sub) -> None:
     pending.add_argument(
         "--done", nargs="+", metavar="PATH", help="mark these paths as ingested"
     )
+    pending.add_argument(
+        "--session", metavar="ID",
+        help="the session closing them; the Stop gate puts this on the line it "
+             "prints, so a closure can be credited to the firing that asked for it",
+    )
 
     hooks_parser = sub.add_parser(
         "install-hooks",

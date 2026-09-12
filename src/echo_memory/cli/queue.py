@@ -43,7 +43,8 @@ def run_notice(args, config, conn) -> int:
 
 def run_pending(args, _config, conn) -> int:
     if args.done:
-        print(f"Marked {capture.mark_ingested(conn, args.done)} file(s) as ingested.")
+        n = capture.mark_ingested(conn, args.done, getattr(args, "session", None))
+        print(f"Marked {n} file(s) as ingested.")
         return 0
     queued = capture.pending(conn, args.project)
     if not queued:
