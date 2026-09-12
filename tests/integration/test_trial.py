@@ -21,8 +21,11 @@ from echo_memory.trial import check, observations
 # arriving in the same episode both create nodes (resolution.py's documented
 # in-batch limitation), which is exactly the split criterion 6 counts.
 NEAR_DUPLICATE = unit_vector_at_angle(0.60)
-# Above HIGH_THRESHOLD: resolves silently into the existing node and writes
-# the entity_resolved audit entry that `trial check` asks a human to review.
+# Above HIGH_THRESHOLD. It used to merge silently; SILENT_MERGE is off since
+# 2026-09-13, so it now comes back as ambiguous and the caller confirms it. The
+# entity_resolved entry `trial check` reviews is produced either way - and the
+# confirmed path is the only one that still produces one, which is why the seed
+# takes it.
 SAME_ENTITY = unit_vector_at_angle(0.95)
 
 
@@ -60,11 +63,21 @@ def _seed(migrated_db, scope="shared"):
              "fact": "Postgres holds the graph", "confidence": "extracted"},
         ],
     )
+    # Two calls, because that is now the only route to a non-exact merge: the
+    # first is told the mention is ambiguous and which nodes it might mean, the
+    # second answers. A real agent does exactly this.
+    entities = [{"name": "Postgresql", "type": "tool"}, {"name": "AGE", "type": "tool"}]
+    facts = [{"source": "Postgresql", "target": "AGE", "relation_type": "hosts",
+              "fact": "Postgres is the storage substrate", "confidence": "extracted"}]
+    asked = server.write_episode(scope, "sess-2", entities, facts)
+    candidates = {
+        a["mention"]: a["candidates"][0]["node_id"]
+        for a in asked.get("ambiguous_entities", [])
+    }
+    assert "Postgresql" in candidates, asked
     server.write_episode(
-        scope, "sess-2",
-        [{"name": "Postgresql", "type": "tool"}, {"name": "AGE", "type": "tool"}],
-        [{"source": "Postgresql", "target": "AGE", "relation_type": "hosts",
-          "fact": "Postgres is the storage substrate", "confidence": "extracted"}],
+        scope, "sess-2", entities, facts,
+        {"Postgresql": {"resolved_to": candidates["Postgresql"]}},
     )
     return config
 
@@ -292,7 +305,11 @@ def test_exact_match_resolutions_are_excluded_from_review_by_default(migrated_db
         d for d in [r["resolution_detail"] for r in with_exact] if d != "exact match"
     ]
     assert len(default) == 1
-    assert default[0]["resolution_detail"].startswith("fuzzy match")
+    # "agent-confirmed fuzzy match" since SILENT_MERGE was turned off: the
+    # unattended variant no longer exists, and a confirmed merge still needs a
+    # human verdict, because the agent that confirmed it is the thing being
+    # graded.
+    assert "fuzzy match" in default[0]["resolution_detail"]
     assert default[0]["node_name"] == "Postgres (tool)"
     assert len(with_exact) > len(default)
 

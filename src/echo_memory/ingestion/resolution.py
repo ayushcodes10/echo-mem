@@ -46,6 +46,30 @@ from echo_memory.infra.db import GRAPH_NAME as GRAPH
 LOW_THRESHOLD = 0.45
 HIGH_THRESHOLD = 0.92
 
+# Whether a pair above HIGH_THRESHOLD may merge without asking anybody.
+#
+# Off, and the evidence is one table and one query. Calibration on 2026-09-13
+# reports, at the 0.92 bar, precision 50% over two reviewed pairs: no
+# reassurance whatsoever for an unattended graph mutation, on a store that has
+# already recorded three bad merges. A peer reviewer of the paper drawn from
+# this record made the point and was right.
+#
+# What decided it was the cost. Every entity resolution this store has ever
+# performed, by kind:
+#
+#   126  exact match
+#    34  agent-confirmed fuzzy match
+#     1  fuzzy match, similarity=0.927     <- the only silent merge, ever
+#
+# One in 24 days. Turning it off buys roughly one confirmation prompt a month
+# and removes the only path that can join two entities with nobody watching.
+# The pair is still surfaced as ambiguous, so nothing is lost except the
+# silence.
+#
+# Turn it back on when calibration has enough positives for the AUC interval to
+# clear 0.5, and precision at the bar rests on more than two pairs.
+SILENT_MERGE = False
+
 _NEGATION_TOKENS = ("in", "un", "non", "not")
 _TRAILING_VERSION = re.compile(r"\d+[a-z]?$")
 # Any token carrying a digit, anywhere in the name: 'v2', '0007', 'zlhv81t8'.
@@ -391,7 +415,8 @@ def resolve_entities(
         blocked = best is not None and _blocked_from_silent_merge(name, best.name)
 
         if (
-            best is not None
+            SILENT_MERGE
+            and best is not None
             and best.similarity >= high_threshold
             and not blocked
             and not _differing_numeric_tokens(name, best.name)
