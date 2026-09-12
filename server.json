@@ -1,0 +1,54 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ayushcodes10/echo-mem",
+  "title": "Echo Memory",
+  "description": "Shared memory for AI agents, as a graph in your own Postgres. Writes never call an LLM.",
+  "version": "0.2.0",
+  "websiteUrl": "https://echo-mem.com",
+  "repository": {
+    "url": "https://github.com/ayushcodes10/echo-mem",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "echo-mem",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "ECHO_MEMORY_DATABASE_URL",
+          "description": "Postgres connection string. `echo-memory quickstart` starts a suitable database and prints this.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "ECHO_MEMORY_USER_ID",
+          "description": "Whose memory this is. Scopes every read and write.",
+          "isRequired": true
+        },
+        {
+          "name": "ECHO_MEMORY_AGENT_ID",
+          "description": "Which tool is writing: claude-code, cursor, codex, claude-desktop. Recorded on every fact, and what makes a cross-tool recall visible afterwards.",
+          "isRequired": true
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.echo-mem.com/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer <key>, from https://api.echo-mem.com \u2014 the hosted option, which needs no local database.",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
