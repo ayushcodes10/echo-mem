@@ -15,9 +15,21 @@ is a sentence of prose that shares only some of their words, and the ranker has
 to find it among every other fact in the store.
 
 It is also not a benchmark. It measures one store against itself, so the
-absolute numbers mean nothing outside it. What it is for is A/B: run two
-configurations over the same cases and see which retrieves better, which is the
-question that was previously unanswerable.
+absolute numbers mean nothing outside it.
+
+**And "invalid for absolute scores, valid for A/B" is too generous**, which a
+reviewer established using this module's own evidence. A biased task can change
+the DIFFERENCE between configurations, not only their level: answer-derived
+wording rewards lexical retrieval, embedded entity names flip which channel
+wins, and a single-entity query scores other relevant facts as failures. The
+sign reversal recorded below is exactly that - the winner changed with the task
+construction, which is the thing a valid A/B is supposed to be robust to.
+
+So the question this answers is "which configuration scores higher on this
+generated task", and the question it does not answer is "which configuration
+should ship for the questions people actually ask". Use it as a regression
+harness and a diagnostic. A claim of the form "channel X was the real win"
+needs independently written questions, and does not follow from these tables.
 
 Three metrics, and the second two matter more than the first.
 
@@ -172,6 +184,13 @@ def compare(baseline: Result, variant: Result, resamples: int = BOOTSTRAP_RESAMP
     Bootstrap rather than a t-test: reciprocal ranks are neither normal nor
     continuous - they are 1, 1/2, 1/3 ... 0, with a heavy spike at 0 - so
     resampling makes no distributional claim that the data would violate.
+
+    **It does not remove the independence assumption.** Cases are resampled one
+    at a time, and cases are not independent: they share facts, they share
+    entity names, and in the multihop shape up to six of them come from one
+    middle entity. Dependence like that makes an interval narrower than it
+    should be. A cluster bootstrap - resampling hubs or facts rather than cases
+    - is the fix, and is not implemented. Read these intervals as optimistic.
     """
     if len(baseline.reciprocal_ranks) != len(variant.reciprocal_ranks):
         raise ValueError("compare needs both configurations scored on the same cases")
@@ -214,7 +233,21 @@ def _prose_query(fact: str, source: str, target: str) -> str:
 
 
 def _multihop_cases(rows, limit: int | None) -> list[Case]:
-    """Questions that no single fact answers.
+    """Two entities joined only through a third, and the two facts that join them.
+
+    **Named for what it measures: required-set completion, not answerability.**
+    The first version called it "answerable-at rank", which assumes what an
+    evaluation is supposed to establish. Generating two facts that share a
+    middle entity does not make them a necessary and sufficient evidence set -
+    two unrelated facts about one project need not jointly answer anything, and
+    some other fact or path may answer a real question without completing the
+    designated pair. A reviewer drew that line and it is the right one.
+
+    What the score does mean is exact: at what rank did the retriever surface
+    both of the two facts this case designates. That is a well-defined and
+    useful regression signal for traversal work. Calling it answerability
+    requires questions and relevance labels written by somebody, which do not
+    exist yet.
 
     Two entities X and Y that are NOT directly connected, but both appear in
     facts about a third entity M. "How are X and Y related?" is the question
@@ -360,7 +393,7 @@ SHAPE_NOTES = {
     SHAPE_ENTITY_PAIR: "both entity names - LEAKY: names are embedded into every fact",
     SHAPE_ENTITY_SINGLE: "one entity name - the realistic shape",
     SHAPE_PROSE: "the fact's words, entity names stripped - cannot leak",
-    SHAPE_MULTIHOP: "two entities one hop apart - needs BOTH facts, so R@1 is 0 by construction",
+    SHAPE_MULTIHOP: "required-set completion: both designated facts, so R@1 is 0 by construction",
 }
 
 

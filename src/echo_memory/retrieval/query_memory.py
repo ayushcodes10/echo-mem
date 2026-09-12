@@ -165,9 +165,26 @@ def adaptive_cosine_floor(conn, group_id: str) -> float:
 
     Measuring beats picking a better constant. The right value depends on the
     embedder, the length of the facts and the subject matter, all of which
-    differ per store and drift as one grows. Sampling random pairs of facts
-    approximates the query-to-unrelated-fact distribution well enough to place
-    a percentile, and costs one query.
+    differ per store and drift as one grows.
+
+    **This is a heuristic, not a calibrated false-admission rate**, and the gap
+    between those two was overstated until a reviewer took the derivation
+    apart. Three assumptions stand between the 95th percentile of this sample
+    and "5% of unrelated facts get through":
+
+      - Random pairs are not unrelated pairs. Two facts from one project, a
+        repeated constraint and its paraphrase all enter the sample and pull
+        the percentile up. Nothing here excludes them; only a fact against
+        itself is excluded.
+      - Fact-to-fact similarity is not query-to-fact similarity. The floor is
+        applied to a query scored against a fact, and calibrated on a fact
+        scored against a fact. Short identifiers and natural-language questions
+        do not have to behave alike.
+      - An empirical quantile is not a future rate. It carries sampling error,
+        and _vector_candidates admits score >= floor, so ties land inside.
+
+    What it does deliver is a floor that moves with the store instead of a
+    constant measured once on somebody else's data, which is what 0.15 was.
 
     Falls back to COSINE_FLOOR on a store too small to measure - under
     FLOOR_MIN_FACTS the sample is mostly noise about noise.
@@ -196,8 +213,13 @@ def adaptive_cosine_floor(conn, group_id: str) -> float:
     # n_pairs is quadratic in the sample, so this is the fact count squared.
     if n_pairs < FLOOR_MIN_FACTS * FLOOR_MIN_FACTS:
         return COSINE_FLOOR
-    # Never below the static floor: a store whose facts are all near-identical
-    # would otherwise measure a floor of nearly zero and admit everything.
+    # A lower bound, and the reason given for it here used to be backwards: it
+    # said a store of near-identical facts would measure a floor near zero.
+    # Under cosine, near-identical facts score near ONE, so such a store
+    # measures a very high percentile and this max() does nothing. The case it
+    # actually guards is the opposite - a store whose facts are mutually
+    # dissimilar, or a sample degenerate enough to put the quantile under a
+    # value already known to be too permissive.
     return max(COSINE_FLOOR, float(percentile))
 
 
@@ -241,6 +263,16 @@ def _graph_candidates(
     outranks a neighbour of the fifth. Seeds themselves are excluded - they are
     already in the other lists, and re-ranking a fact against itself is what
     reciprocal rank fusion is for.
+
+    Neighbours of ONE seed all carry that seed's rank, so their order among
+    themselves is a second decision and it used to be made by accident: the
+    rows arrived in whatever order Postgres produced, Python's stable sort kept
+    it, and the result was truncated at LIST_DEPTH. That is unspecified output
+    feeding a measurement - it can move between runs, plans or a vacuum. They
+    are ordered by edge id within a seed now. Edge id is arbitrary as a
+    relevance signal and that is the point: it is arbitrary and FIXED, so a
+    rerun of the eval scores the same thing twice. A relevance-based tiebreak
+    would be better and is a different change, one that has to be measured.
     """
     if not seed_edge_ids:
         return []
@@ -265,7 +297,9 @@ def _graph_candidates(
         rank = order.get(str(seed), len(order))
         if neighbour not in found or rank < found[neighbour]:
             found[neighbour] = rank
-    return [e for e, _ in sorted(found.items(), key=lambda kv: kv[1])][:limit]
+    return [
+        e for e, _ in sorted(found.items(), key=lambda kv: (kv[1], int(kv[0])))
+    ][:limit]
 
 
 def _any_term_tsquery(terms: list[str]) -> tuple[str, list[str]]:
@@ -491,6 +525,16 @@ def query_memory(
             # Seeded from the two content channels fused, so the expansion
             # follows what the query actually matched rather than whatever the
             # vector list alone happened to put first.
+            #
+            # That also means this list is NOT independent of the other two,
+            # and reciprocal rank fusion is happiest when its inputs are.
+            # Everything here is derived from the content channels' own top
+            # results, so a fact both retrieves and neighbours gets counted
+            # twice. Not ruled out as a cause of the ranking cost measured on
+            # the multihop shape - and not the only candidate either: seed
+            # count, hub genericness, tie order and truncation depth are all
+            # untested. The attribution in the commit that added this is a
+            # hypothesis, not a finding.
             seeds = sorted(content, key=content.get, reverse=True)[:GRAPH_SEEDS]
             lists.append(_graph_candidates(conn, group_id, seeds, LIST_DEPTH))
         fused = reciprocal_rank_fusion(lists, k=k) if graph_hops else content
