@@ -19,6 +19,7 @@ import re
 from dataclasses import dataclass, field
 
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
+from echo_memory.retrieval.fusion import reciprocal_rank_fusion
 
 # Measured against the real embedder (all-MiniLM-L6-v2), not guessed: a true
 # duplicate ("AGE" vs "Apache AGE") scored 0.497, well below the 0.75 this
@@ -184,12 +185,22 @@ def _exact_match(conn, group_id: str, name: str) -> tuple[str, str] | None:
     return str(row[0]), str(row[1]).strip('"')
 
 
-def _fuzzy_candidates(conn, group_id: str, embedding: list[float], limit: int = 5) -> list[Candidate]:
-    # <#> (negative inner product), not <=> (cosine distance): embeddings are
-    # L2-normalized on write (LocalEmbedder), so for unit vectors
-    # embedding <#> query == -cosine_similarity, same ranking, cheaper (skips
-    # computing both norms). See MATHS.local.md §1.
-    rows = conn.execute(
+def _fuzzy_candidates(
+    conn,
+    group_id: str,
+    embedding: list[float],
+    name: str | None = None,
+    limit: int = 5,
+) -> list[Candidate]:
+    """Retrieve candidates from vector and lexical signals, then fuse ranks.
+
+    Embedding similarity remains the semantic channel.  The trigram channel
+    catches technical names whose meaningful token is flattened by embeddings;
+    its GIN-backed ``%`` predicate avoids scanning the AGE label table.  RRF
+    combines rank rather than incomparable score scales, while each candidate's
+    similarity remains its strongest source score for the existing thresholds.
+    """
+    vector_rows = conn.execute(
         """
         SELECT ne.node_id::text, -(ne.embedding <#> %s::vector) AS similarity
         FROM public.node_embedding ne
@@ -199,25 +210,56 @@ def _fuzzy_candidates(conn, group_id: str, embedding: list[float], limit: int = 
         """,
         (embedding, group_id, embedding, limit),
     ).fetchall()
-    if not rows:
-        return []
+    vector_scores = {str(node_id): float(similarity) for node_id, similarity in vector_rows}
 
-    node_ids = [node_id for node_id, _ in rows]
-    similarity_by_id = {node_id: float(similarity) for node_id, similarity in rows}
+    name_by_id: dict[str, str] = {}
+    if vector_scores:
+        name_rows = conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH}', $$
+                UNWIND $ids AS nid
+                MATCH (n:Node) WHERE id(n) = nid
+                RETURN id(n), n.name
+            $$, %s) AS (node_id agtype, name agtype)""",
+            (json.dumps({"ids": [int(nid) for nid in vector_scores]}),),
+        ).fetchall()
+        name_by_id.update({str(node_id): str(node).strip('"') for node_id, node in name_rows})
 
-    name_rows = conn.execute(
-        f"""SELECT * FROM cypher('{GRAPH}', $$
-            UNWIND $ids AS nid
-            MATCH (n:Node) WHERE id(n) = nid
-            RETURN id(n), n.name
-        $$, %s) AS (node_id agtype, name agtype)""",
-        (json.dumps({"ids": [int(nid) for nid in node_ids]}),),
-    ).fetchall()
-    name_by_id = {str(node_id): str(name).strip('"') for node_id, name in name_rows}
+    lexical_scores: dict[str, float] = {}
+    if name:
+        node_name = "(properties ->> '\"name\"'::agtype)"
+        node_group = "(properties ->> '\"group_id\"'::agtype)"
+        lexical_rows = conn.execute(
+            f"""SELECT id::text, {node_name} AS name,
+                       similarity({node_name}, %s) AS similarity
+                FROM {GRAPH}.\"Node\"
+                WHERE {node_group} = %s
+                  AND {node_name} % %s
+                  AND similarity({node_name}, %s) >= %s
+                ORDER BY similarity DESC, id
+                LIMIT %s""",
+            (name, group_id, name, name, LOW_THRESHOLD, limit),
+        ).fetchall()
+        for node_id, node, similarity in lexical_rows:
+            key = str(node_id)
+            lexical_scores[key] = float(similarity)
+            name_by_id[key] = str(node)
 
+    ranked = reciprocal_rank_fusion([list(vector_scores), list(lexical_scores)])
+    similarity_by_id = {
+        node_id: max(vector_scores.get(node_id, 0.0), lexical_scores.get(node_id, 0.0))
+        for node_id in ranked
+    }
+    ordered_ids = sorted(
+        ranked,
+        key=lambda node_id: (-ranked[node_id], -similarity_by_id[node_id], node_id),
+    )
     return [
-        Candidate(node_id=nid, name=name_by_id.get(nid, "?"), similarity=similarity_by_id[nid])
-        for nid in node_ids
+        Candidate(
+            node_id=node_id,
+            name=name_by_id.get(node_id, "?"),
+            similarity=similarity_by_id[node_id],
+        )
+        for node_id in ordered_ids
     ]
 
 
@@ -425,7 +467,7 @@ def resolve_entities(
             continue
 
         embedding = embedder.embed(name)
-        candidates = _fuzzy_candidates(conn, group_id, embedding)
+        candidates = _fuzzy_candidates(conn, group_id, embedding, name)
         best = candidates[0] if candidates else None
         blocked = best is not None and _blocked_from_silent_merge(name, best.name)
 
