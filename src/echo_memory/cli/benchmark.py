@@ -38,6 +38,14 @@ LLM_CALLS_PER_QUERY = 0
 
 DEFAULT_ROUNDS = 5
 
+# Facts to put in the scratch scope before measuring. Zero was the old
+# behaviour and it made the read numbers meaningless: five rounds leave about
+# six facts, and at six facts the adaptive similarity floor never runs (its
+# sample is under the minimum) while the vector scan touches six rows. The
+# published median came out 2.4x faster than the same query against a real
+# 291-fact store. A benchmark run on an empty scope measures an empty scope.
+DEFAULT_SEED_FACTS = 250
+
 _ENTITIES = [
     {"name": "benchmark-subject", "type": "probe"},
     {"name": "benchmark-target", "type": "probe"},
@@ -65,10 +73,45 @@ def _timed(fn) -> tuple[float, object]:
     return (time.perf_counter() - start) * 1000, result
 
 
-def run(conn, group_id: str, embedder, rounds: int = DEFAULT_ROUNDS) -> dict:
+def _seed_store(conn, group_id: str, embedder, target: int) -> int:
+    """Fill the scratch scope to roughly `target` facts before measuring.
+
+    Retrieval cost is a function of how much there is to retrieve from, so a
+    read measured against six facts describes nothing anyone will experience.
+    Seeded here rather than by pointing the benchmark at real memory, because
+    it writes as it measures and must never do that to a scope worth keeping.
+    """
+    (have,) = conn.execute(
+        "SELECT count(*) FROM public.fact_embedding WHERE group_id = %s", (group_id,)
+    ).fetchone()
+    for index in range(have, target):
+        source, target_name = f"seed-subject-{index}", f"seed-target-{index}"
+        write_episode(
+            conn, group_id, f"benchmark-seed-{index}",
+            [{"name": source, "type": "probe"}, {"name": target_name, "type": "probe"}],
+            [{"source": source, "target": target_name,
+              "relation_type": "measured_in", "confidence": "extracted",
+              "fact": f"seeded fact {index} exists so the store has something to search"}],
+            # Resolved explicitly to "new". Without this the names are near
+            # enough to each other that resolution calls every one ambiguous
+            # and the call writes nothing: the first version of this seeded 244
+            # episodes and left the store on six facts.
+            {source: {"resolved_to": "new"}, target_name: {"resolved_to": "new"}},
+            embedder, project="benchmark", agent_id="benchmark",
+        )
+    (total,) = conn.execute(
+        "SELECT count(*) FROM public.fact_embedding WHERE group_id = %s", (group_id,)
+    ).fetchone()
+    return total
+
+
+def run(conn, group_id: str, embedder, rounds: int = DEFAULT_ROUNDS,
+        seed_facts: int = DEFAULT_SEED_FACTS) -> dict:
     """Measure a real ingest + query cycle. Writes real facts into group_id, so
     callers should hand it a throwaway scope rather than a scope holding
     memory worth keeping."""
+    if seed_facts:
+        _seed_store(conn, group_id, embedder, seed_facts)
     # The first write is measured separately and reported separately. It pays
     # for LocalEmbedder's lazy model load, and averaging that into the rest
     # would hide it in a "max" column while overstating steady-state cost.
@@ -108,8 +151,16 @@ def run(conn, group_id: str, embedder, rounds: int = DEFAULT_ROUNDS) -> dict:
         )
         digest_ms.append(elapsed)
 
+    (store_facts,) = conn.execute(
+        "SELECT count(*) FROM public.fact_embedding WHERE group_id = %s", (group_id,)
+    ).fetchone()
+
     return {
         "rounds": rounds,
+        # Reported so a latency can never be quoted without the store it was
+        # measured against, which is the mistake this number has already made
+        # once in print.
+        "store_facts": store_facts,
         "cold_start_ms": round(cold_start_ms, 1),
         "write_episode_ms": _summary(write_ms),
         "query_memory_ms": _summary(query_ms),
@@ -134,7 +185,7 @@ def render(result: dict) -> str:
     lines = [
         (
             f"Echo Memory - cost and latency baseline ({result['rounds']} rounds, "
-            f"{result['embedder']})"
+            f"{result.get('store_facts', '?')} facts in scope, {result['embedder']})"
         ),
         "",
         f"{'operation':<20}{'min':>10}{'median':>10}{'max':>10}",
