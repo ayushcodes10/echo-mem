@@ -117,6 +117,10 @@ def run(args, config, conn) -> int:
             ),
             end="",
         )
+        if getattr(args, "per_question", False):
+            print(independent.render_per_question(
+                independent.per_question(conn, group_id)
+            ))
         return 0
 
     print(f"unknown judge command {command!r}", file=sys.stderr)

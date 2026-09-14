@@ -180,7 +180,14 @@ def _add_project_parsers(sub) -> None:
     j_imp = judge_sub.add_parser("import", help="read a marked file back")
     j_imp.add_argument("file", help="the file, with y or n between the brackets")
 
-    judge_sub.add_parser("score", help="per-configuration metrics over the judged pool")
+    j_score = judge_sub.add_parser(
+        "score", help="per-configuration metrics over the judged pool"
+    )
+    j_score.add_argument(
+        "--per-question", action="store_true",
+        help="also show each question's reciprocal rank, so a reader can see "
+             "whether an advantage is consistent or carried by two cases",
+    )
 
     cal = sub.add_parser(
         "calibrate",

@@ -295,6 +295,73 @@ def score(conn, group_id: str) -> dict:
     return out
 
 
+def per_question(conn, group_id: str) -> list[dict]:
+    """Each question's reciprocal rank under each configuration.
+
+    An aggregate over ten questions hides whether an advantage is consistent or
+    carried by two cases, and at this sample size that difference is the whole
+    question. A reviewer asked for these before the aggregate could be read as
+    anything, which is right.
+    """
+    labels: dict[int, set[str]] = {}
+    for qid, edge_id in conn.execute(
+        """SELECT j.question_id, j.edge_id FROM public.eval_judgement j
+           JOIN public.eval_question q ON q.id = j.question_id
+           WHERE q.group_id = %s AND j.relevant""",
+        (group_id,),
+    ).fetchall():
+        labels.setdefault(qid, set()).add(edge_id)
+
+    text = {
+        i: t for i, t in conn.execute(
+            "SELECT id, text FROM public.eval_question WHERE group_id = %s ORDER BY id",
+            (group_id,),
+        ).fetchall()
+    }
+    runs: dict[int, dict[str, list[str]]] = {}
+    for qid, configuration, returned in conn.execute(
+        """SELECT r.question_id, r.configuration, r.returned FROM public.eval_run r
+           JOIN public.eval_question q ON q.id = r.question_id
+           WHERE q.group_id = %s""",
+        (group_id,),
+    ).fetchall():
+        runs.setdefault(qid, {})[configuration] = returned or []
+
+    out = []
+    for qid, question in text.items():
+        relevant = labels.get(qid, set())
+        row = {"id": qid, "text": question, "relevant": len(relevant), "rr": {}}
+        for configuration, returned in sorted(runs.get(qid, {}).items()):
+            rank = next(
+                (i for i, e in enumerate(returned, start=1) if e in relevant), None
+            )
+            row["rr"][configuration] = (1.0 / rank) if rank else 0.0
+        out.append(row)
+    return out
+
+
+def render_per_question(rows: list[dict]) -> str:
+    if not rows:
+        return ""
+    names = sorted({c for r in rows for c in r["rr"]})
+    lines = [
+        "",
+        "Per question, reciprocal rank of the first relevant fact:",
+        "",
+        "  " + f"{'#':<3}{'rel':>4}  " + "".join(f"{n[:12]:>14}" for n in names),
+        "  " + "-" * (9 + 14 * len(names)),
+    ]
+    for r in rows:
+        lines.append(
+            f"  {r['id']:<3}{r['relevant']:>4}  "
+            + "".join(f"{r['rr'].get(n, 0.0):>14.3f}" for n in names)
+        )
+    lines += ["", "  " + "  ".join(f"{r['id']}: {r['text'][:60]}" for r in rows[:0])]
+    for r in rows:
+        lines.append(f"  {r['id']:<3} {r['text']}")
+    return "\n".join(lines)
+
+
 def render(scores: dict, cover: dict | None = None) -> str:
     if not scores:
         return (
