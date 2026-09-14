@@ -489,7 +489,7 @@ def render(scores: dict, cover: dict | None = None) -> str:
     elif cover:
         missing = cover["possible"] - cover["judged"]
         lines += [
-            (f"Recall is over the POOLED relevant set: "
+            ("Recall is over the POOLED relevant set: "
              + (f"{cover['judged_by']} left " if cover["judged_by"] else "")
              + f"{missing} of {cover['possible']} (question, fact) pairs unjudged,"),
             "  so a relevant fact no configuration returned cannot count against",

@@ -280,7 +280,7 @@ def test_a_fresh_judge_gets_the_whole_pool_back(conn):
 def test_agreement_is_kappa_because_raw_agreement_flatters(conn):
     """Two judges who both say no to almost everything agree almost always.
     Kappa takes out the agreement the marginals alone would produce."""
-    question, ids = _two_judges(conn)
+    _question, ids = _two_judges(conn)
 
     result = independent.agreement(conn, GROUP, "first", "second")
 
