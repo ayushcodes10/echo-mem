@@ -121,23 +121,31 @@ def _find_active_edge(
     conn, group_id: str, source_id: str, target_id: str, relation_type: str
 ) -> tuple[str, str] | None:
     """Returns (edge_id, fact_text) so a supersession's audit entry can
-    record before_fact, not just its id."""
+    record before_fact, not just its id.
+
+    Read off the edge table rather than through Cypher, for the same reason
+    _adjacent is. `MATCH (a)-[e:FACT]->(b) WHERE id(a) = $sid AND id(b) = $tid`
+    cannot use an index: AGE expands the match and filters afterwards, so every
+    call walked every FACT edge in the scope. At 776 facts that was 651 ms per
+    call and 93% of a six-fact write.
+
+    start_id and end_id are indexed alongside group_id by migration 0013, which
+    is the index this query wanted all along.
+    """
     row = conn.execute(
-        f"""SELECT * FROM cypher('{GRAPH}', $$
-            MATCH (a)-[e:FACT {{relation_type: $rel, group_id: $gid}}]->(b)
-            WHERE id(a) = $sid AND id(b) = $tid AND e.t_invalid IS NULL
-            RETURN id(e), e.fact
-            LIMIT 1
-        $$, %s) AS (edge_id agtype, fact agtype)""",
-        (
-            json.dumps(
-                {"rel": relation_type, "gid": group_id, "sid": int(source_id), "tid": int(target_id)}
-            ),
-        ),
+        f"""SELECT id::text, properties ->> '"fact"'::agtype
+            FROM {GRAPH}."FACT"
+            WHERE (properties ->> '"group_id"'::agtype) = %s
+              AND start_id = %s::text::graphid
+              AND end_id = %s::text::graphid
+              AND (properties ->> '"relation_type"'::agtype) = %s
+              AND (properties ->> '"t_invalid"'::agtype) IS NULL
+            LIMIT 1""",
+        (group_id, str(source_id), str(target_id), relation_type),
     ).fetchone()
     if row is None:
         return None
-    return str(row[0]), str(row[1]).strip('"')
+    return str(row[0]), row[1]
 
 
 def _invalidate_edge(conn, edge_id: str, t_invalid: int) -> None:
