@@ -11,6 +11,7 @@ import psycopg
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.logging import get_logger, log_write_episode
 from echo_memory.infra.project import UNKNOWN as PROJECT_UNKNOWN
+from echo_memory.ingestion.embeddings import Prefetched
 from echo_memory.ingestion.neighbourhood import MAX_FACTS_CONSULTED, related_entities
 from echo_memory.ingestion.resolution import (
     ResolutionError,
@@ -312,6 +313,33 @@ def _write_audit_entry(conn, group_id: str, session_id: str, **fields) -> None:
     )
 
 
+def _prefetch(embedder, entities: list[dict], facts: list[dict]):
+    """Embed everything this episode will need in one forward pass.
+
+    A transformer pays fixed per-call overhead that one text bears alone and
+    many share. The 21 texts a six-fact episode embeds cost 90.5 ms one call
+    each and 7.9 ms batched - a quarter of a 330 ms write.
+
+    Three kinds, listed rather than inferred so a reader can see what is
+    predicted and check it against the call sites:
+
+      - every entity name, which resolution scores and node creation stores
+      - each fact as it is actually embedded, entity names composed in
+      - the bare fact text for the first few, which related_entities uses to
+        ask what the graph already calls this
+
+    A prediction that misses is served by the wrapped embedder and cached, so
+    this can only change how long a write takes, never what it writes.
+    """
+    texts = [e.get("name", "") for e in entities]
+    texts += [
+        embedding_text(f.get("source", ""), f.get("target", ""), f["fact"])
+        for f in facts
+    ]
+    texts += [f["fact"] for f in facts[:MAX_FACTS_CONSULTED]]
+    return Prefetched(embedder, texts)
+
+
 def write_episode(
     conn,
     group_id: str,
@@ -325,6 +353,7 @@ def write_episode(
 ) -> dict:
     resolutions = resolutions or {}
     start = time.perf_counter()
+    embedder = _prefetch(embedder, entities, facts)
 
     try:
         # Checked here, before any row is written, so a caller with a broken

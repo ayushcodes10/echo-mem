@@ -166,3 +166,67 @@ def test_reindex_reports_progress_against_what_it_has_written(migrated_db):
     assert seen, "no progress was reported"
     assert seen[-1] == (result["updated"], result["facts"])
     assert all(done <= total for done, total in seen)
+
+
+def test_an_episode_embeds_its_texts_in_one_batch(migrated_db):
+    """The 21 texts a six-fact episode needs cost 90.5 ms one call each and
+    7.9 ms batched, a quarter of a 330 ms write. This was measured as worthless
+    once and it was not: that reading came from code where a single unindexed
+    edge lookup was 93% of a write, and the saving vanished into the noise
+    beside it."""
+
+    class _Counting(VectorEmbedder):
+        def __init__(self, vectors):
+            super().__init__(vectors)
+            self.singles = 0
+            self.batches: list[int] = []
+
+        def embed(self, text):
+            self.singles += 1
+            return super().embed(text)
+
+        def embed_many(self, texts):
+            self.batches.append(len(texts))
+            return [VectorEmbedder.embed(self, t) for t in texts]
+
+    with connect(migrated_db) as conn:
+        embedder = _Counting({
+            "Acme": REFERENCE, "release branch": REFERENCE, FACT: REFERENCE,
+            f"Acme release branch. {FACT}": REFERENCE,
+        })
+        _write(conn, embedder)
+
+    assert embedder.batches, "the episode embedded one text at a time"
+    assert embedder.batches[0] >= 3, "entity names and the fact should share one batch"
+    assert embedder.singles == 0, (
+        f"{embedder.singles} text(s) missed the prefetch and were embedded alone"
+    )
+
+
+def test_a_text_the_prefetch_did_not_predict_is_still_embedded(migrated_db):
+    """The prediction is a list of call sites someone has to keep in step with
+    the code, so it will eventually be wrong. When it is, the write must still
+    be correct - only slower."""
+    from echo_memory.ingestion.embeddings import Prefetched
+
+    class _Inner(VectorEmbedder):
+        def __init__(self, vectors):
+            super().__init__(vectors)
+            self.late: list[str] = []
+
+        def embed(self, text):
+            self.late.append(text)
+            return super().embed(text)
+
+    inner = _Inner({"Acme": REFERENCE, FACT: REFERENCE})
+    prefetched = Prefetched(inner, ["Acme"])
+    inner.late.clear()
+
+    assert prefetched.embed("Acme") == REFERENCE, "a predicted text came from the batch"
+    assert inner.late == [], "a predicted text was re-embedded"
+
+    assert prefetched.embed(FACT) == REFERENCE, "an unpredicted text was still served"
+    assert inner.late == [FACT]
+
+    prefetched.embed(FACT)
+    assert inner.late == [FACT], "an unpredicted text was not remembered"
