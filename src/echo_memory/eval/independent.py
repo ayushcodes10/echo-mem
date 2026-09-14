@@ -370,6 +370,57 @@ def per_question(conn, group_id: str, *, judged_by: str | None = None) -> list[d
     return out
 
 
+# Resamples for the bootstrap interval, matching eval/retrieval.py so the two
+# evaluations' intervals mean the same thing.
+BOOTSTRAP_RESAMPLES = 5000
+
+
+def compare_configurations(conn, group_id: str, a: str, b: str, *,
+                           judged_by: str | None = None,
+                           resamples: int = BOOTSTRAP_RESAMPLES,
+                           seed: int = 7) -> dict:
+    """Delta MRR between two configurations, with a paired bootstrap interval.
+
+    Paired because both configurations answered the same questions: the
+    variance that matters is that of the per-question difference. Bootstrap
+    rather than a t-test because reciprocal ranks are 1, 1/2, 1/3 ... 0 with a
+    heavy spike at 0, so resampling makes no distributional claim the data
+    would violate.
+
+    Ten questions is a very small n, and the interval says so rather than
+    hiding it. That is the point of computing it here: two judges over this
+    pool put `shipping` and `lexical only` in opposite orders on MRR, and
+    without an interval that reads as a finding about the configurations. With
+    one it reads as what it is - a sample too small to separate them, where
+    which judge labelled decides which one happens to lead.
+    """
+    rows = per_question(conn, group_id, judged_by=judged_by)
+    diffs = [
+        r["rr"][b] - r["rr"][a]
+        for r in rows if a in r["rr"] and b in r["rr"] and r["relevant"]
+    ]
+    if not diffs:
+        return {"questions": 0, "delta": 0.0, "low": 0.0, "high": 0.0,
+                "significant": False, "judged_by": judged_by}
+
+    rng = random.Random(seed)
+    n = len(diffs)
+    means = sorted(
+        sum(diffs[rng.randrange(n)] for _ in range(n)) / n for _ in range(resamples)
+    )
+    low, high = means[int(0.025 * resamples)], means[int(0.975 * resamples)]
+    return {
+        "questions": n,
+        "a": a, "b": b,
+        "delta": sum(diffs) / n,
+        "low": low,
+        "high": high,
+        # Excludes zero at 95%. Not "true", only "not obviously nothing".
+        "significant": low > 0 or high < 0,
+        "judged_by": rows[0].get("judged_by"),
+    }
+
+
 def render_per_question(rows: list[dict]) -> str:
     if not rows:
         return ""

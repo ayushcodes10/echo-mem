@@ -138,6 +138,33 @@ def run(args, config, conn) -> int:
             return 1
         return 0
 
+    if command == "compare":
+        try:
+            r = independent.compare_configurations(
+                conn, group_id, args.a, args.b,
+                judged_by=getattr(args, "judged_by", None),
+            )
+        except ValueError as exc:
+            print(f"{exc}\n  echo-memory judge compare <a> <b> --by <name>", file=sys.stderr)
+            return 1
+        if not r["questions"]:
+            print("Nothing judged relevant yet, so there is nothing to compare.")
+            return 0
+        print(f"\n  {r['b']} against {r['a']}, judged by {r['judged_by']}:\n")
+        print(f"    delta MRR        {r['delta']:+.3f}")
+        print(f"    95% interval     [{r['low']:+.3f}, {r['high']:+.3f}]  "
+              f"over {r['questions']} question(s)")
+        print("\n  " + (
+            "The interval excludes zero. On this many questions that is worth "
+            "something,\n  but read it next to the same comparison under another "
+            "judge before believing it."
+            if r["significant"] else
+            "The interval includes zero. Whichever of these two leads, this many "
+            "questions\n  cannot show it - and a lead that changes with the judge "
+            "is the same statement\n  arrived at a second way."
+        ) + "\n")
+        return 0
+
     if command == "judges":
         rows = independent.judges(conn, group_id)
         if not rows:

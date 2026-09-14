@@ -201,6 +201,16 @@ def _add_project_parsers(sub) -> None:
              "has labelled, because their labels are separate measurements",
     )
 
+    j_cmp = judge_sub.add_parser(
+        "compare",
+        help="delta MRR between two configurations with a paired bootstrap interval, "
+             "so a lead too small for ten questions to resolve reads as one",
+    )
+    j_cmp.add_argument("a", help="the baseline configuration, e.g. shipping")
+    j_cmp.add_argument("b", help="the one being compared against it")
+    j_cmp.add_argument("--by", dest="judged_by", metavar="NAME",
+                       help="whose labels to compare under")
+
     judge_sub.add_parser("judges", help="who has labelled this scope, and how much")
     j_agree = judge_sub.add_parser(
         "agreement",

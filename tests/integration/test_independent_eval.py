@@ -288,3 +288,31 @@ def test_agreement_is_kappa_because_raw_agreement_flatters(conn):
     assert result["raw_agreement"] == 0.0, "they disagreed on every pair"
     assert result["kappa"] <= 0.0
 
+def test_a_ranking_flip_between_judges_is_reported_with_its_interval(conn):
+    """The reason the comparison exists. Two judges put two configurations in
+    opposite orders on MRR; without an interval that reads as a finding about
+    the configurations rather than about how few questions there are."""
+    independent.add_question(conn, GROUP, "which branch does it deploy from")
+    question = independent.questions(conn, GROUP)[0]
+    independent.run_configurations(
+        conn, GROUP, question, _embedder(),
+        {"shipping": {}, "vector only": {"vector_only": True}},
+    )
+    for edge_id in independent.pool(conn, question["id"]):
+        independent.judge(conn, question["id"], edge_id, True, judged_by="only-one")
+
+    result = independent.compare_configurations(
+        conn, GROUP, "shipping", "vector only", judged_by="only-one"
+    )
+
+    assert result["questions"] == 1
+    assert result["low"] <= result["delta"] <= result["high"]
+    assert result["judged_by"] == "only-one"
+
+
+def test_comparing_needs_a_judge_named_when_there_are_two(conn):
+    """It reads per-question labels, so it inherits the same refusal."""
+    _two_judges(conn)
+
+    with pytest.raises(ValueError):
+        independent.compare_configurations(conn, GROUP, "shipping", "vector only")
