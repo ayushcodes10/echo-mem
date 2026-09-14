@@ -36,16 +36,27 @@ def _unit(vec):
     return [x / norm for x in vec]
 
 
-def _seed_embeddings(conn, n, spread):
+# Every call takes a fresh block of ids, and clears the scope first. An
+# interrupted run never reaches its teardown, so its rows survive into the next
+# run - where this helper's hardcoded ids collided on the primary key and
+# failed the first test to seed anything. Killing a slow suite should not break
+# the next one.
+_next_base = [1125899906842624]
+
+
+def _seed_embeddings(conn, n, spread, *, group=GROUP):
     """n fact embeddings. `spread` controls how unrelated they are: a large
     spread scatters them, a small one clusters them near-identically."""
+    conn.execute("DELETE FROM public.fact_embedding WHERE group_id = %s", (group,))
+    base = _next_base[0]
+    _next_base[0] += max(n, 1) + 1
     rng = random.Random(7)
     for i in range(n):
         vec = _unit([1.0] + [rng.gauss(0, spread) for _ in range(DIM - 1)])
         conn.execute(
             """INSERT INTO public.fact_embedding (edge_id, group_id, embedding)
                VALUES (%s::graphid, %s, %s)""",
-            (str(1125899906842624 + i), GROUP, vec),
+            (str(base + i), group, vec),
         )
 
 
