@@ -171,23 +171,54 @@ def _add_project_parsers(sub) -> None:
         "pool", help="judge the shuffled union of what every configuration returned"
     )
     j_pool.add_argument("--question", type=int, metavar="ID", help="just this one")
+    j_pool.add_argument("--as", dest="judged_by", metavar="NAME",
+                        help="judge as somebody else; only their own labels are skipped")
     j_exp = judge_sub.add_parser(
         "export", help="write the whole judging pass to a file to mark in an editor"
     )
     j_exp.add_argument("--out", metavar="FILE", help="write here instead of stdout")
     j_exp.add_argument("--question", type=int, metavar="ID", help="just this one")
+    j_exp.add_argument("--as", dest="judged_by", metavar="NAME",
+                       help="export what this judge has not labelled yet; omit for a "
+                            "fresh judge, who gets the whole pool")
 
     j_imp = judge_sub.add_parser("import", help="read a marked file back")
     j_imp.add_argument("file", help="the file, with y or n between the brackets")
+    j_imp.add_argument("--as", dest="judged_by", metavar="NAME",
+                       help="attribute these labels to this judge")
 
     j_score = judge_sub.add_parser(
-        "score", help="per-configuration metrics over the judged pool"
+        "score", help="per-configuration metrics over one judge's labels"
     )
     j_score.add_argument(
         "--per-question", action="store_true",
         help="also show each question's reciprocal rank, so a reader can see "
              "whether an advantage is consistent or carried by two cases",
     )
+    j_score.add_argument(
+        "--by", dest="judged_by", metavar="NAME",
+        help="whose labels to score against; required once more than one judge "
+             "has labelled, because their labels are separate measurements",
+    )
+
+    j_cmp = judge_sub.add_parser(
+        "compare",
+        help="delta MRR between two configurations with a paired bootstrap interval, "
+             "so a lead too small for ten questions to resolve reads as one",
+    )
+    j_cmp.add_argument("a", help="the baseline configuration, e.g. shipping")
+    j_cmp.add_argument("b", help="the one being compared against it")
+    j_cmp.add_argument("--by", dest="judged_by", metavar="NAME",
+                       help="whose labels to compare under")
+
+    judge_sub.add_parser("judges", help="who has labelled this scope, and how much")
+    j_agree = judge_sub.add_parser(
+        "agreement",
+        help="how far two judges agree on the pairs they both labelled, as "
+             "Cohen's kappa - raw agreement flatters when almost nothing is relevant",
+    )
+    j_agree.add_argument("a", help="one judge")
+    j_agree.add_argument("b", help="the other")
 
     cal = sub.add_parser(
         "calibrate",

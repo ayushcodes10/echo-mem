@@ -139,7 +139,8 @@ def run_configurations(conn, group_id: str, question: dict, embedder,
     return out
 
 
-def pool(conn, question_id: int, *, seed: int = SHUFFLE_SEED) -> list[str]:
+def pool(conn, question_id: int, *, seed: int = SHUFFLE_SEED,
+         judged_by: str | None = None) -> list[str]:
     """Every fact any configuration returned for this question, shuffled.
 
     The union, not a concatenation: a fact several configurations found is one
@@ -147,7 +148,11 @@ def pool(conn, question_id: int, *, seed: int = SHUFFLE_SEED) -> list[str]:
     fixed seed so position says nothing about which configuration ranked it
     first, and so the same pool can be presented twice for an agreement check.
 
-    Facts already judged are excluded, which makes judging resumable.
+    What `judged_by` already labelled is excluded, which makes one judge's pass
+    resumable without hiding the pool from the next judge. Excluding whatever
+    ANYBODY had labelled was the earlier behaviour, and it made the second
+    judging pass the docstring promises impossible: a second judge asking for
+    the pool got an empty one, because the first judge had been through it.
     """
     rows = conn.execute(
         "SELECT returned FROM public.eval_run WHERE question_id = %s ORDER BY configuration",
@@ -161,8 +166,9 @@ def pool(conn, question_id: int, *, seed: int = SHUFFLE_SEED) -> list[str]:
 
     judged = {
         r[0] for r in conn.execute(
-            "SELECT edge_id FROM public.eval_judgement WHERE question_id = %s",
-            (question_id,),
+            "SELECT edge_id FROM public.eval_judgement "
+            "WHERE question_id = %s AND (%s::text IS NULL OR judged_by = %s::text)",
+            (question_id, judged_by, judged_by),
         ).fetchall()
     }
     unjudged = [e for e in seen if e not in judged]
@@ -188,13 +194,19 @@ def judge(conn, question_id: int, edge_id: str, relevant: bool, *,
     )
 
 
-def coverage(conn, group_id: str) -> dict:
-    """How much of the (question, fact) grid has actually been judged.
+def coverage(conn, group_id: str, *, judged_by: str | None = None) -> dict:
+    """How much of the (question, fact) grid ONE judge has actually covered.
 
     Pooling bias is a property of how much was left unjudged, so it is a
     measurement rather than a disclaimer. At TREC scale the grid is
     unjudgeable and the caveat is permanent; this store holds a few hundred
     facts, which makes the whole grid reachable and the bias closable.
+
+    Counted per judge for the same reason it is closable at all: the claim is
+    that no relevant fact is hiding outside what was labelled, and two judges'
+    rows added together cannot support it. Summed across judges this returned
+    2942 of 2850 - more than the grid holds - and reported the bias closed on
+    the strength of it.
     """
     import json as _json
 
@@ -210,11 +222,12 @@ def coverage(conn, group_id: str) -> dict:
         "SELECT count(*) FROM public.eval_question WHERE group_id = %s AND opened_at IS NOT NULL",
         (group_id,),
     ).fetchone()[0]
+    who = resolve_judge(conn, group_id, judged_by)
     judged = conn.execute(
         """SELECT count(*) FROM public.eval_judgement j
            JOIN public.eval_question q ON q.id = j.question_id
-           WHERE q.group_id = %s""",
-        (group_id,),
+           WHERE q.group_id = %s AND j.judged_by = %s""",
+        (group_id, who),
     ).fetchone()[0]
     possible = active * n_questions
     return {
@@ -222,12 +235,16 @@ def coverage(conn, group_id: str) -> dict:
         "questions": n_questions,
         "judged": judged,
         "possible": possible,
+        "judged_by": who,
+        # A judge cannot label more pairs than the grid has, so >= is only ever
+        # == here; kept as >= so a store that shrank mid-pass still reads as
+        # covered rather than silently reopening the caveat.
         "complete": possible > 0 and judged >= possible,
     }
 
 
-def score(conn, group_id: str) -> dict:
-    """Per-configuration metrics over the judged pool.
+def score(conn, group_id: str, *, judged_by: str | None = None) -> dict:
+    """Per-configuration metrics over one judge's labels.
 
     precision@k  of the first k a configuration returned, how many were judged
                  relevant. The metric the old harness could not express,
@@ -239,14 +256,20 @@ def score(conn, group_id: str) -> dict:
     Questions with no relevant fact in the pool are excluded from recall and
     MRR and counted separately - they say something about the store, not about
     a configuration's ranking.
+
+    `judged_by` names whose labels these are, and the result carries the name
+    back so a number can never be quoted without it. Run it once per judge and
+    compare; that difference is a result, and on this data a larger one than
+    the difference between the configurations being measured.
     """
+    who = resolve_judge(conn, group_id, judged_by)
     labels: dict[int, dict[str, bool]] = {}
     for qid, edge_id, relevant in conn.execute(
         """SELECT j.question_id, j.edge_id, j.relevant
            FROM public.eval_judgement j
            JOIN public.eval_question q ON q.id = j.question_id
-           WHERE q.group_id = %s""",
-        (group_id,),
+           WHERE q.group_id = %s AND j.judged_by = %s""",
+        (group_id, who),
     ).fetchall():
         labels.setdefault(qid, {})[edge_id] = relevant
 
@@ -291,24 +314,30 @@ def score(conn, group_id: str) -> dict:
             "precision_at": {k: (v / scored if scored else 0.0) for k, v in p_at.items()},
             "recall_at": {k: (v / scored if scored else 0.0) for k, v in r_at.items()},
             "mrr": rr_total / scored if scored else 0.0,
+            "judged_by": who,
         }
     return out
 
 
-def per_question(conn, group_id: str) -> list[dict]:
-    """Each question's reciprocal rank under each configuration.
+def per_question(conn, group_id: str, *, judged_by: str | None = None) -> list[dict]:
+    """Each question's reciprocal rank under each configuration, for one judge.
 
     An aggregate over ten questions hides whether an advantage is consistent or
     carried by two cases, and at this sample size that difference is the whole
     question. A reviewer asked for these before the aggregate could be read as
     anything, which is right.
+
+    The same grid under a second judge is what shows whether an advantage
+    survives a change of labeller, which is the question a single grid cannot
+    answer however finely it is broken down.
     """
+    who = resolve_judge(conn, group_id, judged_by)
     labels: dict[int, set[str]] = {}
     for qid, edge_id in conn.execute(
         """SELECT j.question_id, j.edge_id FROM public.eval_judgement j
            JOIN public.eval_question q ON q.id = j.question_id
-           WHERE q.group_id = %s AND j.relevant""",
-        (group_id,),
+           WHERE q.group_id = %s AND j.relevant AND j.judged_by = %s""",
+        (group_id, who),
     ).fetchall():
         labels.setdefault(qid, set()).add(edge_id)
 
@@ -330,7 +359,8 @@ def per_question(conn, group_id: str) -> list[dict]:
     out = []
     for qid, question in text.items():
         relevant = labels.get(qid, set())
-        row = {"id": qid, "text": question, "relevant": len(relevant), "rr": {}}
+        row = {"id": qid, "text": question, "relevant": len(relevant),
+               "judged_by": who, "rr": {}}
         for configuration, returned in sorted(runs.get(qid, {}).items()):
             rank = next(
                 (i for i, e in enumerate(returned, start=1) if e in relevant), None
@@ -340,13 +370,66 @@ def per_question(conn, group_id: str) -> list[dict]:
     return out
 
 
+# Resamples for the bootstrap interval, matching eval/retrieval.py so the two
+# evaluations' intervals mean the same thing.
+BOOTSTRAP_RESAMPLES = 5000
+
+
+def compare_configurations(conn, group_id: str, a: str, b: str, *,
+                           judged_by: str | None = None,
+                           resamples: int = BOOTSTRAP_RESAMPLES,
+                           seed: int = 7) -> dict:
+    """Delta MRR between two configurations, with a paired bootstrap interval.
+
+    Paired because both configurations answered the same questions: the
+    variance that matters is that of the per-question difference. Bootstrap
+    rather than a t-test because reciprocal ranks are 1, 1/2, 1/3 ... 0 with a
+    heavy spike at 0, so resampling makes no distributional claim the data
+    would violate.
+
+    Ten questions is a very small n, and the interval says so rather than
+    hiding it. That is the point of computing it here: two judges over this
+    pool put `shipping` and `lexical only` in opposite orders on MRR, and
+    without an interval that reads as a finding about the configurations. With
+    one it reads as what it is - a sample too small to separate them, where
+    which judge labelled decides which one happens to lead.
+    """
+    rows = per_question(conn, group_id, judged_by=judged_by)
+    diffs = [
+        r["rr"][b] - r["rr"][a]
+        for r in rows if a in r["rr"] and b in r["rr"] and r["relevant"]
+    ]
+    if not diffs:
+        return {"questions": 0, "delta": 0.0, "low": 0.0, "high": 0.0,
+                "significant": False, "judged_by": judged_by}
+
+    rng = random.Random(seed)
+    n = len(diffs)
+    means = sorted(
+        sum(diffs[rng.randrange(n)] for _ in range(n)) / n for _ in range(resamples)
+    )
+    low, high = means[int(0.025 * resamples)], means[int(0.975 * resamples)]
+    return {
+        "questions": n,
+        "a": a, "b": b,
+        "delta": sum(diffs) / n,
+        "low": low,
+        "high": high,
+        # Excludes zero at 95%. Not "true", only "not obviously nothing".
+        "significant": low > 0 or high < 0,
+        "judged_by": rows[0].get("judged_by"),
+    }
+
+
 def render_per_question(rows: list[dict]) -> str:
     if not rows:
         return ""
     names = sorted({c for r in rows for c in r["rr"]})
+    who = rows[0].get("judged_by")
     lines = [
         "",
-        "Per question, reciprocal rank of the first relevant fact:",
+        "Per question, reciprocal rank of the first relevant fact"
+        + (f", as judged by {who}:" if who else ":"),
         "",
         "  " + f"{'#':<3}{'rel':>4}  " + "".join(f"{n[:12]:>14}" for n in names),
         "  " + "-" * (9 + 14 * len(names)),
@@ -356,7 +439,7 @@ def render_per_question(rows: list[dict]) -> str:
             f"  {r['id']:<3}{r['relevant']:>4}  "
             + "".join(f"{r['rr'].get(n, 0.0):>14.3f}" for n in names)
         )
-    lines += ["", "  " + "  ".join(f"{r['id']}: {r['text'][:60]}" for r in rows[:0])]
+    lines.append("")
     for r in rows:
         lines.append(f"  {r['id']:<3} {r['text']}")
     return "\n".join(lines)
@@ -370,9 +453,13 @@ def render(scores: dict, cover: dict | None = None) -> str:
             "  echo-memory judge open                retrieves under every configuration\n"
             "  echo-memory judge pool                presents the shuffled union for labelling\n"
         )
+    who = next(iter(scores.values())).get("judged_by")
     lines = [
         "",
         "Independent evaluation - questions written before retrieval, judged per fact",
+        # Whose labels these are belongs in the header, not a footnote. Two
+        # judges over this pool differ by more than the configurations do.
+        f"Relevance as judged by {who}." if who else "",
         "",
         f"  {'configuration':<22}{'n':>5}{'P@1':>8}{'P@3':>8}{'R@3':>8}{'R@5':>8}{'MRR':>8}",
         "  " + "-" * 67,
@@ -394,7 +481,7 @@ def render(scores: dict, cover: dict | None = None) -> str:
     if cover and cover["complete"]:
         lines += [
             (f"Every ({cover['questions']} question x {cover['active_facts']} fact) pair "
-             f"is judged - {cover['judged']} of {cover['possible']}."),
+             f"is judged by {cover['judged_by']} - {cover['judged']} of {cover['possible']}."),
             "  Recall is therefore recall over the store, not over a pool. Nothing relevant",
             "  can be hiding in what no configuration returned, because there is no such",
             "  thing left unjudged.",
@@ -402,10 +489,11 @@ def render(scores: dict, cover: dict | None = None) -> str:
     elif cover:
         missing = cover["possible"] - cover["judged"]
         lines += [
-            (f"Recall is over the POOLED relevant set: {missing} of "
-             f"{cover['possible']} (question, fact) pairs"),
-            "  are unjudged, so a relevant fact no configuration returned cannot count",
-            "  against anything. Precision is unaffected and is the number to read first.",
+            ("Recall is over the POOLED relevant set: "
+             + (f"{cover['judged_by']} left " if cover["judged_by"] else "")
+             + f"{missing} of {cover['possible']} (question, fact) pairs unjudged,"),
+            "  so a relevant fact no configuration returned cannot count against",
+            "  anything. Precision is unaffected and is the number to read first.",
         ]
     else:
         lines += [
@@ -423,7 +511,8 @@ def render(scores: dict, cover: dict | None = None) -> str:
 EXCERPT = 240
 
 
-def export_pool(conn, group_id: str, *, only: int | None = None) -> str:
+def export_pool(conn, group_id: str, *, only: int | None = None,
+                judged_by: str | None = None) -> str:
     """The whole judging pass as one editable file.
 
     Interactive prompting was the first design and it was the wrong surface:
@@ -457,7 +546,7 @@ def export_pool(conn, group_id: str, *, only: int | None = None) -> str:
     for q in questions(conn, group_id):
         if not q["opened_at"] or (only is not None and q["id"] != only):
             continue
-        ids = pool(conn, q["id"])
+        ids = pool(conn, q["id"], judged_by=judged_by)
         if not ids:
             continue
         facts = _fetch_facts(conn, ids)
@@ -500,6 +589,43 @@ def import_pool(conn, text: str, *, judged_by: str | None = None) -> dict:
         judge(conn, question_id, edge_id, verdict == "y", judged_by=judged_by)
         counts[verdict] += 1
     return counts
+
+
+def resolve_judge(conn, group_id: str, judged_by: str | None = None) -> str | None:
+    """Which judge's labels a score is computed from. Never "all of them".
+
+    Two judges over the same pool are two measurements, and averaging them is
+    not a third: the pairs they both labelled would count twice and the ones
+    only one labelled would count once, weighting a fact by how many people
+    happened to look at it. Blending was what the code did before the primary
+    key carried the judge, and it silently reported 2942 of 2850 pairs judged -
+    an impossible fraction that read as "complete".
+
+    So one judge is named whenever there is a choice to make. With a single
+    judge that is automatic; with more than one, refusing is the only safe
+    answer, because there is no default that is not a hidden editorial choice
+    about whose labels count.
+
+    With none, the answer is None rather than an error: "nobody has judged this
+    yet" is a true and useful state, reported as zero coverage and empty
+    scores, and it is what every caller sees before the first judging pass.
+    """
+    known = [who for who, _, _ in judges(conn, group_id)]
+    if judged_by is not None:
+        if judged_by not in known:
+            raise ValueError(
+                f"no labels from {judged_by!r} in this scope"
+                + (f"; judges here are {', '.join(known)}" if known else "")
+            )
+        return judged_by
+    if not known:
+        return None
+    if len(known) > 1:
+        raise ValueError(
+            f"{len(known)} judges have labelled this scope ({', '.join(known)}); "
+            "name one - their labels are separate measurements, not a pool"
+        )
+    return known[0]
 
 
 def judges(conn, group_id: str) -> list[tuple[str, int, int]]:
