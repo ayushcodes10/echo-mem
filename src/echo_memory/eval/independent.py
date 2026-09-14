@@ -226,8 +226,8 @@ def coverage(conn, group_id: str) -> dict:
     }
 
 
-def score(conn, group_id: str) -> dict:
-    """Per-configuration metrics over the judged pool.
+def score(conn, group_id: str, *, judged_by: str | None = None) -> dict:
+    """Per-configuration metrics over one judge's labels.
 
     precision@k  of the first k a configuration returned, how many were judged
                  relevant. The metric the old harness could not express,
@@ -239,14 +239,20 @@ def score(conn, group_id: str) -> dict:
     Questions with no relevant fact in the pool are excluded from recall and
     MRR and counted separately - they say something about the store, not about
     a configuration's ranking.
+
+    `judged_by` names whose labels these are, and the result carries the name
+    back so a number can never be quoted without it. Run it once per judge and
+    compare; that difference is a result, and on this data a larger one than
+    the difference between the configurations being measured.
     """
+    who = resolve_judge(conn, group_id, judged_by)
     labels: dict[int, dict[str, bool]] = {}
     for qid, edge_id, relevant in conn.execute(
         """SELECT j.question_id, j.edge_id, j.relevant
            FROM public.eval_judgement j
            JOIN public.eval_question q ON q.id = j.question_id
-           WHERE q.group_id = %s""",
-        (group_id,),
+           WHERE q.group_id = %s AND j.judged_by = %s""",
+        (group_id, who),
     ).fetchall():
         labels.setdefault(qid, {})[edge_id] = relevant
 
@@ -291,6 +297,7 @@ def score(conn, group_id: str) -> dict:
             "precision_at": {k: (v / scored if scored else 0.0) for k, v in p_at.items()},
             "recall_at": {k: (v / scored if scored else 0.0) for k, v in r_at.items()},
             "mrr": rr_total / scored if scored else 0.0,
+            "judged_by": who,
         }
     return out
 
@@ -370,9 +377,13 @@ def render(scores: dict, cover: dict | None = None) -> str:
             "  echo-memory judge open                retrieves under every configuration\n"
             "  echo-memory judge pool                presents the shuffled union for labelling\n"
         )
+    who = next(iter(scores.values())).get("judged_by")
     lines = [
         "",
         "Independent evaluation - questions written before retrieval, judged per fact",
+        # Whose labels these are belongs in the header, not a footnote. Two
+        # judges over this pool differ by more than the configurations do.
+        f"Relevance as judged by {who}." if who else "",
         "",
         f"  {'configuration':<22}{'n':>5}{'P@1':>8}{'P@3':>8}{'R@3':>8}{'R@5':>8}{'MRR':>8}",
         "  " + "-" * 67,
@@ -500,6 +511,38 @@ def import_pool(conn, text: str, *, judged_by: str | None = None) -> dict:
         judge(conn, question_id, edge_id, verdict == "y", judged_by=judged_by)
         counts[verdict] += 1
     return counts
+
+
+def resolve_judge(conn, group_id: str, judged_by: str | None = None) -> str:
+    """Which judge's labels a score is computed from. Never "all of them".
+
+    Two judges over the same pool are two measurements, and averaging them is
+    not a third: the pairs they both labelled would count twice and the ones
+    only one labelled would count once, weighting a fact by how many people
+    happened to look at it. Blending was what the code did before the primary
+    key carried the judge, and it silently reported 2942 of 2850 pairs judged -
+    an impossible fraction that read as "complete".
+
+    So one judge is named, always. With a single judge that is automatic; with
+    more than one, refusing is the only safe answer, because there is no
+    default that is not a hidden editorial choice about whose labels count.
+    """
+    known = [who for who, _, _ in judges(conn, group_id)]
+    if judged_by is not None:
+        if judged_by not in known:
+            raise ValueError(
+                f"no labels from {judged_by!r} in this scope"
+                + (f"; judges here are {', '.join(known)}" if known else "")
+            )
+        return judged_by
+    if not known:
+        raise ValueError("nothing has been judged in this scope yet")
+    if len(known) > 1:
+        raise ValueError(
+            f"{len(known)} judges have labelled this scope ({', '.join(known)}); "
+            "name one - their labels are separate measurements, not a pool"
+        )
+    return known[0]
 
 
 def judges(conn, group_id: str) -> list[tuple[str, int, int]]:
