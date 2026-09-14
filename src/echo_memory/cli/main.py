@@ -383,6 +383,12 @@ def _add_project_parsers(sub) -> None:
         help="scope to write throwaway probe facts into (default: a dedicated "
              "benchmark group, never your real memory)",
     )
+    bench.add_argument(
+        "--seed-facts", type=int, metavar="N", default=None,
+        help="fill the scope to N facts before measuring, so read latency "
+             "describes a store someone might have (default: 250; 0 measures "
+             "whatever is already there)",
+    )
 
     boot = sub.add_parser(
         "bootstrap", help="import the work that already exists on this machine"
@@ -726,7 +732,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.rounds < 1:
             print("error: --rounds must be at least 1", file=sys.stderr)
             return 1
-        print(render_benchmark(run_benchmark(conn, args.group, LocalEmbedder(), args.rounds)),
+        from echo_memory.cli.benchmark import DEFAULT_SEED_FACTS
+
+        seed = DEFAULT_SEED_FACTS if args.seed_facts is None else args.seed_facts
+        print(render_benchmark(
+            run_benchmark(conn, args.group, LocalEmbedder(), args.rounds, seed_facts=seed)),
               end="")
         return 0
 

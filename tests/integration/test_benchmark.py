@@ -98,9 +98,32 @@ def test_cli_runs_a_benchmark(migrated_db, monkeypatch, capsys):
         "echo_memory.ingestion.embeddings.LocalEmbedder", lambda: _embedder()
     )
 
-    assert main(["benchmark", "--rounds", "2", "--group", GROUP]) == 0
+    # --seed-facts 0: the command's default fills the scope to 250 facts so the
+    # read numbers describe a store somebody might have, and the names it
+    # invents to do that are not ones this fake embedder answers for.
+    assert main([
+        "benchmark", "--rounds", "2", "--group", GROUP, "--seed-facts", "0"
+    ]) == 0
 
     assert "cost and latency baseline" in capsys.readouterr().out
+
+
+def test_the_header_says_how_big_the_store_was(migrated_db, monkeypatch, capsys):
+    """A latency without the store it was measured against is unquotable, and
+    this one was quoted: the published median came from a six-fact scratch
+    scope and read 2.4x faster than the same query against the real store."""
+    monkeypatch.setenv("ECHO_MEMORY_USER_ID", "bench")
+    monkeypatch.setenv("ECHO_MEMORY_AGENT_ID", "bench")
+    monkeypatch.setenv("ECHO_MEMORY_DATABASE_URL", migrated_db)
+    monkeypatch.setattr(
+        "echo_memory.ingestion.embeddings.LocalEmbedder", lambda: _embedder()
+    )
+
+    assert main([
+        "benchmark", "--rounds", "2", "--group", GROUP, "--seed-facts", "0"
+    ]) == 0
+
+    assert "facts in scope" in capsys.readouterr().out
 
 
 def test_cli_rejects_zero_rounds(migrated_db, monkeypatch, capsys):
