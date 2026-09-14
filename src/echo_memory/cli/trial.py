@@ -105,11 +105,29 @@ def render_criterion_six(report: dict, indent: str = "  ", show_hint: bool = Tru
     # their author are a health problem worth seeing and say nothing about
     # whether these particular saves happened.
     if report.get("unattributed_facts"):
+        total = report["unattributed_facts"]
+        recoverable = report.get("recoverable_attributions", 0)
         lines.append(
-            f"{indent}    ! {report['unattributed_facts']} fact(s) still carry "
-            f"agent_id '{UNKNOWN_PROJECT}' and cannot evidence a save - recover the "
-            "ones whose session says who wrote them with `reattribute --agent`"
+            f"{indent}    ! {total} fact(s) still carry agent_id "
+            f"'{UNKNOWN_PROJECT}' and cannot evidence a save"
         )
+        # Only offer the command when it would do something. It recovers a
+        # session's authorless facts from another fact of the same session, and
+        # refuses when the session holds no such evidence - so pointing at it
+        # for facts that have none sends an operator to a correct no-op. All 26
+        # in the author's own store are of that kind, and the advice was being
+        # printed for all 26.
+        if recoverable:
+            lines.append(
+                f"{indent}      {recoverable} of them are recoverable from another "
+                f"fact in the same session: `reattribute --agent`"
+            )
+        else:
+            lines.append(
+                f"{indent}      none are recoverable - no session holds an "
+                "attributed fact to recover them from, and a fact claiming an "
+                "author it cannot support is worse than one admitting it has none"
+            )
     lines.append(
         f"{indent}[{'x' if met['duplicates'] else ' '}] {counts['duplicates']} "
         f"confirmed duplicate nodes (at most {observations.MAX_DUPLICATES} allowed)"

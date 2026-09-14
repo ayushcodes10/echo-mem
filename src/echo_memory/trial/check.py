@@ -228,6 +228,30 @@ def suppressed_pair_count(conn, group_id: str) -> int:
     return sum(1 for c in everything if not c["same_project"])
 
 
+def recoverable_attributions(conn, group_ids: list[str]) -> int:
+    """How many unattributed facts an operator could actually recover.
+
+    `reattribute --agent` never guesses. It recovers a session's authorless
+    facts only when another fact from the SAME session carries a real agent
+    id, because a session belongs to one tool's conversation - and it refuses
+    when a session offers no such evidence, or offers two different agents.
+
+    Counted separately because the two numbers ask for different things. Facts
+    that can be recovered are a chore. Facts that cannot are a permanent hole
+    in the evidence, and telling an operator to go and recover them sends them
+    to a command that will correctly do nothing. In the author's own store all
+    26 are of the second kind, and the advice had been offered for all 26.
+    """
+    from echo_memory.cli.reattribute import agent_evidence
+
+    return sum(
+        row["missing"]
+        for group_id in group_ids
+        for row in agent_evidence(conn, group_id)
+        if row.get("recoverable_as")
+    )
+
+
 def unattributed_facts(conn, group_ids: list[str]) -> int:
     """Facts that cannot say who wrote them.
 
@@ -289,6 +313,7 @@ def build_report(
     unattributed = unattributed_facts(conn, group_ids)
     return {
         "unattributed_facts": unattributed,
+        "recoverable_attributions": recoverable_attributions(conn, group_ids),
         "trial": _elapsed(trial, today) if trial else None,
         "counts": tallies,
         "open": open_items,

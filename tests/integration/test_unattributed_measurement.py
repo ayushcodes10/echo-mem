@@ -112,3 +112,51 @@ def test_a_missing_author_is_not_reported_as_a_tool_named_None(migrated_db):
 
     assert "None" not in report["writers"], report["writers"]
     assert "unknown" in report["writers"]
+
+
+
+def test_recovery_is_not_offered_when_nothing_can_be_recovered(migrated_db):
+    """`reattribute --agent` recovers a session's authorless facts from another
+    fact of the SAME session, and refuses when there is none. Pointing an
+    operator at it regardless sends them to a correct no-op: in the author's own
+    store all 26 unattributed facts are of that kind, and the advice was being
+    printed for all 26."""
+    from echo_memory.cli.trial import render_check
+    from echo_memory.trial.check import build_report, recoverable_attributions
+
+    config = _serve(migrated_db)
+    edge_id = _write_fact(session_id="orphan-session")
+    with server._state.pool.connection() as conn:
+        _set_agent(conn, edge_id, None)
+        group = config.group_id("shared")
+
+        assert recoverable_attributions(conn, [group]) == 0, (
+            "the only fact of that session is the authorless one"
+        )
+        text = render_check(build_report(conn, config))
+
+    assert "none are recoverable" in text
+    assert "reattribute --agent" not in text, (
+        "offered a command that would correctly do nothing"
+    )
+
+
+def test_recovery_is_offered_when_the_session_can_evidence_it(migrated_db):
+    """The other side: one attributed fact in the session is what makes the
+    rest recoverable, and then the command is worth naming."""
+    from echo_memory.cli.trial import render_check
+    from echo_memory.trial.check import build_report, recoverable_attributions
+
+    config = _serve(migrated_db)
+    keeps_author = _write_fact(session_id="evidenced-session")
+    loses_author = _write_fact(session_id="evidenced-session")
+    with server._state.pool.connection() as conn:
+        _set_agent(conn, loses_author, None)
+        group = config.group_id("shared")
+
+        assert keeps_author != loses_author
+        assert recoverable_attributions(conn, [group]) == 1
+        text = render_check(build_report(conn, config))
+
+    assert "1 of them are recoverable" in text
+    assert "reattribute --agent" in text
