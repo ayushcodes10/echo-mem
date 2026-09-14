@@ -207,6 +207,14 @@ def gate_conversion(conn) -> dict:
     So what is reported is new-write incidence and correct disposition, with
     the remainder named as unresolved rather than counted against anything.
 
+    **And the denominator comes from a different instrument.** "Eight firings,
+    eight successes" is not a triggering rate: a session the gate never fired
+    for leaves no row in the firing log, so misses cannot appear in it.
+    session_activity is written by a different hook and records sessions that
+    did work, which makes it an independent census. The two disagree, and that
+    disagreement is the finding: neither log is complete, so no rate computed
+    from either alone should be read as one.
+
     A firing counts as converted if a fact was written OR a queued document was
     closed after it. Writing alone was the first version and it was wrong in a
     way the gate demonstrated within the hour: its own instruction says that
@@ -248,7 +256,18 @@ def gate_conversion(conn) -> dict:
             converted += 1
         if n_files:
             had_queue += 1
+
+    # The independent census. Sessions the activity counter saw, how many of
+    # them the gate also saw, and firings the counter missed.
+    active = conn.execute(
+        "SELECT session_id FROM public.session_activity"
+    ).fetchall()
+    active_ids = {r[0] for r in active}
+    fired_ids = {sid for sid, _at, _n in fired}
     return {
+        "active_sessions": len(active_ids),
+        "active_and_fired": len(active_ids & fired_ids),
+        "fired_not_active": len(fired_ids - active_ids),
         "fired": len(fired),
         "converted": converted,
         "wrote": wrote_n,
@@ -525,6 +544,14 @@ def render(h: dict) -> str:
         lines.append(
             f"    {g['with_queue']} of {g['fired']} fired with something queued; for the "
             "rest, whether anything was worth keeping is not established"
+        )
+        # Two instruments, two counts. Printed together because either alone
+        # reads as a rate and neither is one.
+        lines.append(
+            f"    the activity counter saw {g['active_sessions']} working session(s), "
+            f"{g['active_and_fired']} of which the gate also saw"
+            + (f"; {g['fired_not_active']} firing(s) the counter missed"
+               if g["fired_not_active"] else "")
         )
         lines.append("")
 
