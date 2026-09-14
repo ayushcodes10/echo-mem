@@ -313,31 +313,20 @@ def _write_audit_entry(conn, group_id: str, session_id: str, **fields) -> None:
     )
 
 
-def _prefetch(embedder, entities: list[dict], facts: list[dict]):
-    """Embed everything this episode will need in one forward pass.
+def _prefetch_names(embedder, entities: list[dict]):
+    """Embed the entity names in one pass, before resolution needs them.
 
     A transformer pays fixed per-call overhead that one text bears alone and
-    many share. The 21 texts a six-fact episode embeds cost 90.5 ms one call
-    each and 7.9 ms batched - a quarter of a 330 ms write.
+    many share: the texts a six-fact episode embeds cost 90.5 ms one call each
+    and 7.9 ms batched, a quarter of a 330 ms write.
 
-    Three kinds, listed rather than inferred so a reader can see what is
-    predicted and check it against the call sites:
-
-      - every entity name, which resolution scores and node creation stores
-      - each fact as it is actually embedded, entity names composed in
-      - the bare fact text for the first few, which related_entities uses to
-        ask what the graph already calls this
-
-    A prediction that misses is served by the wrapped embedder and cached, so
-    this can only change how long a write takes, never what it writes.
+    Names only, here. Which facts get written is not known until resolution has
+    said which mentions are ambiguous, and a fact touching an ambiguous mention
+    is deferred and never embedded - so predicting them all up front does work
+    the write then discards. The fact texts join the same batch cache later,
+    once the answer exists.
     """
-    texts = [e.get("name", "") for e in entities]
-    texts += [
-        embedding_text(f.get("source", ""), f.get("target", ""), f["fact"])
-        for f in facts
-    ]
-    texts += [f["fact"] for f in facts[:MAX_FACTS_CONSULTED]]
-    return Prefetched(embedder, texts)
+    return Prefetched(embedder, [e.get("name", "") for e in entities])
 
 
 def write_episode(
@@ -353,7 +342,6 @@ def write_episode(
 ) -> dict:
     resolutions = resolutions or {}
     start = time.perf_counter()
-    embedder = _prefetch(embedder, entities, facts)
 
     try:
         # Checked here, before any row is written, so a caller with a broken
@@ -372,6 +360,12 @@ def write_episode(
             (time.perf_counter() - start) * 1000, error=str(e),
         )
         return {"error": str(e)}
+
+    # After validation, never before. Prefetching reads every entity name, so
+    # on a malformed episode it embedded the bad input and failed there -
+    # turning clean ValidationErrors into whatever the embedder happened to
+    # raise. A speed-up must not change what a caller is told went wrong.
+    embedder = _prefetch_names(embedder, entities)
 
     episode_id = str(uuid.uuid4())
     now = int(time.time())
@@ -427,6 +421,17 @@ def write_episode(
                 for f in facts
                 if f["source"] not in ambiguous_mentions and f["target"] not in ambiguous_mentions
             ]
+
+            # The rest of the batch, now that ambiguity has decided which facts
+            # exist. Deferred facts are never embedded, which is why this could
+            # not have been part of the first pass.
+            embedder.extend(
+                [
+                    embedding_text(f.get("source", ""), f.get("target", ""), f["fact"])
+                    for f in ready_facts
+                ]
+                + [f["fact"] for f in ready_facts[:MAX_FACTS_CONSULTED]]
+            )
 
             # A new entity is created only if some fact being written now actually
             # uses it, or if no fact mentions it at all - the caller asked for that

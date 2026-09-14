@@ -168,12 +168,17 @@ def test_reindex_reports_progress_against_what_it_has_written(migrated_db):
     assert all(done <= total for done, total in seen)
 
 
-def test_an_episode_embeds_its_texts_in_one_batch(migrated_db):
+def test_an_episode_embeds_in_batches_not_one_text_at_a_time(migrated_db):
     """The 21 texts a six-fact episode needs cost 90.5 ms one call each and
     7.9 ms batched, a quarter of a 330 ms write. This was measured as worthless
     once and it was not: that reading came from code where a single unindexed
     edge lookup was 93% of a write, and the saving vanished into the noise
-    beside it."""
+    beside it.
+
+    Two batches, not one, and the split is the data dependency rather than an
+    implementation detail: resolution needs the entity names before it can say
+    which mentions are ambiguous, and a fact touching an ambiguous mention is
+    deferred and never embedded at all."""
 
     class _Counting(VectorEmbedder):
         def __init__(self, vectors):
@@ -197,7 +202,10 @@ def test_an_episode_embeds_its_texts_in_one_batch(migrated_db):
         _write(conn, embedder)
 
     assert embedder.batches, "the episode embedded one text at a time"
-    assert embedder.batches[0] >= 3, "entity names and the fact should share one batch"
+    assert len(embedder.batches) == 2, (
+        f"expected a names batch and a facts batch, got {embedder.batches}"
+    )
+    assert embedder.batches[0] == 2, "both entity names should share the first batch"
     assert embedder.singles == 0, (
         f"{embedder.singles} text(s) missed the prefetch and were embedded alone"
     )

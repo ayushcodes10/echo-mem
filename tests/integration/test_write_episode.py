@@ -573,3 +573,37 @@ def test_writing_the_same_triple_twice_still_supersedes(migrated_db):
               AND (properties ->> '"t_invalid"'::agtype) IS NULL"""
     ).fetchone()[0]
     assert active == 1, "superseding left two active edges for one triple"
+
+
+def test_a_deferred_fact_is_never_embedded(migrated_db):
+    """A fact touching an ambiguous mention waits for the caller to say which
+    candidate it meant, so it is not written and must not be embedded either.
+    Prefetching every fact up front did exactly that: work the write discarded,
+    and on a strict embedder an error for a string the episode never stored."""
+    embedder = VectorEmbedder({
+        "Postgres": REFERENCE,
+        "Postgres DB": unit_vector_at_angle(0.80),
+        "written fact": REFERENCE,
+        "Postgres Postgres. written fact": REFERENCE,
+    })
+    conn = connect(migrated_db)
+    write_episode(
+        conn, "g-defer", "s1", [{"name": "Postgres", "type": "tool"}],
+        [{"source": "Postgres", "target": "Postgres", "relation_type": "is",
+          "fact": "written fact", "confidence": "extracted"}],
+        {"Postgres": {"resolved_to": "new"}}, embedder,
+    )
+
+    # "Postgres DB" scores mid-range against "Postgres": ambiguous, so its fact
+    # is deferred. Its composed text is deliberately not registered, so the
+    # embedder raises if anything tries to embed it.
+    result = write_episode(
+        conn, "g-defer", "s2", [{"name": "Postgres DB", "type": "tool"}],
+        [{"source": "Postgres DB", "target": "Postgres DB", "relation_type": "is",
+          "fact": "deferred fact nobody registered a vector for",
+          "confidence": "extracted"}],
+        {}, embedder,
+    )
+
+    assert result["ambiguous_entities"], "the mention was not treated as ambiguous"
+    assert result["edges_created"] == []

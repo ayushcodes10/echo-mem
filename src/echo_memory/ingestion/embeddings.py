@@ -130,7 +130,18 @@ class Prefetched:
         return hit
 
     def embed_many(self, texts: list[str]) -> list[list[float]]:
-        missing = [t for t in dict.fromkeys(texts) if t not in self._cache]
+        self.extend(texts)
+        return [self._cache[t] for t in texts]
+
+    def extend(self, texts: list[str]) -> None:
+        """Add another batch, once its texts are known.
+
+        An episode cannot predict everything at once. Resolution needs the
+        entity names embedded before it can say which mentions are ambiguous,
+        and which facts get written depends on that answer - a fact touching an
+        ambiguous mention is deferred and never embedded at all. Prefetching
+        every fact up front embedded work the write then threw away.
+        """
+        missing = [t for t in dict.fromkeys(texts) if t and t not in self._cache]
         if missing:
             self._cache.update(zip(missing, self._inner.embed_many(missing), strict=True))
-        return [self._cache[t] for t in texts]
