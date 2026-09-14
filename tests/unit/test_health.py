@@ -206,12 +206,49 @@ def test_the_gate_line_separates_three_outcomes_not_two():
     session with 118 edits and no facts looks damning and establishes nothing
     about whether anything in those edits was worth keeping, so the remainder
     is named unresolved rather than counted against the mechanism."""
-    out = health.render(h(
-        gate={"fired": 8, "converted": 1, "wrote": 1, "closed": 0, "with_queue": 4}
-    ))
+    out = health.render(h(gate=_GATE))
 
     assert "1 wrote a fact" in out
-    assert "0 closed a queued document" in out
-    assert "7 unresolved" in out
+    assert "0 closed a document" in out
+    assert "7 neither" in out
     assert "4 of 8 fired with something queued" in out
     assert "not established" in out
+
+
+_GATE = {
+    "fired": 8, "converted": 1, "wrote": 1, "closed": 0, "closed_unattributed": 4,
+    "with_queue": 4, "active_sessions": 9, "active_and_fired": 7, "fired_not_active": 1,
+}
+
+
+def test_the_triggering_denominator_comes_from_a_second_instrument():
+    """"Eight firings, eight successes" is not a rate. A session the gate never
+    fired for leaves no row in the firing log, so a miss cannot appear in it -
+    the denominator has to come from somewhere else.
+
+    session_activity is written by a different hook. On this store the two
+    disagree: nine working sessions recorded, seven of which the gate also saw,
+    and one firing the counter missed. Neither log is a complete census, and
+    printing both is what stops either being read as one."""
+    out = health.render(h(gate=_GATE))
+
+    assert "activity counter saw 9 working session(s)" in out
+    assert "7 of which the gate also saw" in out
+    assert "1 firing(s) the counter missed" in out
+
+
+def test_a_known_closure_with_an_unknown_author_is_not_reported_as_no_closure():
+    """The contradiction a reviewer found: prose saying no queued item was
+    closed, beside a table row saying "already recorded; closed". Those are two
+    questions - what happened to the document, and whether it can be credited
+    to this firing - and collapsing them makes a documented outcome look like a
+    documented absence.
+
+    Reported as an upper bound, separately, because the gate records how many
+    files were queued and never which: a closure days later by an unrelated
+    session in the same project matches the same query. That looseness is what
+    turned an earlier version of this metric into 8 of 8."""
+    out = health.render(h(gate=_GATE))
+
+    assert "up to 4 of those 7" in out
+    assert "outcome known, author not" in out

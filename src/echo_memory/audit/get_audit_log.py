@@ -79,7 +79,14 @@ def get_audit_log(conn, group_id: str, since: str | None = None) -> dict:
         FROM public.audit_entry
         WHERE group_id = %s
           AND (%s::timestamptz IS NULL OR "timestamp" >= %s::timestamptz)
-        ORDER BY "timestamp" ASC
+        -- id breaks the tie, and the tie is the common case: every entry an
+        -- episode writes shares one transaction and therefore one
+        -- timestamp, so ordering on it alone leaves the sequence to the
+        -- database. `why` exists to show what happened in what order, and
+        -- a history that reports a supersession before the creation it
+        -- superseded is worse than no history. id is a SERIAL and
+        -- monotonic within a transaction, so it is the real order.
+        ORDER BY "timestamp" ASC, id ASC
         LIMIT %s
         """,
         (group_id, since_dt, since_dt, MAX_ENTRIES),
@@ -111,7 +118,14 @@ def get_fact_history(conn, group_id: str, fact_id: str) -> dict:
         SELECT {_AUDIT_COLUMNS}
         FROM public.audit_entry
         WHERE group_id = %s AND %s = ANY(affected_edge_ids)
-        ORDER BY "timestamp" ASC
+        -- id breaks the tie, and the tie is the common case: every entry an
+        -- episode writes shares one transaction and therefore one
+        -- timestamp, so ordering on it alone leaves the sequence to the
+        -- database. `why` exists to show what happened in what order, and
+        -- a history that reports a supersession before the creation it
+        -- superseded is worse than no history. id is a SERIAL and
+        -- monotonic within a transaction, so it is the real order.
+        ORDER BY "timestamp" ASC, id ASC
         """,
         (group_id, fact_id),
     ).fetchall()

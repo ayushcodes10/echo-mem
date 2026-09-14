@@ -137,3 +137,28 @@ def test_validation_rejects_malformed_since(migrated_db):
     conn = connect(migrated_db)
     result = get_audit_log(conn, "g1", since="not-a-timestamp")
     assert "error" in result
+
+
+def test_entries_from_one_episode_come_back_in_the_order_they_happened(migrated_db):
+    """A creation and the supersession it caused are written in one
+    transaction, so they carry the same timestamp. Ordering on timestamp alone
+    left the sequence to the database, and it duly came back reversed in one
+    full-suite run while passing in isolation - a history that reports a
+    supersession before the creation it superseded is worse than none.
+
+    Same bug class as the traversal channel's unspecified tie order, found the
+    same week: a sort key that is not unique, holding for a while by luck.
+    """
+    import json as _json
+
+    group = "user:order:shared"
+    with connect(migrated_db) as conn:
+        for _ in range(6):
+            conn.execute("DELETE FROM public.audit_entry WHERE group_id = %s", (group,))
+            conn.execute(
+                """INSERT INTO public.audit_entry (group_id, session_id, mutation_type, summary)
+                   VALUES (%s, 's', 'created', 'a'), (%s, 's', 'fact_superseded', 'b')""",
+                (group, group),
+            )
+            kinds = [e["mutation_type"] for e in get_audit_log(conn, group)["entries"]]
+            assert kinds == ["created", "fact_superseded"], _json.dumps(kinds)
