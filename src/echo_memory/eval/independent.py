@@ -181,10 +181,10 @@ def judge(conn, question_id: int, edge_id: str, relevant: bool, *,
     conn.execute(
         """INSERT INTO public.eval_judgement (question_id, edge_id, relevant, note, judged_by)
            VALUES (%s, %s, %s, %s, %s)
-           ON CONFLICT (question_id, edge_id)
+           ON CONFLICT (question_id, edge_id, judged_by)
            DO UPDATE SET relevant = EXCLUDED.relevant, note = EXCLUDED.note,
-                         judged_by = EXCLUDED.judged_by, judged_at = now()""",
-        (question_id, edge_id, relevant, note, judged_by),
+                         judged_at = now()""",
+        (question_id, edge_id, relevant, note, judged_by or "unknown"),
     )
 
 
@@ -500,3 +500,58 @@ def import_pool(conn, text: str, *, judged_by: str | None = None) -> dict:
         judge(conn, question_id, edge_id, verdict == "y", judged_by=judged_by)
         counts[verdict] += 1
     return counts
+
+
+def judges(conn, group_id: str) -> list[tuple[str, int, int]]:
+    """Who has labelled this scope, and how much each of them said yes to."""
+    return [
+        (who, total, yes)
+        for who, total, yes in conn.execute(
+            """SELECT j.judged_by, count(*), count(*) FILTER (WHERE j.relevant)
+               FROM public.eval_judgement j
+               JOIN public.eval_question q ON q.id = j.question_id
+               WHERE q.group_id = %s GROUP BY 1 ORDER BY 1""",
+            (group_id,),
+        ).fetchall()
+    ]
+
+
+def agreement(conn, group_id: str, a: str, b: str) -> dict:
+    """How far two judges agree on the pairs they both labelled.
+
+    Raw agreement flatters badly here: almost every pair is irrelevant, so two
+    judges who both say no to everything agree 99% of the time and have told
+    you nothing. Cohen's kappa removes the agreement you would expect from the
+    marginals alone, which is the number worth reporting when the positive
+    class is 1% of the data.
+
+    Reported alongside the counts rather than instead of them, because kappa is
+    unstable when one class is this rare and a reader needs to see why.
+    """
+    rows = conn.execute(
+        """SELECT x.relevant, y.relevant
+           FROM public.eval_judgement x
+           JOIN public.eval_judgement y
+             ON y.question_id = x.question_id AND y.edge_id = x.edge_id
+           JOIN public.eval_question q ON q.id = x.question_id
+           WHERE q.group_id = %s AND x.judged_by = %s AND y.judged_by = %s""",
+        (group_id, a, b),
+    ).fetchall()
+    if not rows:
+        return {"pairs": 0}
+
+    n = len(rows)
+    both_yes = sum(1 for p, q in rows if p and q)
+    both_no = sum(1 for p, q in rows if not p and not q)
+    a_only = sum(1 for p, q in rows if p and not q)
+    b_only = sum(1 for p, q in rows if not p and q)
+
+    observed = (both_yes + both_no) / n
+    p_a, p_b = (both_yes + a_only) / n, (both_yes + b_only) / n
+    expected = p_a * p_b + (1 - p_a) * (1 - p_b)
+    kappa = (observed - expected) / (1 - expected) if expected < 1 else 1.0
+    return {
+        "pairs": n, "both_relevant": both_yes, "both_not": both_no,
+        f"{a}_only": a_only, f"{b}_only": b_only,
+        "raw_agreement": observed, "kappa": kappa,
+    }
