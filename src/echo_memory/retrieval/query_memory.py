@@ -53,6 +53,21 @@ FLOOR_PERCENTILE = 95
 # being fixed rather than a general preference for variety.
 MMR_LAMBDA = 0.7
 
+# Measured floor per scope, keyed by what the measurement depends on:
+# {group_id: ((fact_count, max_edge_id), floor)}. Process-local and never
+# invalidated by time - see adaptive_cosine_floor for why those are the key.
+_FLOOR_CACHE: dict[str, tuple[tuple, float]] = {}
+
+
+def reset_floor_cache() -> None:
+    """Forget every measured floor. For tests that rebuild a scope in place."""
+    _FLOOR_CACHE.clear()
+
+# The sample now yields unordered pairs, so a store of FLOOR_MIN_FACTS facts
+# gives n(n-1)/2 of them, not n**2. Comparing against the squared count would
+# have demanded roughly twice the facts the constant names.
+_MIN_PAIRS = FLOOR_MIN_FACTS * (FLOOR_MIN_FACTS - 1) // 2
+
 _logger = get_logger("query_memory")
 
 
@@ -198,7 +213,30 @@ def adaptive_cosine_floor(conn, group_id: str) -> float:
 
     Falls back to COSINE_FLOOR on a store too small to measure - under
     FLOOR_MIN_FACTS the sample is mostly noise about noise.
+
+    Memoised per scope for the life of the process. The sample is fixed now, so
+    recomputing returns the same number at a cost worth 41% of a query - the
+    cross join dominated everything else the read path does.
+
+    The cache key is the scope's fact count and highest edge id, not a timer.
+    Those are what the answer depends on: graph ids only ever increase, and a
+    fact is never edited in place - supersession writes a new edge - so a store
+    whose count and maximum id both match is the store that was measured.
+    `reset_floor_cache()` exists for tests, which are the one place that can
+    rebuild a scope from nothing and land on the same pair by construction.
     """
+    fingerprint = conn.execute(
+        # graphid has no max(), and no direct cast to bigint either - it goes
+        # through text. Same trap that once turned a targeted DELETE into a
+        # full one.
+        "SELECT count(*), coalesce(max(edge_id::text::bigint), 0) "
+        "FROM public.fact_embedding WHERE group_id = %s",
+        (group_id,),
+    ).fetchone()
+    cached = _FLOOR_CACHE.get(group_id)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+
     row = conn.execute(
         """
         WITH sampled AS (
@@ -225,10 +263,12 @@ def adaptive_cosine_floor(conn, group_id: str) -> float:
     ).fetchone()
 
     if not row or not row[0] or row[1] is None:
+        _FLOOR_CACHE[group_id] = (fingerprint, COSINE_FLOOR)
         return COSINE_FLOOR
     n_pairs, percentile = row
-    # n_pairs is quadratic in the sample, so this is the fact count squared.
-    if n_pairs < FLOOR_MIN_FACTS * FLOOR_MIN_FACTS:
+    # n_pairs counts unordered pairs, so FLOOR_MIN_FACTS facts clear this bar.
+    if n_pairs < _MIN_PAIRS:
+        _FLOOR_CACHE[group_id] = (fingerprint, COSINE_FLOOR)
         return COSINE_FLOOR
     # A lower bound, and the reason given for it here used to be backwards: it
     # said a store of near-identical facts would measure a floor near zero.
@@ -237,7 +277,9 @@ def adaptive_cosine_floor(conn, group_id: str) -> float:
     # actually guards is the opposite - a store whose facts are mutually
     # dissimilar, or a sample degenerate enough to put the quantile under a
     # value already known to be too permissive.
-    return max(COSINE_FLOOR, float(percentile))
+    floor = max(COSINE_FLOOR, float(percentile))
+    _FLOOR_CACHE[group_id] = (fingerprint, floor)
+    return floor
 
 
 def _vector_candidates(

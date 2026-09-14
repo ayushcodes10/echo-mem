@@ -25,6 +25,7 @@ from echo_memory.retrieval.query_memory import (
     COSINE_FLOOR,
     FLOOR_MIN_FACTS,
     adaptive_cosine_floor,
+    reset_floor_cache,
 )
 
 GROUP = "user:ayush:shared"
@@ -36,11 +37,12 @@ def _unit(vec):
     return [x / norm for x in vec]
 
 
-# Every call takes a fresh block of ids, and clears the scope first. An
-# interrupted run never reaches its teardown, so its rows survive into the next
-# run - where this helper's hardcoded ids collided on the primary key and
-# failed the first test to seed anything. Killing a slow suite should not break
-# the next one.
+# Every call takes a fresh block of ids. Two reasons, both bugs that were live:
+# the floor is cached per (fact count, highest id), and three tests here seed
+# the same count into the same scope with different spreads - identical keys,
+# so the second would have been served the first's answer. And an interrupted
+# test run leaves rows behind that its teardown never dropped, which made the
+# next run's first insert collide on the primary key.
 _next_base = [1125899906842624]
 
 
@@ -101,3 +103,50 @@ def test_the_floor_is_scoped_to_one_group(migrated_db):
     with connect(migrated_db) as conn:
         _seed_embeddings(conn, FLOOR_MIN_FACTS + 20, spread=1.0)
         assert adaptive_cosine_floor(conn, "user:someone-else:shared") == COSINE_FLOOR
+
+
+def test_the_measured_floor_is_the_same_every_time(migrated_db):
+    """It used to be ORDER BY random(), redrawn per call, so the floor moved
+    between 0.408 and 0.431 on the real store and identical queries returned
+    different answers. Three of ten evaluation questions changed their result
+    list across three identical runs because of it."""
+    with connect(migrated_db) as conn:
+        _seed_embeddings(conn, FLOOR_MIN_FACTS + 20, spread=1.0)
+        reset_floor_cache()
+        measured = {adaptive_cosine_floor(conn, GROUP) for _ in range(5)}
+        reset_floor_cache()
+        measured |= {adaptive_cosine_floor(conn, GROUP) for _ in range(5)}
+
+    assert len(measured) == 1, f"the floor moved between calls: {sorted(measured)}"
+
+
+def test_a_changed_store_is_measured_again(migrated_db):
+    """The cache is keyed on the fact count and the highest id because those
+    are what the answer depends on. A scope that has gained facts has to be
+    re-measured, or the floor describes a store that no longer exists."""
+    with connect(migrated_db) as conn:
+        _seed_embeddings(conn, FLOOR_MIN_FACTS + 20, spread=1.0)
+        reset_floor_cache()
+        scattered = adaptive_cosine_floor(conn, GROUP)
+        # Same count, same scope, different content and a fresh id block.
+        _seed_embeddings(conn, FLOOR_MIN_FACTS + 20, spread=0.01)
+        clustered = adaptive_cosine_floor(conn, GROUP)
+
+    assert clustered != scattered, "a rewritten store returned the cached floor"
+
+
+def test_the_cache_does_not_leak_between_scopes(migrated_db):
+    """One tenant's measured floor must never be served to another.
+
+    Seeded tightly on purpose: scattered facts measure a percentile below the
+    static floor and max() returns COSINE_FLOOR, which is the same value an
+    empty scope returns - so a leak would be invisible. Clustered facts measure
+    well above it, and the two answers can be told apart."""
+    with connect(migrated_db) as conn:
+        _seed_embeddings(conn, FLOOR_MIN_FACTS + 20, spread=0.01)
+        reset_floor_cache()
+        mine = adaptive_cosine_floor(conn, GROUP)
+        theirs = adaptive_cosine_floor(conn, "user:someone-else:shared")
+
+    assert mine > COSINE_FLOOR
+    assert theirs == COSINE_FLOOR
