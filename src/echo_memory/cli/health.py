@@ -230,13 +230,14 @@ def gate_conversion(conn) -> dict:
     than it can only be credited through a write. Read it as a floor.
     """
     fired = conn.execute(
-        "SELECT session_id, at, n_files FROM public.stop_gate_fired"
+        "SELECT session_id, at, n_files, project FROM public.stop_gate_fired"
     ).fetchall()
     converted = 0
     wrote_n = 0
     closed_n = 0
+    closed_anon_n = 0
     had_queue = 0
-    for session_id, at, n_files in fired:
+    for session_id, at, n_files, project in fired:
         wrote = conn.execute(
             """SELECT 1 FROM public.audit_entry
                WHERE session_id = %s AND mutation_type = 'created' AND timestamp > %s
@@ -248,10 +249,30 @@ def gate_conversion(conn) -> dict:
                WHERE ingested_by_session = %s AND ingested_at > %s LIMIT 1""",
             (session_id, at),
         ).fetchone()
+        # A closure in this firing's project, after it, with no session
+        # recorded. Known outcome, unknown author - which is not the same thing
+        # as no closure, and reporting it as one is the contradiction a reviewer
+        # found: prose saying nothing was closed beside a row saying "already
+        # recorded; closed".
+        #
+        # An UPPER BOUND, and deliberately labelled as one in the output. The
+        # gate records how many files were queued and never which, so a closure
+        # days later by an unrelated session in the same project matches this
+        # too. The same looseness turned an earlier version of this metric into
+        # 8 of 8. It is reported beside the attributable count rather than
+        # added to it.
+        closed_anon = conn.execute(
+            """SELECT 1 FROM public.pending_ingest
+               WHERE ingested_by_session IS NULL AND ingested_at > %s
+                 AND project = %s LIMIT 1""",
+            (at, project),
+        ).fetchone()
         if wrote:
             wrote_n += 1
         if closed:
             closed_n += 1
+        elif closed_anon:
+            closed_anon_n += 1
         if wrote or closed:
             converted += 1
         if n_files:
@@ -263,7 +284,7 @@ def gate_conversion(conn) -> dict:
         "SELECT session_id FROM public.session_activity"
     ).fetchall()
     active_ids = {r[0] for r in active}
-    fired_ids = {sid for sid, _at, _n in fired}
+    fired_ids = {sid for sid, _at, _n, _p in fired}
     return {
         "active_sessions": len(active_ids),
         "active_and_fired": len(active_ids & fired_ids),
@@ -272,6 +293,9 @@ def gate_conversion(conn) -> dict:
         "converted": converted,
         "wrote": wrote_n,
         "closed": closed_n,
+        # Outcome known, attribution missing. Separated because collapsing them
+        # makes a documented closure look like a documented absence.
+        "closed_unattributed": closed_anon_n,
         # Firings where a document was actually queued, so something was known
         # to be owed. The rest fired on "did work, recorded nothing", where
         # whether anything was worth keeping is exactly what is not established.
@@ -536,11 +560,17 @@ def render(h: dict) -> str:
     # how this project came to believe structural capture was solved.
     g = h.get("gate") or {}
     if g.get("fired"):
+        anon = g.get("closed_unattributed", 0)
         unresolved = g["fired"] - g["converted"]
         lines.append(
             f"  stop gate fired {g['fired']}x: {g['wrote']} wrote a fact, "
-            f"{g['closed']} closed a queued document, {unresolved} unresolved"
+            f"{g['closed']} closed a document, {unresolved} neither"
         )
+        if anon:
+            lines.append(
+                f"    up to {anon} of those {unresolved} saw a document closed in the "
+                "same project with no session recorded - outcome known, author not"
+            )
         lines.append(
             f"    {g['with_queue']} of {g['fired']} fired with something queued; for the "
             "rest, whether anything was worth keeping is not established"
