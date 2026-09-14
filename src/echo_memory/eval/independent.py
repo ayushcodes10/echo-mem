@@ -313,20 +313,25 @@ def score(conn, group_id: str, *, judged_by: str | None = None) -> dict:
     return out
 
 
-def per_question(conn, group_id: str) -> list[dict]:
-    """Each question's reciprocal rank under each configuration.
+def per_question(conn, group_id: str, *, judged_by: str | None = None) -> list[dict]:
+    """Each question's reciprocal rank under each configuration, for one judge.
 
     An aggregate over ten questions hides whether an advantage is consistent or
     carried by two cases, and at this sample size that difference is the whole
     question. A reviewer asked for these before the aggregate could be read as
     anything, which is right.
+
+    The same grid under a second judge is what shows whether an advantage
+    survives a change of labeller, which is the question a single grid cannot
+    answer however finely it is broken down.
     """
+    who = resolve_judge(conn, group_id, judged_by)
     labels: dict[int, set[str]] = {}
     for qid, edge_id in conn.execute(
         """SELECT j.question_id, j.edge_id FROM public.eval_judgement j
            JOIN public.eval_question q ON q.id = j.question_id
-           WHERE q.group_id = %s AND j.relevant""",
-        (group_id,),
+           WHERE q.group_id = %s AND j.relevant AND j.judged_by = %s""",
+        (group_id, who),
     ).fetchall():
         labels.setdefault(qid, set()).add(edge_id)
 
@@ -348,7 +353,8 @@ def per_question(conn, group_id: str) -> list[dict]:
     out = []
     for qid, question in text.items():
         relevant = labels.get(qid, set())
-        row = {"id": qid, "text": question, "relevant": len(relevant), "rr": {}}
+        row = {"id": qid, "text": question, "relevant": len(relevant),
+               "judged_by": who, "rr": {}}
         for configuration, returned in sorted(runs.get(qid, {}).items()):
             rank = next(
                 (i for i, e in enumerate(returned, start=1) if e in relevant), None
@@ -362,9 +368,11 @@ def render_per_question(rows: list[dict]) -> str:
     if not rows:
         return ""
     names = sorted({c for r in rows for c in r["rr"]})
+    who = rows[0].get("judged_by")
     lines = [
         "",
-        "Per question, reciprocal rank of the first relevant fact:",
+        "Per question, reciprocal rank of the first relevant fact"
+        + (f", as judged by {who}:" if who else ":"),
         "",
         "  " + f"{'#':<3}{'rel':>4}  " + "".join(f"{n[:12]:>14}" for n in names),
         "  " + "-" * (9 + 14 * len(names)),
