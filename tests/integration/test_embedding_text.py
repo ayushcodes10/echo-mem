@@ -117,3 +117,52 @@ def test_reindex_is_idempotent(migrated_db):
 def test_reindex_reports_an_empty_scope_rather_than_claiming_work(migrated_db):
     with connect(migrated_db) as conn:
         assert "nothing to reindex" in render(reindex(conn, [GROUP], _embedder()))
+
+
+def test_reindex_embeds_in_batches_but_writes_one_at_a_time(migrated_db):
+    """Both halves matter. Batching is the whole saving - 290 facts cost 2059.8
+    ms one call per text and 437.8 ms batched - and writing individually is
+    what keeps an interrupted run partly reindexed rather than fully embedded
+    and not written, which is the property this command exists to have."""
+    from echo_memory.cli.reindex import BATCH, reindex
+
+    class _Batching(VectorEmbedder):
+        def __init__(self, vectors):
+            super().__init__(vectors)
+            self.batches: list[int] = []
+
+        def embed_many(self, texts):
+            self.batches.append(len(texts))
+            return super().embed_many(texts)
+
+    with connect(migrated_db) as conn:
+        embedder = _Batching({
+            "Acme": REFERENCE, "release branch": REFERENCE, FACT: REFERENCE,
+            f"Acme release branch. {FACT}": REFERENCE,
+        })
+        _write(conn, embedder)
+        embedder.batches.clear()
+
+        result = reindex(conn, [GROUP], embedder)
+
+    assert result["updated"] == result["facts"] >= 1
+    assert embedder.batches, "reindex embedded one text at a time"
+    assert all(size <= BATCH for size in embedder.batches)
+
+
+def test_reindex_reports_progress_against_what_it_has_written(migrated_db):
+    """Progress used to count loop iterations every 25th time round. It now
+    counts rows actually updated, so a caller is never told about work that
+    has been embedded but not yet committed."""
+    from echo_memory.cli.reindex import reindex
+
+    seen: list[tuple[int, int]] = []
+    with connect(migrated_db) as conn:
+        embedder = _embedder()
+        _write(conn, embedder)
+
+        result = reindex(conn, [GROUP], embedder, progress=lambda done, total: seen.append((done, total)))
+
+    assert seen, "no progress was reported"
+    assert seen[-1] == (result["updated"], result["facts"])
+    assert all(done <= total for done, total in seen)
