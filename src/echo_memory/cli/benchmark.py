@@ -38,12 +38,16 @@ LLM_CALLS_PER_QUERY = 0
 
 DEFAULT_ROUNDS = 5
 
-# Facts to put in the scratch scope before measuring. Zero was the old
-# behaviour and it made the read numbers meaningless: five rounds leave about
-# six facts, and at six facts the adaptive similarity floor never runs (its
-# sample is under the minimum) while the vector scan touches six rows. The
-# published median came out 2.4x faster than the same query against a real
+# Facts the CLI puts in the scratch scope before measuring. Not seeding was the
+# old behaviour and it made the read numbers meaningless: five rounds leave
+# about six facts, and at six facts the adaptive similarity floor never runs
+# (its sample is under the minimum) while the vector scan touches six rows. The
+# published median came out 2.4x faster than the same query against the real
 # 291-fact store. A benchmark run on an empty scope measures an empty scope.
+#
+# The default belongs to the CLI rather than to run(), whose callers include
+# tests driving a fake embedder that only answers for strings it was handed.
+# Seeding invents names, so it is opt-in and the command opts in.
 DEFAULT_SEED_FACTS = 250
 
 _ENTITIES = [
@@ -106,7 +110,7 @@ def _seed_store(conn, group_id: str, embedder, target: int) -> int:
 
 
 def run(conn, group_id: str, embedder, rounds: int = DEFAULT_ROUNDS,
-        seed_facts: int = DEFAULT_SEED_FACTS) -> dict:
+        seed_facts: int = 0) -> dict:
     """Measure a real ingest + query cycle. Writes real facts into group_id, so
     callers should hand it a throwaway scope rather than a scope holding
     memory worth keeping."""
