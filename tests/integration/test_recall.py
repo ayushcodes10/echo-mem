@@ -263,3 +263,64 @@ def test_a_short_prompt_still_reports_queued_work(migrated_db):
     assert "too short" in result["skipped"]
     assert result["pending"] == 1
     assert "1 memory file(s) noticed" in recall.render_context(result)
+
+
+NOTIFICATION = """<task-notification>
+<task-id>bapxz6bmo</task-id>
+<tool-use-id>toolu_01GdSMtojvSvMfkwkL8qb4HM</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-ayush-Desktop-work/tasks/bapxz6bmo.output</output-file>
+<status>completed</status>
+<summary>Background command "Full suite on a clean database" completed (exit code 0)</summary>
+</task-notification>"""
+
+
+def test_a_machine_notification_is_not_a_prompt(migrated_db):
+    """40% of this hook's firings were background-task completions, and on
+    those it was worse than useless. prompt_terms takes the first 12 salient
+    words; a notification's XML envelope - tag names, a task id, a tool-use id,
+    an absolute path - consumes the whole budget before the summary is reached,
+    so 99% of them issued nearly the same query and a deterministic ranker
+    answered it with the same three facts every time. Those three took 50% of
+    everything delivered to notifications, against 10% on typed prompts."""
+    config = _seed(migrated_db)
+
+    with server._state.pool.connection() as conn:
+        result = recall.recall_for_prompt(conn, config, NOTIFICATION)
+
+    assert result["facts"] == []
+    assert result["skipped"] == "nothing here was typed by a person"
+
+
+def test_a_typed_prompt_survives_the_reminder_stapled_to_it(migrated_db):
+    """Stripped rather than detected, because a real question often arrives
+    with one of these appended. Skipping on their presence would lose the
+    question; skipping on what is left after removing them does not."""
+    config = _seed(migrated_db)
+    prompt = (
+        "is chat-module-api dev or prod\n"
+        "<system-reminder>Some long harness note that nobody typed.</system-reminder>"
+    )
+
+    with server._state.pool.connection() as conn:
+        result = recall.recall_for_prompt(conn, config, prompt)
+
+    assert result["skipped"] is None
+    assert any(FACT in f["fact"] for f in result["facts"]), (
+        "the real question was lost with the envelope"
+    )
+    assert "system-reminder" not in result["prompt"]
+
+
+def test_the_envelope_does_not_eat_the_search_terms(migrated_db):
+    """The mechanism, pinned directly: what reaches the ranker is the typed
+    words, not the tag names and ids that used to crowd them out."""
+    from echo_memory.cli.recall import human_part
+    from echo_memory.retrieval.query_memory import MAX_TERMS, prompt_terms
+
+    assert len(prompt_terms(NOTIFICATION)) == MAX_TERMS, (
+        "the envelope alone should exhaust the term budget - that is the defect"
+    )
+    assert prompt_terms(human_part(NOTIFICATION)) == []
+
+    typed = "fix the adaptive floor\n" + NOTIFICATION
+    assert prompt_terms(human_part(typed)) == ["fix", "adaptive", "floor"]
