@@ -24,7 +24,7 @@ from datetime import UTC, date, datetime
 
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.project import UNKNOWN as UNKNOWN_PROJECT
-from echo_memory.ingestion.resolution import LOW_THRESHOLD
+from echo_memory.ingestion.resolution import LOW_THRESHOLD, _differing_numeric_tokens
 from echo_memory.trial import observations
 
 # Bounded per node rather than a full pairwise scan: this produces a list a
@@ -161,6 +161,26 @@ def duplicate_candidates(
                 # hundred coin flips, which is how a live duplicate written
                 # this morning sat unnoticed at the top of the queue.
                 "certain": bool(a and b and a[0].lower() == b[0].lower()),
+                # Two names that disagree about a number are usually two
+                # things: PR #3551 against PR #3552, Issue #3153 against Issue
+                # #3156. graphify mints an entity per PR and per issue, and
+                # those pairs score 0.98 against each other, so they took 232
+                # of the 451 rows here - 51% of a queue whose whole job is to
+                # be read by a person.
+                #
+                # Sorted down, never hidden. The same predicate is used at the
+                # silent-merge boundary, where a false positive costs one
+                # round trip; as a hide rule the cost inverts, and it is wrong
+                # often enough to matter. Four of the sixteen confirmed-same
+                # pairs this store has - a quarter of its entire positive
+                # class - disagree about a number: 'USD_INR_RATE' against
+                # 'USD INR rate September 2026' is one entity, and so is 'Fork
+                # issue sweep #2593-3299' against 'Fork issue sweep 3'. Hiding
+                # those removes a real duplicate from the only surface that
+                # can catch it. Ranking them costs a scroll.
+                "differs_numerically": bool(
+                    a and b and _differing_numeric_tokens(a[0], b[0])
+                ),
                 "same_project": bool(shared),
                 "projects": sorted(
                     projects.get(pair[0], set()) | projects.get(pair[1], set())
@@ -169,10 +189,16 @@ def duplicate_candidates(
         )
     if not all_projects:
         candidates = [c for c in candidates if c["same_project"]]
-    # Certain first, then same-project, then most similar within each group.
+    # Certain first, then same-project, then pairs that do not disagree about a
+    # number, then most similar within each group.
     return sorted(
         candidates,
-        key=lambda c: (not c["certain"], not c["same_project"], -c["similarity"]),
+        key=lambda c: (
+            not c["certain"],
+            not c["same_project"],
+            c["differs_numerically"],
+            -c["similarity"],
+        ),
     )
 
 
