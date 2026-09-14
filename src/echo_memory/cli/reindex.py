@@ -45,20 +45,38 @@ def facts_needing_embedding(conn, group_ids: list[str]) -> list[tuple[str, str, 
     ]
 
 
+# Facts embedded per batch. The whole scope in one call would be faster still
+# and would also mean an interrupted run had embedded everything and written
+# nothing, which is the property this command is built around. A chunk is a
+# compromise between the two, sized so progress still moves visibly.
+BATCH = 25
+
+
 def reindex(conn, group_ids: list[str], embedder, progress=None) -> dict:
     """Re-embed in place. One UPDATE per fact rather than a rebuild, so an
     interrupted run leaves a store that is partly reindexed rather than one
-    with no vectors at all."""
+    with no vectors at all.
+
+    Embedded in batches, written one at a time. The embedding was the whole
+    cost: 290 facts took 2059.8 ms one call per text and 437.8 ms batched, 4.7x,
+    and the gap grows with the store. The UPDATEs stay individual because the
+    partial-progress guarantee above is worth more than the rest of the saving.
+    """
     facts = facts_needing_embedding(conn, group_ids)
     updated = 0
-    for i, (edge_id, source, target, fact) in enumerate(facts, start=1):
-        conn.execute(
-            "UPDATE public.fact_embedding SET embedding = %s WHERE edge_id = %s::graphid",
-            (embedder.embed(embedding_text(source, target, fact)), edge_id),
+    for offset in range(0, len(facts), BATCH):
+        chunk = facts[offset:offset + BATCH]
+        vectors = embedder.embed_many(
+            [embedding_text(source, target, fact) for _, source, target, fact in chunk]
         )
-        updated += 1
-        if progress and i % 25 == 0:
-            progress(i, len(facts))
+        for (edge_id, _, _, _), vector in zip(chunk, vectors, strict=True):
+            conn.execute(
+                "UPDATE public.fact_embedding SET embedding = %s WHERE edge_id = %s::graphid",
+                (vector, edge_id),
+            )
+            updated += 1
+        if progress:
+            progress(updated, len(facts))
     return {"facts": len(facts), "updated": updated}
 
 
