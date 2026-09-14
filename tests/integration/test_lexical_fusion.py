@@ -90,3 +90,41 @@ def test_a_question_phrased_in_different_words_still_matches(migrated_db):
     facts = [f["fact"] for f in result.get("facts", [])]
     assert FACT in facts
     assert NOISE not in facts, "a fact sharing no terms with the query was returned"
+
+
+def test_equal_scores_resolve_the_same_way_every_time(migrated_db):
+    """ts_rank has no IDF and no length normalisation, so scores collapse onto
+    a handful of values and an exact tie at the cut is the common case rather
+    than the exception: across 324 real prompts the rank-3 and rank-4 scores
+    were identical in 59% of them, and the hook injects three. Which fact a
+    user saw was decided by Postgres scan order.
+
+    Third instance of this defect class here - the traversal channel ordered
+    neighbours of a seed by unspecified row order, and the audit log had it too.
+    The fix is not a better order, only a stated one."""
+    from echo_memory.retrieval.query_memory import _lexical_any_candidates
+
+    with connect(migrated_db) as conn:
+        # Two facts carrying the same query term with the same frequency score
+        # identically; nothing in the data breaks the tie.
+        for i, text in enumerate([
+            "the alpha service deploys on friday",
+            "the bravo service deploys on friday",
+            "the charlie service deploys on friday",
+        ]):
+            subject = f"service-{i}"
+            write_episode(
+                conn, GROUP, f"tie{i}",
+                [{"name": subject, "type": "thing"}],
+                [{"source": subject, "target": subject, "relation_type": "is",
+                  "fact": text, "confidence": "extracted"}],
+                {subject: {"resolved_to": "new"}},
+                VectorEmbedder({text: unit_vector_at_angle(0.02),
+                                subject: unit_vector_at_angle(0.02)}),
+                agent_id="claude-code",
+            )
+
+        runs = {tuple(_lexical_any_candidates(conn, GROUP, "service deploys", 50))
+                for _ in range(8)}
+
+    assert len(runs) == 1, f"the same query returned {len(runs)} different orderings"

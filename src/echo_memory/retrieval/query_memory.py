@@ -292,7 +292,9 @@ def _vector_candidates(
         JOIN {GRAPH}."FACT" f ON f.id = fe.edge_id
         WHERE fe.group_id = %s
           AND (f.properties ->> '"t_invalid"'::agtype) IS NULL
-        ORDER BY fe.embedding <#> %s::vector
+        -- Same reason as the lexical channel below: a stated tiebreak, so two
+        -- facts at an identical distance always resolve the same way.
+        ORDER BY fe.embedding <#> %s::vector, fe.edge_id
         LIMIT %s
         """,
         (embedding, group_id, embedding, limit),
@@ -417,7 +419,18 @@ def _lexical_any_candidates(conn, group_id: str, query: str, limit: int) -> list
         WHERE (f.properties ->> '"group_id"'::agtype) = %s
           AND (f.properties ->> '"t_invalid"'::agtype) IS NULL
           AND to_tsvector('english', f.properties ->> '"fact"'::agtype) @@ {tsquery}
-        ORDER BY score DESC
+        -- Tie broken by id, arbitrary but fixed. ts_rank has no IDF and no
+        -- length normalisation, so scores collapse onto a few values and
+        -- exact ties at the cut are the common case, not the exception: on
+        -- 324 real prompts the rank-3 and rank-4 scores were identical in 59%
+        -- of them, and the hook injects three. Which fact a user sees was
+        -- decided by Postgres scan order.
+        --
+        -- Third instance of the same defect class in this codebase - the
+        -- traversal channel and the audit log had it too - and the same fix:
+        -- not a better order, just a stated one, so a rerun scores the thing
+        -- it scored last time.
+        ORDER BY score DESC, f.id
         LIMIT %s
         """,
         (*params, group_id, *params, limit),
