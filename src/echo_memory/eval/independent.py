@@ -388,7 +388,7 @@ def render_per_question(rows: list[dict]) -> str:
             f"  {r['id']:<3}{r['relevant']:>4}  "
             + "".join(f"{r['rr'].get(n, 0.0):>14.3f}" for n in names)
         )
-    lines += ["", "  " + "  ".join(f"{r['id']}: {r['text'][:60]}" for r in rows[:0])]
+    lines.append("")
     for r in rows:
         lines.append(f"  {r['id']:<3} {r['text']}")
     return "\n".join(lines)

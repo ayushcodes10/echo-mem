@@ -1,10 +1,16 @@
 """echo-memory judge: the evaluation whose questions predate its answers.
 
-The five commands are one workflow, and the order is the point. `new` records
+The commands are one workflow, and the order is the point. `new` records
 questions and retrieves nothing. `open` retrieves, under every configuration at
 once, and stamps the question so a later reader can see which came first.
 `export` writes the shuffled union to a file to mark in an editor, `import`
 reads it back, and `pool` does the same interactively. `score` reads the labels.
+
+`judges`, `agreement` and `score --by` exist because one judge is one
+measurement. A second pass over the same pool disagreed with the first on 11 of
+142 pairs - always in the direction of more relevant, never fewer - and that
+was enough to change which configuration leads on MRR. A single set of labels
+cannot show that, so the tool refuses to score without being told whose.
 
 Either way a fact already judged never reappears, so judging is resumable. The
 file is the better surface and the reason is not convenience: a terminal prompt
@@ -80,12 +86,14 @@ def run(args, config, conn) -> int:
         print(f"\nOpened {len(pending)} question(s). `judge pool` to label them.")
         return 0
 
+    who = getattr(args, "judged_by", None) or config.user_id
+
     if command == "pool":
-        return _pool(conn, group_id, getattr(args, "question", None), config)
+        return _pool(conn, group_id, getattr(args, "question", None), who)
 
     if command == "export":
         text = independent.export_pool(
-            conn, group_id, only=getattr(args, "question", None)
+            conn, group_id, only=getattr(args, "question", None), judged_by=who
         )
         out = getattr(args, "out", None)
         if out:
@@ -101,7 +109,7 @@ def run(args, config, conn) -> int:
         from pathlib import Path
 
         counts = independent.import_pool(
-            conn, Path(args.file).read_text(encoding="utf-8"), judged_by=config.user_id
+            conn, Path(args.file).read_text(encoding="utf-8"), judged_by=who
         )
         print(
             f"Recorded {counts['y']} relevant, {counts['n']} not"
@@ -110,29 +118,67 @@ def run(args, config, conn) -> int:
         return 0
 
     if command == "score":
-        print(
-            independent.render(
-                independent.score(conn, group_id),
-                independent.coverage(conn, group_id),
-            ),
-            end="",
-        )
-        if getattr(args, "per_question", False):
-            print(independent.render_per_question(
-                independent.per_question(conn, group_id)
-            ))
+        # Not config.user_id: scoring reads labels, it does not write them, and
+        # defaulting to "whoever is running this" would quietly pick a judge.
+        by = getattr(args, "judged_by", None)
+        try:
+            print(
+                independent.render(
+                    independent.score(conn, group_id, judged_by=by),
+                    independent.coverage(conn, group_id, judged_by=by),
+                ),
+                end="",
+            )
+            if getattr(args, "per_question", False):
+                print(independent.render_per_question(
+                    independent.per_question(conn, group_id, judged_by=by)
+                ))
+        except ValueError as exc:
+            print(f"{exc}\n  echo-memory judge score --by <name>", file=sys.stderr)
+            return 1
+        return 0
+
+    if command == "judges":
+        rows = independent.judges(conn, group_id)
+        if not rows:
+            print("Nobody has judged this scope yet. `judge export` writes the pool out.")
+            return 0
+        for name, total, yes in rows:
+            print(f"  {name:<20}{total:>6} label(s), {yes:>4} relevant")
+        if len(rows) > 1:
+            print("\nThese are separate measurements. `judge agreement <a> <b>` "
+                  "compares two,\nand `judge score --by <name>` reads one.")
+        return 0
+
+    if command == "agreement":
+        result = independent.agreement(conn, group_id, args.a, args.b)
+        if not result["pairs"]:
+            print(f"{args.a} and {args.b} have no pair in common.", file=sys.stderr)
+            return 1
+        print(f"\n  {args.a} and {args.b}, on the {result['pairs']} pair(s) both labelled:\n")
+        print(f"    both relevant      {result['both_relevant']:>5}")
+        print(f"    both not           {result['both_not']:>5}")
+        print(f"    {args.a} only{'':<{max(0, 14 - len(args.a))}}{result[f'{args.a}_only']:>5}")
+        print(f"    {args.b} only{'':<{max(0, 14 - len(args.b))}}{result[f'{args.b}_only']:>5}")
+        print(f"\n    raw agreement      {result['raw_agreement']:>5.3f}")
+        print(f"    Cohen's kappa      {result['kappa']:>5.3f}")
+        print("\n  Read kappa, not raw agreement: almost every pair is irrelevant, so two")
+        print("  judges who both say no to everything agree nearly always and have said")
+        print("  nothing. Kappa is unstable when the positive class is this rare, which")
+        print("  is why the counts are here beside it.\n")
         return 0
 
     print(f"unknown judge command {command!r}", file=sys.stderr)
     return 1
 
 
-def _pool(conn, group_id: str, only: int | None, config) -> int:
+def _pool(conn, group_id: str, only: int | None, judged_by: str) -> int:
     """One fact at a time, with the question above it and no configuration named.
 
     The prompt deliberately does not say how many configurations returned this
     fact, or where any of them ranked it. Either would be a signal about which
-    system found it, which is the one thing the judge must not have.
+    system found it, which is the one thing the judge must not have. Nor does
+    it say what another judge said, for the same reason.
     """
     rows = independent.questions(conn, group_id)
     rows = [q for q in rows if q["opened_at"] and (only is None or q["id"] == only)]
@@ -142,7 +188,7 @@ def _pool(conn, group_id: str, only: int | None, config) -> int:
 
     judged = 0
     for q in rows:
-        pool = independent.pool(conn, q["id"])
+        pool = independent.pool(conn, q["id"], judged_by=judged_by)
         if not pool:
             continue
         facts = _facts(conn, pool)
@@ -168,7 +214,7 @@ def _pool(conn, group_id: str, only: int | None, config) -> int:
                 print("    (not y or n - skipped)\n")
                 continue
             independent.judge(
-                conn, q["id"], edge_id, answer == "y", judged_by=config.user_id
+                conn, q["id"], edge_id, answer == "y", judged_by=judged_by
             )
             judged += 1
             print()
