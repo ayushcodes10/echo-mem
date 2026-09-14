@@ -507,3 +507,103 @@ def test_two_agents_writing_one_triple_leave_one_active_edge(migrated_db):
         $$) AS (n agtype)"""
     ).fetchone()
     assert int(str(row[0])) == 1, "two concurrent writers left two active edges"
+
+
+def test_the_existing_edge_lookup_uses_an_index(migrated_db):
+    """Every fact written checks whether this triple already has an active edge,
+    to supersede rather than duplicate. Asked through Cypher as
+    `MATCH (a)-[e:FACT]->(b) WHERE id(a) = $sid AND id(b) = $tid`, that cannot
+    use an index - AGE expands the match and filters afterwards - so it walked
+    every FACT edge in the scope on every fact. At 776 facts it cost 651 ms per
+    call and 93% of a six-fact write.
+
+    Pins the plan, because the answer was never wrong; only the way it was
+    reached was."""
+    conn = connect(migrated_db)
+    embedder = LocalEmbedder()
+    write_episode(
+        conn, "g-plan", "sess-plan",
+        [{"name": "Postgres", "type": "tool"}, {"name": "AGE decision", "type": "decision"}],
+        [{"source": "AGE decision", "target": "Postgres", "relation_type": "uses",
+          "fact": "decided to use Postgres", "confidence": "extracted"}],
+        {}, embedder,
+    )
+
+    ends = conn.execute(
+        f"""SELECT start_id::text, end_id::text FROM {GRAPH_NAME}."FACT" LIMIT 1"""
+    ).fetchone()
+    assert ends, "the episode wrote no edge"
+
+    plan = "\n".join(
+        r[0] for r in conn.execute(
+            f"""EXPLAIN SELECT id::text FROM {GRAPH_NAME}."FACT"
+                WHERE (properties ->> '"group_id"'::agtype) = %s
+                  AND start_id = %s::text::graphid
+                  AND end_id = %s::text::graphid""",
+            ("g-plan", ends[0], ends[1]),
+        ).fetchall()
+    )
+    assert "Seq Scan" not in plan, f"the edge lookup stopped using an index:\n{plan}"
+
+
+def test_writing_the_same_triple_twice_still_supersedes(migrated_db):
+    """The lookup moved off Cypher and onto the edge table. What it is for -
+    finding the active edge for this exact (source, target, relation) so a
+    second fact supersedes rather than duplicates - has to survive that."""
+    conn = connect(migrated_db)
+    embedder = LocalEmbedder()
+    entities = [{"name": "deploy branch", "type": "policy"},
+                {"name": "Acme", "type": "company"}]
+
+    def _write(fact):
+        return write_episode(
+            conn, "g-sup", "sess-sup", entities,
+            [{"source": "Acme", "target": "deploy branch", "relation_type": "deploys_from",
+              "fact": fact, "confidence": "extracted"}],
+            {}, embedder,
+        )
+
+    _write("the deploy branch is master")
+    second = _write("the deploy branch is main, never master")
+
+    assert second["superseded"], "the second write did not supersede the first"
+    active = conn.execute(
+        f"""SELECT count(*) FROM {GRAPH_NAME}."FACT"
+            WHERE (properties ->> '"group_id"'::agtype) = 'g-sup'
+              AND (properties ->> '"t_invalid"'::agtype) IS NULL"""
+    ).fetchone()[0]
+    assert active == 1, "superseding left two active edges for one triple"
+
+
+def test_a_deferred_fact_is_never_embedded(migrated_db):
+    """A fact touching an ambiguous mention waits for the caller to say which
+    candidate it meant, so it is not written and must not be embedded either.
+    Prefetching every fact up front did exactly that: work the write discarded,
+    and on a strict embedder an error for a string the episode never stored."""
+    embedder = VectorEmbedder({
+        "Postgres": REFERENCE,
+        "Postgres DB": unit_vector_at_angle(0.80),
+        "written fact": REFERENCE,
+        "Postgres Postgres. written fact": REFERENCE,
+    })
+    conn = connect(migrated_db)
+    write_episode(
+        conn, "g-defer", "s1", [{"name": "Postgres", "type": "tool"}],
+        [{"source": "Postgres", "target": "Postgres", "relation_type": "is",
+          "fact": "written fact", "confidence": "extracted"}],
+        {"Postgres": {"resolved_to": "new"}}, embedder,
+    )
+
+    # "Postgres DB" scores mid-range against "Postgres": ambiguous, so its fact
+    # is deferred. Its composed text is deliberately not registered, so the
+    # embedder raises if anything tries to embed it.
+    result = write_episode(
+        conn, "g-defer", "s2", [{"name": "Postgres DB", "type": "tool"}],
+        [{"source": "Postgres DB", "target": "Postgres DB", "relation_type": "is",
+          "fact": "deferred fact nobody registered a vector for",
+          "confidence": "extracted"}],
+        {}, embedder,
+    )
+
+    assert result["ambiguous_entities"], "the mention was not treated as ambiguous"
+    assert result["edges_created"] == []

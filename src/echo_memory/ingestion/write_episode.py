@@ -11,6 +11,7 @@ import psycopg
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 from echo_memory.infra.logging import get_logger, log_write_episode
 from echo_memory.infra.project import UNKNOWN as PROJECT_UNKNOWN
+from echo_memory.ingestion.embeddings import Prefetched
 from echo_memory.ingestion.neighbourhood import MAX_FACTS_CONSULTED, related_entities
 from echo_memory.ingestion.resolution import (
     ResolutionError,
@@ -121,23 +122,31 @@ def _find_active_edge(
     conn, group_id: str, source_id: str, target_id: str, relation_type: str
 ) -> tuple[str, str] | None:
     """Returns (edge_id, fact_text) so a supersession's audit entry can
-    record before_fact, not just its id."""
+    record before_fact, not just its id.
+
+    Read off the edge table rather than through Cypher, for the same reason
+    _adjacent is. `MATCH (a)-[e:FACT]->(b) WHERE id(a) = $sid AND id(b) = $tid`
+    cannot use an index: AGE expands the match and filters afterwards, so every
+    call walked every FACT edge in the scope. At 776 facts that was 651 ms per
+    call and 93% of a six-fact write.
+
+    start_id and end_id are indexed alongside group_id by migration 0013, which
+    is the index this query wanted all along.
+    """
     row = conn.execute(
-        f"""SELECT * FROM cypher('{GRAPH}', $$
-            MATCH (a)-[e:FACT {{relation_type: $rel, group_id: $gid}}]->(b)
-            WHERE id(a) = $sid AND id(b) = $tid AND e.t_invalid IS NULL
-            RETURN id(e), e.fact
-            LIMIT 1
-        $$, %s) AS (edge_id agtype, fact agtype)""",
-        (
-            json.dumps(
-                {"rel": relation_type, "gid": group_id, "sid": int(source_id), "tid": int(target_id)}
-            ),
-        ),
+        f"""SELECT id::text, properties ->> '"fact"'::agtype
+            FROM {GRAPH}."FACT"
+            WHERE (properties ->> '"group_id"'::agtype) = %s
+              AND start_id = %s::text::graphid
+              AND end_id = %s::text::graphid
+              AND (properties ->> '"relation_type"'::agtype) = %s
+              AND (properties ->> '"t_invalid"'::agtype) IS NULL
+            LIMIT 1""",
+        (group_id, str(source_id), str(target_id), relation_type),
     ).fetchone()
     if row is None:
         return None
-    return str(row[0]), str(row[1]).strip('"')
+    return str(row[0]), row[1]
 
 
 def _invalidate_edge(conn, edge_id: str, t_invalid: int) -> None:
@@ -304,6 +313,22 @@ def _write_audit_entry(conn, group_id: str, session_id: str, **fields) -> None:
     )
 
 
+def _prefetch_names(embedder, entities: list[dict]):
+    """Embed the entity names in one pass, before resolution needs them.
+
+    A transformer pays fixed per-call overhead that one text bears alone and
+    many share: the texts a six-fact episode embeds cost 90.5 ms one call each
+    and 7.9 ms batched, a quarter of a 330 ms write.
+
+    Names only, here. Which facts get written is not known until resolution has
+    said which mentions are ambiguous, and a fact touching an ambiguous mention
+    is deferred and never embedded - so predicting them all up front does work
+    the write then discards. The fact texts join the same batch cache later,
+    once the answer exists.
+    """
+    return Prefetched(embedder, [e.get("name", "") for e in entities])
+
+
 def write_episode(
     conn,
     group_id: str,
@@ -335,6 +360,12 @@ def write_episode(
             (time.perf_counter() - start) * 1000, error=str(e),
         )
         return {"error": str(e)}
+
+    # After validation, never before. Prefetching reads every entity name, so
+    # on a malformed episode it embedded the bad input and failed there -
+    # turning clean ValidationErrors into whatever the embedder happened to
+    # raise. A speed-up must not change what a caller is told went wrong.
+    embedder = _prefetch_names(embedder, entities)
 
     episode_id = str(uuid.uuid4())
     now = int(time.time())
@@ -390,6 +421,17 @@ def write_episode(
                 for f in facts
                 if f["source"] not in ambiguous_mentions and f["target"] not in ambiguous_mentions
             ]
+
+            # The rest of the batch, now that ambiguity has decided which facts
+            # exist. Deferred facts are never embedded, which is why this could
+            # not have been part of the first pass.
+            embedder.extend(
+                [
+                    embedding_text(f.get("source", ""), f.get("target", ""), f["fact"])
+                    for f in ready_facts
+                ]
+                + [f["fact"] for f in ready_facts[:MAX_FACTS_CONSULTED]]
+            )
 
             # A new entity is created only if some fact being written now actually
             # uses it, or if no fact mentions it at all - the caller asked for that

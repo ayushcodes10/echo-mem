@@ -19,15 +19,21 @@ class Embedder(Protocol):
         share. Measured on this machine: twelve texts one call each is 39.2 ms,
         the same twelve in one batch is 6.1 ms.
 
-        Worth having where the loop is long. `reindex` re-embeds every active
-        fact in a scope: 290 of them cost 2059.8 ms one at a time and 437.8 ms
-        in batches, 4.7x, and that gap widens with the store.
+        `reindex` re-embeds every active fact in a scope: 290 of them cost
+        2059.8 ms one at a time and 437.8 ms in batches, 4.7x, and that gap
+        widens with the store.
 
-        Not worth having inside write_episode, which was tried and measured.
-        An episode's embeddings are a small fraction of a write - entity
-        resolution dominates - so batching them moved the median by less than
-        the run-to-run noise, in both directions. The 6.5x the embedder shows
-        in isolation is real and does not survive contact with the call site.
+        write_episode was measured as not benefiting, and that finding was
+        wrong - not mismeasured, but taken against code where a single
+        unindexed edge lookup was 93% of a write. Batching saved 83 ms of 4210
+        and vanished into the noise. With that lookup fixed the same 21 texts
+        an episode embeds cost 90.5 ms one at a time against 7.9 ms batched,
+        out of a 330 ms write: a quarter of it.
+
+        The lesson is about profiling, not embedders. A component's share of a
+        total is only meaningful once the total is not dominated by a defect,
+        and "we measured it and it did not help" is not durable while anything
+        upstream is still broken.
         """
         ...
 
@@ -92,3 +98,50 @@ class LocalEmbedder:
         return model.encode(
             texts, normalize_embeddings=True, show_progress_bar=False
         ).tolist()
+
+
+class Prefetched:
+    """An embedder that has already computed the texts it was told to expect.
+
+    Wraps another embedder, embeds a predicted set in one batch, and serves
+    those from memory. Anything unpredicted falls through to the wrapped
+    embedder and is remembered, so a wrong prediction costs nothing but the
+    saving - it can never change an answer, only how long it took.
+
+    That fallback is the design, not a safety net bolted on. Threading a batch
+    through every call site would mean write_episode, resolve_entities and
+    _create_edge all agreeing in advance about exactly which strings get
+    embedded, and the first branch anyone adds breaks the agreement silently.
+    Here a missed text is served correctly and slowly, which is the failure
+    mode to want.
+    """
+
+    def __init__(self, inner: Embedder, texts: list[str]):
+        self._inner = inner
+        self.dimension = inner.dimension
+        wanted = list(dict.fromkeys(t for t in texts if t))
+        self._cache = dict(zip(wanted, inner.embed_many(wanted), strict=True))
+
+    def embed(self, text: str) -> list[float]:
+        hit = self._cache.get(text)
+        if hit is None:
+            hit = self._inner.embed(text)
+            self._cache[text] = hit
+        return hit
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        self.extend(texts)
+        return [self._cache[t] for t in texts]
+
+    def extend(self, texts: list[str]) -> None:
+        """Add another batch, once its texts are known.
+
+        An episode cannot predict everything at once. Resolution needs the
+        entity names embedded before it can say which mentions are ambiguous,
+        and which facts get written depends on that answer - a fact touching an
+        ambiguous mention is deferred and never embedded at all. Prefetching
+        every fact up front embedded work the write then threw away.
+        """
+        missing = [t for t in dict.fromkeys(texts) if t and t not in self._cache]
+        if missing:
+            self._cache.update(zip(missing, self._inner.embed_many(missing), strict=True))
