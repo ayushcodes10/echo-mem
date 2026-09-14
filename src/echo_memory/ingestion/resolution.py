@@ -369,12 +369,27 @@ def resolve_entities(
                 # id that did not come from a candidate list came from
                 # somewhere that cannot be trusted with an entity's identity.
                 #
-                # Measured on the real embedder before choosing the bar: the
-                # incident's own pairs score 0.030 and 0.041, while the hardest
-                # legitimate confirmation on record ("AGE" / "Apache AGE")
-                # scores 0.497. An exact name or alias match skips the check
-                # entirely, since that is the one case where the id is
-                # redundant rather than doubtful.
+                # Measured on the real embedder before choosing the bar. Three
+                # bad merges are on record at 0.030, 0.041 and 0.259; the
+                # hardest legitimate confirmation ("AGE" / "Apache AGE") scores
+                # 0.497.
+                #
+                # The margin is NOT uniform, and describing it as "an order of
+                # magnitude" - which this comment and a paper drawn from it both
+                # did - is wrong for the case that matters. 0.497/0.030 is 16.6x
+                # and 0.497/0.041 is 12.1x, but 0.497/0.259 is 1.92x. The
+                # closest bad merge sits 0.19 above the bar, not an order of
+                # magnitude below the hardest true positive.
+                #
+                # So the guard separates every case on record and its margin is
+                # thin at one end. A legitimate confirmation below 0.45, or a
+                # misdirected one above it, is not far-fetched on this evidence;
+                # what the bar rules out is the obviously unrelated, which is
+                # the claim it can carry.
+                #
+                # An exact name or alias match skips the check entirely, since
+                # that is the one case where the id is redundant rather than
+                # doubtful.
                 node_name, aliases = identity
                 known = {node_name.lower(), *(a.lower() for a in aliases)}
                 if name.lower() not in known:
