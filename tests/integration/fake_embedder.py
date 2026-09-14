@@ -38,6 +38,12 @@ class VectorEmbedder:
 
         raise KeyError(f"VectorEmbedder has no vector registered for {text!r}")
 
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        """One at a time, deliberately. There is nothing to batch here, and
+        looping keeps the KeyError pointing at the exact text that was not
+        registered - which is this embedder's whole job."""
+        return [self.embed(t) for t in texts]
+
 
 def unit_vector_at_angle(cos_theta: float, dim: int = 384) -> list[float]:
     """A unit vector whose cosine similarity to [1, 0, 0, ...] is exactly
