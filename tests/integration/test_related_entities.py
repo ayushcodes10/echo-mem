@@ -140,3 +140,58 @@ def test_the_advice_never_changes_what_was_written(conn):
         (GROUP,),
     ).fetchone()[0]
     assert facts == 2, "advice must not have written a third fact"
+
+
+def test_adjacency_is_read_from_the_indexed_edge_table(conn):
+    """Not through Cypher. `MATCH (n)-[:FACT]-(m) WHERE id(n) = nid` cannot use
+    an index - AGE expands the match and filters afterwards - so it walked every
+    FACT edge in the database, in every scope, once per id. Four node ids cost
+    2.34 seconds, which was 98% of the time write_episode spent, for advice the
+    write does not depend on. This pins the query plan, not only the answer."""
+    import json
+
+    from echo_memory.infra.db import GRAPH_NAME as GRAPH
+    from echo_memory.ingestion.neighbourhood import _adjacent
+
+    _write(conn, _embedder(), "retry policy", "payment gateway", OLD_FACT)
+    node_ids = [
+        str(r[0]) for r in conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH}', $$
+                MATCH (n) WHERE n.group_id = $g RETURN id(n) $$, %s) AS (i agtype)""",
+            (json.dumps({"g": GROUP}),),
+        ).fetchall()
+    ]
+    assert node_ids, "the fixture wrote no nodes"
+
+    assert _adjacent(conn, GROUP, node_ids), "these two nodes are joined by OLD_FACT"
+
+    plan = "\n".join(
+        r[0] for r in conn.execute(
+            f"""EXPLAIN SELECT end_id::text FROM {GRAPH}."FACT"
+                WHERE (properties ->> '"group_id"'::agtype) = %s
+                  AND start_id = ANY(SELECT unnest(%s::text[])::graphid)""",
+            (GROUP, node_ids),
+        ).fetchall()
+    )
+    assert "Seq Scan" not in plan, f"adjacency stopped using an index:\n{plan}"
+
+
+def test_adjacency_does_not_reach_into_another_scope(conn):
+    """The Cypher form filtered on node id alone and matched across every scope
+    in the database. Ids happen not to collide, so nothing leaked - but it is
+    why the query had to read every edge to answer."""
+    import json
+
+    from echo_memory.infra.db import GRAPH_NAME as GRAPH
+    from echo_memory.ingestion.neighbourhood import _adjacent
+
+    _write(conn, _embedder(), "retry policy", "payment gateway", OLD_FACT)
+    node_ids = [
+        str(r[0]) for r in conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH}', $$
+                MATCH (n) WHERE n.group_id = $g RETURN id(n) $$, %s) AS (i agtype)""",
+            (json.dumps({"g": GROUP}),),
+        ).fetchall()
+    ]
+
+    assert _adjacent(conn, "user:someone-else:shared", node_ids) == set()

@@ -91,21 +91,34 @@ def _endpoints(conn, edge_ids: list[str]) -> list[dict]:
     return [dict(by_edge[e], edge_id=e) for e in edge_ids if e in by_edge]
 
 
-def _adjacent(conn, node_ids: list[str]) -> set[str]:
+def _adjacent(conn, group_id: str, node_ids: list[str]) -> set[str]:
     """Node ids already one hop from any of these.
 
     Suggesting an entity the episode is already connected to is noise: the edge
     exists, so reusing the name changes nothing about the graph's shape.
+
+    Read straight off the edge table rather than through Cypher. The pattern
+    `MATCH (n)-[:FACT]-(m) WHERE id(n) = nid` cannot use an index: AGE expands
+    the match first and filters after, so it walked every FACT edge in the
+    database - every scope, not just this one - once per id. Four node ids took
+    2.34 seconds, which was 98% of the time write_episode spent, for a result
+    the write does not even depend on.
+
+    start_id and end_id are indexed alongside group_id, so the same answer
+    comes back in about a millisecond.
     """
     if not node_ids:
         return set()
+    ids = [str(i) for i in node_ids]
     rows = conn.execute(
-        f"""SELECT * FROM cypher('{GRAPH}', $$
-            UNWIND $ids AS nid
-            MATCH (n)-[:FACT]-(m) WHERE id(n) = nid
-            RETURN id(m)
-        $$, %s) AS (node_id agtype)""",
-        (json.dumps({"ids": [int(i) for i in node_ids]}),),
+        f"""SELECT end_id::text FROM {GRAPH}."FACT"
+            WHERE (properties ->> '"group_id"'::agtype) = %s
+              AND start_id = ANY(SELECT unnest(%s::text[])::graphid)
+            UNION
+            SELECT start_id::text FROM {GRAPH}."FACT"
+            WHERE (properties ->> '"group_id"'::agtype) = %s
+              AND end_id = ANY(SELECT unnest(%s::text[])::graphid)""",
+        (group_id, ids, group_id, ids),
     ).fetchall()
     return {str(r[0]) for r in rows}
 
@@ -144,7 +157,7 @@ def related_entities(
         return []
 
     written = set(written_node_ids)
-    skip = written | _adjacent(conn, written_node_ids)
+    skip = written | _adjacent(conn, group_id, written_node_ids)
 
     out: list[dict] = []
     seen: set[str] = set()
