@@ -438,8 +438,9 @@ def render(scores: dict, cover: dict | None = None) -> str:
     elif cover:
         missing = cover["possible"] - cover["judged"]
         lines += [
-            (f"Recall is over the POOLED relevant set: {cover['judged_by']} left "
-             f"{missing} of {cover['possible']} (question, fact) pairs unjudged,"),
+            (f"Recall is over the POOLED relevant set: "
+             + (f"{cover['judged_by']} left " if cover["judged_by"] else "")
+             + f"{missing} of {cover['possible']} (question, fact) pairs unjudged,"),
             "  so a relevant fact no configuration returned cannot count against",
             "  anything. Precision is unaffected and is the number to read first.",
         ]
@@ -539,7 +540,7 @@ def import_pool(conn, text: str, *, judged_by: str | None = None) -> dict:
     return counts
 
 
-def resolve_judge(conn, group_id: str, judged_by: str | None = None) -> str:
+def resolve_judge(conn, group_id: str, judged_by: str | None = None) -> str | None:
     """Which judge's labels a score is computed from. Never "all of them".
 
     Two judges over the same pool are two measurements, and averaging them is
@@ -549,9 +550,14 @@ def resolve_judge(conn, group_id: str, judged_by: str | None = None) -> str:
     key carried the judge, and it silently reported 2942 of 2850 pairs judged -
     an impossible fraction that read as "complete".
 
-    So one judge is named, always. With a single judge that is automatic; with
-    more than one, refusing is the only safe answer, because there is no
-    default that is not a hidden editorial choice about whose labels count.
+    So one judge is named whenever there is a choice to make. With a single
+    judge that is automatic; with more than one, refusing is the only safe
+    answer, because there is no default that is not a hidden editorial choice
+    about whose labels count.
+
+    With none, the answer is None rather than an error: "nobody has judged this
+    yet" is a true and useful state, reported as zero coverage and empty
+    scores, and it is what every caller sees before the first judging pass.
     """
     known = [who for who, _, _ in judges(conn, group_id)]
     if judged_by is not None:
@@ -562,7 +568,7 @@ def resolve_judge(conn, group_id: str, judged_by: str | None = None) -> str:
             )
         return judged_by
     if not known:
-        raise ValueError("nothing has been judged in this scope yet")
+        return None
     if len(known) > 1:
         raise ValueError(
             f"{len(known)} judges have labelled this scope ({', '.join(known)}); "

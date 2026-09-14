@@ -197,3 +197,94 @@ Q7: does it matter
 
     assert counts == {"y": 1, "n": 1, "skipped": 1}
     assert len(seen) == 2, "only the marked rows are written"
+
+
+def _two_judges(conn):
+    """One question, opened, with both judges having labelled its whole pool."""
+    independent.add_question(conn, GROUP, "which branch does it deploy from")
+    question = independent.questions(conn, GROUP)[0]
+    independent.run_configurations(
+        conn, GROUP, question, _embedder(),
+        {"shipping": {}, "vector only": {"vector_only": True}},
+    )
+    ids = independent.pool(conn, question["id"])
+    for edge_id in ids:
+        independent.judge(conn, question["id"], edge_id, False, judged_by="first")
+    # The second judge is more generous, which is the direction two judges
+    # actually differed in: 11 of 142 pairs, every one of them first-says-no.
+    for edge_id in ids:
+        independent.judge(conn, question["id"], edge_id, True, judged_by="second")
+    return question, ids
+
+
+def test_scoring_refuses_to_pool_two_judges(conn):
+    """Averaging two label sets is not a third measurement. A pair both judges
+    labelled would count twice and a pair one judge labelled once, weighting a
+    fact by how many people happened to look at it. Before this, score() took
+    whichever row Postgres returned last."""
+    _two_judges(conn)
+
+    with pytest.raises(ValueError) as caught:
+        independent.score(conn, GROUP)
+
+    assert "first" in str(caught.value) and "second" in str(caught.value)
+
+
+def test_one_judge_needs_no_naming(conn):
+    """Refusing when there is only one judge would be ceremony: there is no
+    choice to make and no way to make it silently."""
+    independent.add_question(conn, GROUP, "which branch does it deploy from")
+    question = independent.questions(conn, GROUP)[0]
+    independent.run_configurations(conn, GROUP, question, _embedder(), {"shipping": {}})
+    for edge_id in independent.pool(conn, question["id"]):
+        independent.judge(conn, question["id"], edge_id, True, judged_by="only-one")
+
+    assert independent.score(conn, GROUP)["shipping"]["judged_by"] == "only-one"
+
+
+def test_each_judge_scores_to_their_own_labels(conn):
+    """The whole point of keeping both: two judges over one pool are two
+    results, and the difference between them is itself a finding."""
+    _two_judges(conn)
+
+    strict = independent.score(conn, GROUP, judged_by="first")["shipping"]
+    generous = independent.score(conn, GROUP, judged_by="second")["shipping"]
+
+    assert strict["questions"] == 0, "no relevant fact, so nothing to rank"
+    assert generous["precision_at"][1] == 1.0
+    assert strict["judged_by"] == "first" and generous["judged_by"] == "second"
+
+
+def test_coverage_cannot_exceed_the_grid_by_adding_judges(conn):
+    """Counting every judgement row made this report 2942 of 2850 pairs judged
+    and print that pooling bias was closed. A count larger than the grid is not
+    a rounding problem, it is the wrong denominator for the claim being made."""
+    _two_judges(conn)
+
+    for who in ("first", "second"):
+        cover = independent.coverage(conn, GROUP, judged_by=who)
+        assert cover["judged"] <= cover["possible"]
+        assert cover["judged_by"] == who
+
+
+def test_a_fresh_judge_gets_the_whole_pool_back(conn):
+    """pool() promised the same pool could be presented twice for an agreement
+    check while excluding everything anybody had judged, so the second judge
+    got nothing and the second pass had to be built outside the tool."""
+    question, ids = _two_judges(conn)
+
+    assert independent.pool(conn, question["id"], judged_by="first") == []
+    assert sorted(independent.pool(conn, question["id"], judged_by="third")) == sorted(ids)
+
+
+def test_agreement_is_kappa_because_raw_agreement_flatters(conn):
+    """Two judges who both say no to almost everything agree almost always.
+    Kappa takes out the agreement the marginals alone would produce."""
+    question, ids = _two_judges(conn)
+
+    result = independent.agreement(conn, GROUP, "first", "second")
+
+    assert result["pairs"] == len(ids)
+    assert result["raw_agreement"] == 0.0, "they disagreed on every pair"
+    assert result["kappa"] <= 0.0
+
