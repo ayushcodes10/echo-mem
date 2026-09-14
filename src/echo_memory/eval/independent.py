@@ -188,13 +188,19 @@ def judge(conn, question_id: int, edge_id: str, relevant: bool, *,
     )
 
 
-def coverage(conn, group_id: str) -> dict:
-    """How much of the (question, fact) grid has actually been judged.
+def coverage(conn, group_id: str, *, judged_by: str | None = None) -> dict:
+    """How much of the (question, fact) grid ONE judge has actually covered.
 
     Pooling bias is a property of how much was left unjudged, so it is a
     measurement rather than a disclaimer. At TREC scale the grid is
     unjudgeable and the caveat is permanent; this store holds a few hundred
     facts, which makes the whole grid reachable and the bias closable.
+
+    Counted per judge for the same reason it is closable at all: the claim is
+    that no relevant fact is hiding outside what was labelled, and two judges'
+    rows added together cannot support it. Summed across judges this returned
+    2942 of 2850 - more than the grid holds - and reported the bias closed on
+    the strength of it.
     """
     import json as _json
 
@@ -210,11 +216,12 @@ def coverage(conn, group_id: str) -> dict:
         "SELECT count(*) FROM public.eval_question WHERE group_id = %s AND opened_at IS NOT NULL",
         (group_id,),
     ).fetchone()[0]
+    who = resolve_judge(conn, group_id, judged_by)
     judged = conn.execute(
         """SELECT count(*) FROM public.eval_judgement j
            JOIN public.eval_question q ON q.id = j.question_id
-           WHERE q.group_id = %s""",
-        (group_id,),
+           WHERE q.group_id = %s AND j.judged_by = %s""",
+        (group_id, who),
     ).fetchone()[0]
     possible = active * n_questions
     return {
@@ -222,6 +229,10 @@ def coverage(conn, group_id: str) -> dict:
         "questions": n_questions,
         "judged": judged,
         "possible": possible,
+        "judged_by": who,
+        # A judge cannot label more pairs than the grid has, so >= is only ever
+        # == here; kept as >= so a store that shrank mid-pass still reads as
+        # covered rather than silently reopening the caveat.
         "complete": possible > 0 and judged >= possible,
     }
 
@@ -405,7 +416,7 @@ def render(scores: dict, cover: dict | None = None) -> str:
     if cover and cover["complete"]:
         lines += [
             (f"Every ({cover['questions']} question x {cover['active_facts']} fact) pair "
-             f"is judged - {cover['judged']} of {cover['possible']}."),
+             f"is judged by {cover['judged_by']} - {cover['judged']} of {cover['possible']}."),
             "  Recall is therefore recall over the store, not over a pool. Nothing relevant",
             "  can be hiding in what no configuration returned, because there is no such",
             "  thing left unjudged.",
@@ -413,10 +424,10 @@ def render(scores: dict, cover: dict | None = None) -> str:
     elif cover:
         missing = cover["possible"] - cover["judged"]
         lines += [
-            (f"Recall is over the POOLED relevant set: {missing} of "
-             f"{cover['possible']} (question, fact) pairs"),
-            "  are unjudged, so a relevant fact no configuration returned cannot count",
-            "  against anything. Precision is unaffected and is the number to read first.",
+            (f"Recall is over the POOLED relevant set: {cover['judged_by']} left "
+             f"{missing} of {cover['possible']} (question, fact) pairs unjudged,"),
+            "  so a relevant fact no configuration returned cannot count against",
+            "  anything. Precision is unaffected and is the number to read first.",
         ]
     else:
         lines += [
