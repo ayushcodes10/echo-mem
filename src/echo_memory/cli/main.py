@@ -28,6 +28,7 @@ from echo_memory.cli import analyse as analyse_cmd
 from echo_memory.cli import connect as connect_cmd
 from echo_memory.cli import dashboard as dashboard_cmd
 from echo_memory.cli import hooks as hooks_cmd
+from echo_memory.cli import judge as judge_cmd
 from echo_memory.cli import queue as queue_cmd
 from echo_memory.cli import recall as recall_cmd
 from echo_memory.cli import reconcile as reconcile_cmd
@@ -144,6 +145,42 @@ def _add_project_parsers(sub) -> None:
         help=f"host port for the database (default: {quickstart.PORT}, "
              "or the next free one above it)",
     )
+
+    # The other evaluation. Its questions are written before anything is
+    # retrieved for them, and relevance is judged per fact rather than per
+    # configuration, so a configuration's identity cannot reach the label.
+    judge = sub.add_parser(
+        "judge",
+        help="evaluate retrieval on questions written before the answers were seen",
+    )
+    judge_sub = judge.add_subparsers(dest="judge_command", required=True)
+
+    j_new = judge_sub.add_parser("new", help="record a question; retrieves nothing")
+    j_new.add_argument("text", help="the question, in the words somebody would ask it")
+    j_new.add_argument("--subject", metavar="NAME", help="what it is about, for your own sorting")
+
+    judge_sub.add_parser(
+        "list", help="questions recorded, and which have been opened for judging"
+    )
+    judge_sub.add_parser(
+        "open",
+        help="retrieve under every configuration and open judging; do this after the "
+             "questions are written, never before",
+    )
+    j_pool = judge_sub.add_parser(
+        "pool", help="judge the shuffled union of what every configuration returned"
+    )
+    j_pool.add_argument("--question", type=int, metavar="ID", help="just this one")
+    j_exp = judge_sub.add_parser(
+        "export", help="write the whole judging pass to a file to mark in an editor"
+    )
+    j_exp.add_argument("--out", metavar="FILE", help="write here instead of stdout")
+    j_exp.add_argument("--question", type=int, metavar="ID", help="just this one")
+
+    j_imp = judge_sub.add_parser("import", help="read a marked file back")
+    j_imp.add_argument("file", help="the file, with y or n between the brackets")
+
+    judge_sub.add_parser("score", help="per-configuration metrics over the judged pool")
 
     cal = sub.add_parser(
         "calibrate",
@@ -475,6 +512,7 @@ _PROJECT_COMMANDS = {
     "merge": merge.run,
     "notice": queue_cmd.run_notice,
     "pending": queue_cmd.run_pending,
+    "judge": judge_cmd.run,
 }
 
 
