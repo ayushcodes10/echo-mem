@@ -139,7 +139,8 @@ def run_configurations(conn, group_id: str, question: dict, embedder,
     return out
 
 
-def pool(conn, question_id: int, *, seed: int = SHUFFLE_SEED) -> list[str]:
+def pool(conn, question_id: int, *, seed: int = SHUFFLE_SEED,
+         judged_by: str | None = None) -> list[str]:
     """Every fact any configuration returned for this question, shuffled.
 
     The union, not a concatenation: a fact several configurations found is one
@@ -147,7 +148,11 @@ def pool(conn, question_id: int, *, seed: int = SHUFFLE_SEED) -> list[str]:
     fixed seed so position says nothing about which configuration ranked it
     first, and so the same pool can be presented twice for an agreement check.
 
-    Facts already judged are excluded, which makes judging resumable.
+    What `judged_by` already labelled is excluded, which makes one judge's pass
+    resumable without hiding the pool from the next judge. Excluding whatever
+    ANYBODY had labelled was the earlier behaviour, and it made the second
+    judging pass the docstring promises impossible: a second judge asking for
+    the pool got an empty one, because the first judge had been through it.
     """
     rows = conn.execute(
         "SELECT returned FROM public.eval_run WHERE question_id = %s ORDER BY configuration",
@@ -161,8 +166,9 @@ def pool(conn, question_id: int, *, seed: int = SHUFFLE_SEED) -> list[str]:
 
     judged = {
         r[0] for r in conn.execute(
-            "SELECT edge_id FROM public.eval_judgement WHERE question_id = %s",
-            (question_id,),
+            "SELECT edge_id FROM public.eval_judgement "
+            "WHERE question_id = %s AND (%s::text IS NULL OR judged_by = %s::text)",
+            (question_id, judged_by, judged_by),
         ).fetchall()
     }
     unjudged = [e for e in seen if e not in judged]
@@ -453,7 +459,8 @@ def render(scores: dict, cover: dict | None = None) -> str:
 EXCERPT = 240
 
 
-def export_pool(conn, group_id: str, *, only: int | None = None) -> str:
+def export_pool(conn, group_id: str, *, only: int | None = None,
+                judged_by: str | None = None) -> str:
     """The whole judging pass as one editable file.
 
     Interactive prompting was the first design and it was the wrong surface:
@@ -487,7 +494,7 @@ def export_pool(conn, group_id: str, *, only: int | None = None) -> str:
     for q in questions(conn, group_id):
         if not q["opened_at"] or (only is not None and q["id"] != only):
             continue
-        ids = pool(conn, q["id"])
+        ids = pool(conn, q["id"], judged_by=judged_by)
         if not ids:
             continue
         facts = _fetch_facts(conn, ids)
