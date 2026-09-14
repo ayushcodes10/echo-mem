@@ -186,20 +186,37 @@ def adaptive_cosine_floor(conn, group_id: str) -> float:
     What it does deliver is a floor that moves with the store instead of a
     constant measured once on somebody else's data, which is what 0.15 was.
 
+    **The sample is stable, not random.** It used to be `ORDER BY random()`,
+    which redrew on every call - so the floor moved between 0.408 and 0.431 on
+    one store, the admitted candidate set moved with it, and identical queries
+    returned different answers. Three of ten evaluation questions changed their
+    result list across three identical runs, which made every number measured
+    through this function irreproducible and put floor-sampling noise inside
+    the difference between two configurations being compared. Ordering by a
+    hash of the id draws the same arbitrary subset every time: still arbitrary,
+    no longer different on each call.
+
     Falls back to COSINE_FLOOR on a store too small to measure - under
     FLOOR_MIN_FACTS the sample is mostly noise about noise.
     """
     row = conn.execute(
         """
         WITH sampled AS (
-            SELECT embedding FROM public.fact_embedding
-            WHERE group_id = %s ORDER BY random() LIMIT %s
+            SELECT edge_id, embedding FROM public.fact_embedding
+            WHERE group_id = %s ORDER BY md5(edge_id::text) LIMIT %s
         ), pairs AS (
             SELECT -(a.embedding <#> b.embedding) AS sim
             FROM sampled a, sampled b
             -- Every unordered pair once, and never a fact against itself,
             -- which scores 1.0 and would drag the percentile up.
-            WHERE a.embedding <> b.embedding
+            --
+            -- Comparing edge_id rather than the vectors is what makes that
+            -- sentence true. `a.embedding <> b.embedding` counted each
+            -- unordered pair TWICE - a cross join yields (a,b) and (b,a), so
+            -- 50 facts gave 2450 rows where 1225 exist - and it dropped two
+            -- distinct facts that happen to embed identically, which are
+            -- precisely the near-duplicate pairs the percentile should see.
+            WHERE a.edge_id < b.edge_id
         )
         SELECT count(*), percentile_cont(%s) WITHIN GROUP (ORDER BY sim)
         FROM pairs
