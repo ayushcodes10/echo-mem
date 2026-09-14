@@ -582,3 +582,94 @@ def test_starting_again_without_a_reason_changes_nothing(migrated_db):
     assert again["already_started"] is True
     assert again["started_on"] == date(2026, 8, 21)
     assert observations.past_trials(conn) == []
+
+
+def _rename(conn, group_id, node_id, new_name):
+    conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH (n:Node) WHERE id(n) = $nid SET n.name = $name RETURN id(n)
+        $$, %s) AS (i agtype)""",
+        (json.dumps({"nid": int(node_id), "name": new_name}),),
+    ).fetchall()
+
+
+def _node_id(conn, group_id, name):
+    row = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH (n:Node {{group_id: $gid}}) WHERE n.name = $name RETURN id(n)
+        $$, %s) AS (i agtype)""",
+        (json.dumps({"gid": group_id, "name": name}),),
+    ).fetchone()
+    assert row is not None, f"the fixture produced no {name!r}"
+    return str(row[0])
+
+
+def test_pairs_that_disagree_about_a_number_sort_last(migrated_db):
+    """graphify mints an entity per PR and per issue, so the store fills with
+    'PR #3551' against 'PR #3552' - different things scoring 0.98 against each
+    other. They took 232 of 451 rows in the live queue, 51% of a listing whose
+    entire job is to be read by a person."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    group_id = config.group_id("shared")
+
+    _rename(conn, group_id, _node_id(conn, group_id, "AGE"), "PR #3551")
+    _rename(conn, group_id, _node_id(conn, group_id, "Apache AGE"), "PR #3552")
+
+    found = check.duplicate_candidates(conn, group_id)
+    numeric = [c for c in found if c["differs_numerically"]]
+    assert numeric, "the renamed pair should disagree about a number"
+
+    first_numeric = next(i for i, c in enumerate(found) if c["differs_numerically"])
+    rest = [c for c in found[first_numeric:] if not c["differs_numerically"]]
+    assert rest == [], (
+        "a pair agreeing about numbers sorted below one that disagrees: "
+        f"{[c['names'] for c in rest]}"
+    )
+
+
+def test_a_numeric_disagreement_is_never_hidden(migrated_db):
+    """Sorted down, not filtered out. The same predicate guards the silent
+    merge, where a false positive costs one round trip; as a hide rule the cost
+    inverts. Four of this store's sixteen confirmed-same pairs disagree about a
+    number - 'USD_INR_RATE' against 'USD INR rate September 2026' is one
+    entity - so hiding them removes a real duplicate from the only surface that
+    can catch it."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    group_id = config.group_id("shared")
+
+    before = len(check.duplicate_candidates(conn, group_id))
+    _rename(conn, group_id, _node_id(conn, group_id, "AGE"), "Fork issue sweep #2593-3299")
+    _rename(conn, group_id, _node_id(conn, group_id, "Apache AGE"), "Fork issue sweep 3")
+
+    after = check.duplicate_candidates(conn, group_id)
+
+    assert len(after) == before, "ranking dropped a pair instead of moving it"
+    assert any(c["differs_numerically"] for c in after)
+
+
+def test_an_identical_name_still_leads_even_when_it_carries_a_number(migrated_db):
+    """`certain` is the one duplicate signal this store's calibration supports,
+    and it must outrank the numeric demotion rather than be buried by it."""
+    config = _seed(migrated_db)
+    conn = connect(migrated_db)
+    group_id = config.group_id("shared")
+
+    original = _node_id(conn, group_id, "AGE")
+    twin = _node_id(conn, group_id, "Apache AGE")
+    # Migration 0016 forbids two nodes sharing a name, which is why this has to
+    # come off to build the state the listing exists to describe.
+    conn.execute(f'DROP INDEX {GRAPH}.node_name_per_group_idx')
+    _rename(conn, group_id, original, "Release 2026")
+    _rename(conn, group_id, twin, "Release 2026")
+    conn.execute(
+        """UPDATE public.node_embedding SET embedding = (
+               SELECT embedding FROM public.node_embedding WHERE node_id::text = %s)
+            WHERE node_id::text = %s""",
+        (original, twin),
+    )
+
+    found = check.duplicate_candidates(conn, group_id)
+
+    assert found[0]["certain"] is True, [c["names"] for c in found[:3]]

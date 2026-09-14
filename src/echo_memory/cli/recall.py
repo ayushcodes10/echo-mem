@@ -24,6 +24,7 @@ which is how the session briefing lost to three competing hooks. Below a
 relevance floor it emits nothing at all."""
 
 import json
+import re
 from datetime import UTC, datetime
 
 from echo_memory.ingestion import capture
@@ -39,6 +40,37 @@ FACT_PREVIEW_CHARS = 220
 # match everything lexically and mean nothing. Retrieving against them returns
 # noise dressed as relevance.
 MIN_PROMPT_CHARS = 12
+
+# Blocks the harness wraps around machine-generated text before it reaches this
+# hook. They are not questions and nobody typed them.
+#
+# 40% of this hook's firings were one of these - background task completions,
+# mostly - and on those the retrieval was worse than useless. `prompt_terms`
+# takes the first MAX_TERMS = 12 salient words of a prompt, and a
+# task-notification's XML envelope alone exceeds that: the tag names, a task
+# id, a tool-use id and an absolute path consume the entire budget before the
+# summary is reached. 99% of real notifications hit the cap. So every one of
+# them issued nearly the same query - the generic vocabulary of tags and paths
+# - and a deterministic ranker answered it with the same three facts forever.
+# Those three took 50% of all facts delivered to notifications, against 10% on
+# prompts a human actually typed, and only 42 distinct facts were reachable at
+# all.
+#
+# Stripped rather than detected, because a typed prompt often ARRIVES with one
+# of these appended - a system reminder rides along with the user's words - and
+# skipping those would lose the real question. What is left after stripping is
+# what somebody wrote. If that is nothing, there is nothing to retrieve against.
+_MACHINE_BLOCKS = re.compile(
+    r"<(task-notification|system-reminder|cross-session-message|teammate-message"
+    r"|local-command-stdout|local-command-stderr|command-name|command-message"
+    r"|command-args)\b[^>]*>.*?</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def human_part(prompt: str) -> str:
+    """What is left of a prompt once the harness's own blocks are removed."""
+    return _MACHINE_BLOCKS.sub(" ", prompt or "").strip()
 
 # Days without a write before the hook says so. Three is long enough that a
 # quiet weekend does not trigger it and short enough that a habit which has
@@ -74,6 +106,16 @@ def unwritten_work(conn, config) -> dict:
 def recall_for_prompt(conn, config, prompt: str, top_k: int = DEFAULT_TOP_K) -> dict:
     """Facts worth showing for this prompt, across both scopes."""
     prompt = (prompt or "").strip()
+    typed = human_part(prompt)
+    if not typed and prompt:
+        return {
+            "prompt": prompt,
+            "skipped": "nothing here was typed by a person",
+            "facts": [], **unwritten_work(conn, config),
+        }
+    # Retrieve against what a person wrote, not against the envelope it
+    # arrived in.
+    prompt = typed
     if len(prompt) < MIN_PROMPT_CHARS:
         return {
             "prompt": prompt, "skipped": "prompt too short to retrieve against",
