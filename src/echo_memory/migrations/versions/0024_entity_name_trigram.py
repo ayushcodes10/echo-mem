@@ -4,14 +4,14 @@ Embedding similarity treats identifiers that differ by one meaningful token as
 near-duplicates.  Keep a trigram index on the canonical AGE node name so the
 resolver can retrieve those candidates without scanning the graph.
 
-Revision ID: 0022
-Revises: 0021
+Revision ID: 0024
+Revises: 0023
 """
 
 from alembic import op
 
-revision = "0022"
-down_revision = "0021"
+revision = "0024"
+down_revision = "0023"
 branch_labels = None
 depends_on = None
 

@@ -233,7 +233,7 @@ def _fuzzy_candidates(
                        similarity({node_name}, %s) AS similarity
                 FROM {GRAPH}.\"Node\"
                 WHERE {node_group} = %s
-                  AND {node_name} % %s
+                  AND {node_name} %% %s
                   AND similarity({node_name}, %s) >= %s
                 ORDER BY similarity DESC, id
                 LIMIT %s""",

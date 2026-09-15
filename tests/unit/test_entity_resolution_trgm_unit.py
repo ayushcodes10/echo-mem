@@ -29,4 +29,6 @@ def test_fuzzy_candidates_fuse_vector_and_trigram_ranks():
     assert [candidate.node_id for candidate in candidates] == ["2", "1"]
     assert candidates[0].similarity == 0.80
     lexical_query = next(query for query, _ in conn.queries if 'FROM echo_memory."Node"' in query)
-    assert " % %s" in lexical_query
+    # psycopg treats a lone percent as the start of a placeholder; the SQL
+    # operator must therefore be doubled in the query string.
+    assert " %% %s" in lexical_query
