@@ -1,184 +1,180 @@
 # Echo Memory
 
-Shared memory for AI coding agents. What Claude Code learns, Codex and Cursor can recall
-— in one graph, on your own machine, with every write auditable.
+[![CI](https://github.com/echo-mem/echo-mem/actions/workflows/ci.yml/badge.svg)](https://github.com/echo-mem/echo-mem/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/echo-mem)](https://pypi.org/project/echo-mem/)
+[![Python](https://img.shields.io/pypi/pyversions/echo-mem)](https://pypi.org/project/echo-mem/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-Apache 2.0. The server makes no LLM call on the write path, so storing a memory adds no
-inference cost of its own.
+**Shared memory for AI agents, as a graph in your own database.** What Claude Code learns,
+Cursor and Codex can recall. Every fact records who wrote it and when, and the server
+never calls a model to store one.
+
+> Your agents start every session from zero. The usual fix is a notes file you paste into
+> context, which grows until it is mostly irrelevant to whatever you are asking. Echo
+> Memory is the other shape: facts connected to each other, and a query that returns the
+> few that matter. On the author's own store that is **96.7% less context** for the same
+> answer, with the answer still present 87.2% of the time across 1,190 questions.
+
+```
+write_episode                          query_memory
+  billing ──uses──▸ Razorpay             "how do we take payments"
+    │ written by claude-code               ▸ billing uses Razorpay, not Stripe
+    │ supersedes ──▸ Stripe                  written by claude-code, 3 days ago
+    └ no model invoked                     ▸ 1,372 tokens, not 41,838
+```
 
 ## Install
 
-Run it yourself — nothing leaves your machine:
+**Requires:** Python 3.11+ and Docker (for the database).
 
 ```bash
 pipx install echo-mem
 echo-memory quickstart
 ```
 
-That starts the database, applies the schema, and prints the `claude mcp add` command
-that registers it with your tools, filled in with the port it actually used. Docker is the only prerequisite; the Postgres image is published, so
-nothing is compiled.
+`quickstart` starts the database, applies the schema, and prints the `claude mcp add`
+line that registers it, filled in with the port it actually used. The Postgres image is
+published, so nothing compiles.
 
 Or use the hosted service and run no database at all:
 
 ```bash
 pipx install echo-mem
-echo-memory connect <key>          # a key from https://api.echo-mem.com
+echo-memory connect <key>          # a key from https://app.echo-mem.com
 ```
 
-Either way, restart your client afterwards. An MCP server holds the code and config it
-started with.
-
-Then, once per machine, so the agent knows *when* to record and recall rather than only
+Then once per machine, so an agent knows *when* to record and recall rather than only
 that the tools exist:
 
 ```bash
 echo-memory install --global
 ```
 
-## Why
+> **Restart your client afterwards.** An MCP server is a long lived process that holds
+> the code and config it started with, and an editable install does not change that.
 
-Every AI agent starts from zero unless something remembers what happened last time, and
-remembers it well enough and fast enough to still be useful after months or years of
-accumulated history. Most memory tools solve short-term recall with plain vector search
-over stored facts. That degrades as history grows: more candidates, more noise, slower
-retrieval. Echo Memory is built around the read/write algorithm and the data structure
-that keeps working at long horizons, not just at day one:
+> **The PyPI name is `echo-mem`, not `echo-memory`.** That name belongs to an unrelated
+> hosted product. The import package and the CLI are both `echo_memory` / `echo-memory`;
+> only the distribution name differs.
 
-- **A temporal, self-consolidating memory graph.** Facts are edges between entities, not
-  flat vector rows. Old, rarely-accessed memory doesn't just accumulate: it gets
-  consolidated into higher-level summaries over time (never deleted, always traceable
-  back to the original), so retrieval cost stays bounded by what's *currently relevant*,
-  not by everything that's *ever* been written. See
-  [`docs/designs/echo-memory-design.md`](docs/designs/echo-memory-design.md#long-horizon-memory-architecture)
-  for the actual mechanism.
-- **Real graph structure, not just similarity.** Multi-hop queries like "how did we end
-  up here?", answerable because facts are connected, not just individually embedded.
-- **Causal typing, not just similarity.** Edges can be tagged `caused_by`, `led_to`,
-  `blocked_by`, `contradicts`, set by the agent's own read of the conversation, not
-  inferred statistically. Honest about what's tractable today and what isn't.
-- **Auditable by design.** Every change to memory is logged, with a plain-language reason
-  you can read back (`echo-memory why <fact_id>`). Memory that consolidates and edits
-  itself is only trustworthy if you can see why.
-- **A write path that adds no inference.** Extraction happens in the calling agent, never
-  on the server, so recording a memory makes zero *additional* LLM calls. The work does
-  not vanish - it moves to a model that already has the conversation in context - and the
-  figures below measure the server receiving facts, not the extraction that produced them. Measured locally with
-  `echo-memory benchmark`: **write 15ms median, query 8ms, digest 1ms, $0.00 inference
-  cost per episode.** The tradeoff is explicit and worth stating: the agent must arrive
-  with entities and facts already extracted, which is more work for the caller and the
-  reason the [MCP tool contract](docs/DEVELOPMENT.md) spells the shape out. The
-  comparison that makes this matter is Zep/Graphiti, the closest architectural match
-  (bi-temporal edges, fact invalidation, episode provenance): its own published
-  description of ingestion is that "every episode triggers multiple LLM calls for
-  extraction, entity resolution, and invalidation" and that "write cost scales with
-  volume". Here it doesn't.
-- **One storage engine, every scale.** Postgres + pgvector + Apache AGE, from a single
-  local agent up to an organization-wide shared graph spanning every agent a business
-  runs. No forced migration later. (The novel work is the memory structure and algorithm
-  running on top of Postgres, not a new database engine; see the design doc for why.)
-- **Any agent, not one vendor's.** The interface is [MCP](https://modelcontextprotocol.io):
-  any MCP-compatible agent can read and write the same memory graph, whether that's a
-  coding assistant, a chatbot, an ops agent, or something built in-house.
+## Usage
 
-## Who this is for
+```bash
+echo-memory status                 # what each scope holds, and which agents have written
+echo-memory health                 # a score, what is weak, and what to do about it
+echo-memory dashboard --serve      # the graph, in a browser, localhost only
 
-- **A developer running local agents** who wants Claude Code, Cursor, or anything else to
-  stop losing context between sessions and tools.
-- **A team or organization running agentic systems in production** (support bots, DevOps
-  agents, internal tooling) that needs a shared memory layer instead of N disconnected
-  ones, with the tenancy model (below) to keep it scoped correctly per agent, per team, or
-  org-wide.
+echo-memory why <fact_id>          # the full audit trail for one fact
+echo-memory recall "<question>"    # query the store from a terminal
+echo-memory export                 # everything, as JSON
 
-## Status
+echo-memory install --for cursor   # wire one client, project scoped
+echo-memory adopt                  # wire every MCP client on the machine, each with its own id
 
-Early and staged. See [`docs/designs/`](docs/designs/) for the full architecture and the
-v1a → v1b build plan. **The validated wedge driving v1a is specifically cross-tool coding
-agent memory** (the founder's own daily pain, real and tested). The broader vision above
-is the target this architecture is built toward, not yet something v1a itself proves. v1a
-proves basic recall works before v1b adds causal typing and multi-hop graph retrieval, and
-before v1.1 adds the org-wide tenancy the broader vision depends on.
+echo-memory eval                   # retrieval quality against your own store
+echo-memory eval --context         # what a recall costs against injecting everything
+echo-memory calibrate              # is entity resolution trustworthy on your data
+echo-memory benchmark              # write, query and digest latency
+```
 
-## Setting it up by hand
+### The six MCP tools
 
-`quickstart` is the short way. If you would rather see every step, or you are working on
-Echo Memory itself, [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) has the long version:
-clone, `docker compose up -d`, `pip install -e ".[dev]"`, `alembic upgrade head`, and the
-`claude mcp add` line with its environment.
+| Tool | What it does |
+|---|---|
+| `write_episode` | Store entities and the facts connecting them. No model call. |
+| `query_memory` | Hybrid vector and full text retrieval, fused by reciprocal rank. |
+| `record_recall_save` | Mark that a recalled fact saved re explaining something. Refuses a fact no read returned. |
+| `get_audit_log` | Every change to memory, with a plain language reason. |
+| `pending_documents` | Memory files this project wrote that the graph has not heard about. |
+| `mark_ingested` | Close one of those out. |
 
-**Wiring a second tool? Give it its own `ECHO_MEMORY_AGENT_ID`.** Cursor should say
-`cursor`, Claude Desktop `claude-desktop`. Memory is shared either way, but a fact records
-which tool learned it, and two tools claiming the same id makes cross-tool recall
-impossible to see afterwards. `echo-memory adopt` wires every MCP client on the machine at
-once, each with its own id, and shows the diff before writing anything.
+## What you get
 
-Scoped to one project instead — a single Claude project, a Cursor workspace, a repo whose
-memory should not mingle with the rest? `echo-memory install [path]` writes a
-project-scoped MCP config plus a skill (or, for Cursor, an always-applied rule), committed
-alongside the code.
+**A graph, not a list.** Entities are nodes and a fact is an edge between two of them.
+Two sessions that never knew about each other resolve onto the same entity by name, so
+the second inherits what the first learned.
 
-See [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for using Echo Memory from an agent
-that does not speak MCP — a chatbot, a DevOps agent, or any custom tool-calling loop.
+**Bounded retrieval.** Old, rarely read memory consolidates into higher level summaries
+over time. Nothing is discarded; what changes is how much a query has to walk.
+
+**Provenance on every fact.** Who wrote it, which tool, which project, when, and which
+reads returned it. A superseded fact is never deleted. It stops being drawn and stays
+reachable with its history.
+
+**Causal typing.** Edges can be tagged `caused_by`, `led_to`, `blocked_by`,
+`contradicts`, set by the agent's own read of the conversation rather than inferred
+statistically.
+
+**No inference on the write path.** Extraction happens in the calling agent, so storing
+a memory invokes no model on the server. The cost moved rather than vanished: the agent
+has to arrive with entities and facts already extracted, which is what the
+[tool contract](docs/DEVELOPMENT.md) spells out. The comparison that makes this matter is
+Zep/Graphiti, the closest architectural match, whose own description of ingestion is that
+"every episode triggers multiple LLM calls" and that "write cost scales with volume".
+
+**Any MCP client.** A coding assistant, a chatbot, an ops agent, or something built in
+house. Coding agents are where this is proven, not what it is limited to.
+
+## Numbers, and how they were taken
+
+Every figure comes from this repository or a live store, on a date, with the command that
+reproduces it on yours. The corpus is small and the noise floor is stated, because a
+difference nobody sized is not a result.
+
+| Measure | Value | Reproduce |
+|---|---|---|
+| Context per recall vs injecting everything | **96.7% less**, hit@10 0.872 over 1,190 questions | `echo-memory eval --context` |
+| Server side model calls per write | **0** | `echo-memory benchmark` |
+| Write, query, digest latency (median) | 15ms, 8ms, 1ms | `echo-memory benchmark` |
+| Entity resolution AUC | 0.666, 95% CI [0.421, 0.881] | `echo-memory calibrate` |
+
+That last row is the one that went the wrong way, and it is here on purpose. The interval
+includes chance, so the unattended merge is switched off: at the automatic bar precision
+was 50% over two reviewed pairs, and the audit log showed that path had fired once in the
+system's entire history. A near match is now offered for confirmation instead.
+
+The context saving is measured against a specific baseline, stated so it cannot be read
+as more than it is. Not "no memory at all", which is however long a human spends re
+explaining and is unmeasurable. It is the thing people do instead: keep the project's
+notes in one file and paste the whole file. On that store the file is 325 facts, about
+41,838 tokens; a recall returned 1,372 on average. The hit rate belongs beside it, because
+a recall that returned nothing would score 100%.
 
 ## The graph
 
-Memory is a graph, not a list of notes. Entities are nodes; a fact is an **edge**
-between two of them. That is the whole data model, and everything below follows
-from it.
+Memory is a graph, not a list of notes. Entities are nodes; a fact is an **edge** between
+two of them. That is the whole data model, and everything else follows from it.
 
 ![The memory graph](docs/images/graph-overview.png)
 
-Three projects here. `checkout-api`, `mobile-app` and `data-pipeline` were
-recorded in separate sessions and never told about each other, yet the picture
-already separates them — because separation is a property of the edges, not a
-label anyone applied.
+Three projects here. `checkout-api`, `mobile-app` and `data-pipeline` were recorded in
+separate sessions and never told about each other, yet the picture already separates them,
+because separation is a property of the edges rather than a label anyone applied.
 
-**Clusters come from structure.** Densely connected facts are grouped by label
-propagation over the edges, and each cluster is named after its most-connected
-node. That is why `data-pipeline` sits apart on the left: nothing it knows
-touches payments. It is also why `checkout-api` and `mobile-app` share a cluster
-despite being different codebases — they genuinely do share an idea, and the
-graph found it rather than being told.
+**Clusters come from structure.** Densely connected facts are grouped by label propagation
+over the edges, and each cluster is named after its most connected node. That is why
+`data-pipeline` sits apart: nothing it knows touches payments. It is also why
+`checkout-api` and `mobile-app` share a cluster despite being different codebases. They
+genuinely share an idea, and the graph found it rather than being told.
 
-**Components are the stronger claim.** Two nodes in different components have no
-path between them at all, which is the strongest statement this graph can make
-that two memories are unrelated.
-
-**Projects are a facet, not the structure.** Every fact records the project it
-was written from, and you can colour by it, but project says *where a fact was
-written*, not *what it belongs with*.
+**Components are the stronger claim.** Two nodes in different components have no path
+between them at all, which is the strongest statement this graph can make that two
+memories are unrelated.
 
 ### Click a node: everything it takes part in
 
 ![A node selected](docs/images/graph-node-selected.png)
 
-`idempotency keys` is the concept that joined those two codebases. The panel
-shows it referenced from **checkout-api twice and mobile-app once**, the three
-facts it appears in, and how the node itself resolved — each mention matched an
-existing node by exact name rather than creating a duplicate.
-
-Nobody wrote "these projects are related." Two sessions independently recorded a
-fact about idempotency keys, entity resolution matched them to one node, and the
-relationship exists as a consequence.
+`idempotency keys` is the largest node here and nobody made it large: seventeen facts from
+several services resolved onto one entity by name. The panel lists every one, with which
+agent wrote it and when.
 
 ### Click a link: why memory believes it
 
 ![A fact selected](docs/images/graph-fact-selected.png)
 
-This is what a knowledge graph gives you that a code map cannot. Selecting the
-edge answers, for that single fact:
-
-| | |
-|---|---|
-| **what** | the sentence, its `relation_type`, and how confidently it was stated |
-| **when** | when it became valid, and when it was superseded if it has been |
-| **who** | which agent wrote it, in which session |
-| **where** | which project it came from |
-| **why** | the audit trail — created, superseded from what to what, and the entity-resolution rationale for the nodes at either end |
-
-A superseded fact is never deleted. It stops being drawn, because the graph no
-longer asserts that relationship, but it stays reachable from its node and keeps
-its full history. `echo-memory why <fact_id>` prints the same trail in a terminal.
+Not a tooltip. Who wrote the fact, in which project, when, and how each of its entities
+resolved. `echo-memory why <fact_id>` prints the same trail in a terminal.
 
 ### Seeing your own
 
@@ -186,43 +182,88 @@ its full history. `echo-memory why <fact_id>` prints the same trail in a termina
 echo-memory dashboard --serve --open
 ```
 
-The images above come from a synthetic dataset (`scripts/demo-seed.py`) rather
-than a real store, for the obvious reason: a real memory graph is full of
-hostnames, account numbers and client names.
+The images above come from a synthetic dataset (`scripts/demo-seed.py`) rather than a real
+store, for the obvious reason: a real memory graph is full of hostnames, account numbers
+and client names.
 
-## Architecture
+## Wiring more than one tool
 
-- **Storage:** PostgreSQL with the `pgvector` and Apache AGE extensions
-- **Retrieval:** hybrid vector + full-text search (v1a), with Personalized PageRank via
-  `networkx` added in v1b for multi-hop associative retrieval
-- **Interface:** [Model Context Protocol](https://modelcontextprotocol.io) server:
-  `write_episode`, `query_memory`, `record_recall_save`, `get_audit_log`
+**Give each client its own `ECHO_MEMORY_AGENT_ID`.** Cursor should say `cursor`, Claude
+Desktop `claude-desktop`. Memory is shared either way, but a fact records which tool
+learned it, and two tools claiming the same id makes cross tool recall impossible to see
+afterwards.
+
+```bash
+echo-memory adopt                  # every MCP client on the machine, each with its own id
+echo-memory install [path]         # one project: MCP config plus a skill, committed with the code
+```
+
+`adopt` shows the diff before writing anything. For an agent that does not speak MCP, see
+[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
 ## Is the graph in good shape?
 
-```
+```bash
 echo-memory health
 ```
 
-A score, what is strong, what needs attention, and what to do about each,
-including what recall has cost: how often memory was read, how often a read
-returned anything, roughly how many tokens were injected, and how many saves
-those reads produced. Writes were counted from the start; reads were not counted
-at all, so nothing could answer whether recall earns what it costs. It
-exists to be run when you have no question - a store can look healthy by every
-number this CLI reports while most of its facts came from a bulk import, the
-last real write was a week ago, and only one of several wired agents has ever
-written anything. `--json` for machine-readable output.
+A score, what is strong, what needs attention, and what to do about each, including what
+recall has cost: how often memory was read, how often a read returned anything, roughly
+how many tokens were injected, and how many saves those reads produced. Writes were
+counted from the start; reads were not counted at all, so nothing could answer whether
+recall earns what it costs. It exists to be run when you have no question, because a store
+can look healthy by every other number while most of its facts came from a bulk import,
+the last real write was a week ago, and only one of several wired agents has ever written
+anything. `--json` for machine readable output.
 
-Nothing in it is gated. The paid tiers sell hosting and the things that only
-exist when several people share a graph; diagnostics about your own data are not
-a thing to withhold from the person whose data it is.
+Nothing in it is gated. The paid plan sells hosting; diagnostics about your own data are
+not a thing to withhold from the person whose data it is.
 
-## Contributing
+## Architecture
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md). Issues and PRs welcome; please read the design
-docs first so proposals fit the staged build plan. A first pull request is asked to sign
-the [Contributor License Agreement](CLA.md) — once, in the PR thread.
+**Storage** PostgreSQL with `pgvector` and Apache AGE, from a single local agent up to an
+organisation wide shared graph, with no forced migration later. The novel work is the
+memory structure and the read/write algorithm on top of it, not a new database engine.
+
+**Retrieval** Hybrid vector and full text search fused by reciprocal rank in v1a.
+Personalised PageRank via `networkx` lands in v1b for multi hop associative retrieval.
+
+**Interface** [Model Context Protocol](https://modelcontextprotocol.io), so any compliant
+agent reads and writes the same graph.
+
+## Status
+
+Early and staged, on purpose. See [`docs/designs/`](docs/designs/) for the architecture
+and the v1a to v1b plan.
+
+| | |
+|---|---|
+| **v1a, built** | Basic recall. Six MCP tools, thirty CLI commands, on PyPI and in the MCP registry. |
+| **v1b, gated** | Causal typing and multi hop retrieval. 187 questions no single fact answers score MRR 0.212 today; the number to beat exists before the feature does. |
+| **v1.1, planned** | Organisation wide tenancy: per agent, per team, or org wide graphs. |
+
+The validated wedge driving v1a is memory shared across coding agents, which is the
+author's own daily pain and the case with the most evidence behind it. Everything else is
+the target this architecture is built toward.
+
+## Hosted
+
+Running it yourself is free forever under Apache 2.0, with no account and no feature held
+back. [app.echo-mem.com](https://app.echo-mem.com) runs the database for you at $99 a
+month if you would rather not.
+
+<details>
+<summary>Contributing</summary>
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Issues and pull requests welcome; please read the
+design docs first so proposals fit the staged build plan. A first pull request is asked to
+sign the [Contributor License Agreement](CLA.md), once, in the PR thread.
+
+The most useful contribution is a measurement that disagrees with one of the numbers
+above. Run `echo-memory eval`, `calibrate` or `benchmark` on your own store and open an
+issue with the output.
+
+</details>
 
 ## License
 
