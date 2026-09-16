@@ -378,6 +378,11 @@ def _add_project_parsers(sub) -> None:
         default="all",
         help="query shape (default: all four; one shape alone can invert a conclusion)",
     )
+    ev.add_argument(
+        "--context", action="store_true",
+        help="report what a recall costs in tokens against injecting the whole "
+             "scope, with the hit rate beside it",
+    )
     bench.add_argument(
         "--group", metavar="ID", default="benchmark:scratch",
         help="scope to write throwaway probe facts into (default: a dedicated "
@@ -689,7 +694,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "eval":
-        from echo_memory.eval.retrieval import SHAPES, build_cases, render, run
+        from echo_memory.eval.retrieval import (
+            SHAPES, build_cases, corpus_tokens, render, render_context_saving, run,
+        )
         from echo_memory.ingestion.embeddings import LocalEmbedder
 
         conn = connect(config.database_url)
@@ -721,6 +728,16 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+
+        if args.context:
+            # One row per shape, and only the shipping configuration: this
+            # measures what memory costs to use, not which retrieval variant
+            # wins, and mixing the two tables would invite reading a saving as
+            # though it were an ablation result.
+            facts, whole = corpus_tokens(conn, group_id)
+            shipping = [r for r in results if r.name == "shipping"]
+            print(render_context_saving(shipping, facts, whole))
+            return 0
 
         print(render(results))
         return 0
