@@ -20,14 +20,17 @@ from echo_memory.ingestion import capture
 FACT = "chat-module-api.internal resolves to dugout-dev-alb, so it is DEV not prod"
 
 
-def _seed(migrated_db):
+def _seed(migrated_db, extra: dict | None = None):
+    """`extra` registers more vectors, for tests that write a second fact. The
+    fake refuses text it was not handed, which is the point of it."""
     config = Config(
         user_id="ayush", agent_id="claude-code", database_url=migrated_db, project="dugout"
     )
     server.startup(
         config=config,
         embedder=VectorEmbedder(
-            {"chat-module-api": REFERENCE, "genai-web-dug": REFERENCE, FACT: REFERENCE}
+            {"chat-module-api": REFERENCE, "genai-web-dug": REFERENCE, FACT: REFERENCE,
+             **(extra or {})}
         ),
     )
     server.write_episode(
@@ -324,3 +327,69 @@ def test_the_envelope_does_not_eat_the_search_terms(migrated_db):
 
     typed = "fix the adaptive floor\n" + NOTIFICATION
     assert prompt_terms(human_part(typed)) == ["fix", "adaptive", "floor"]
+
+
+def test_a_solo_fact_is_recorded_against_the_solo_scope(migrated_db):
+    """The hook queries shared AND solo and recorded everything against shared,
+    so every solo fact it delivered was filed under a scope it did not come
+    from. The live store showed 227 active solo facts and not one ever returned
+    in thirty days - not a fact about retrieval, but the read log pointing at
+    the wrong scope.
+
+    It also breaks corroboration: returned_fact_ids is what matches a
+    cross-tool recall save to the read that delivered the fact, and a save
+    citing a solo fact could never match a read recorded under shared."""
+    solo_fact = "chat-module-api also fronts the staging queue worker"
+    config = _seed(migrated_db, {"staging queue worker": REFERENCE, solo_fact: REFERENCE})
+    server.write_episode(
+        "solo", "s-solo",
+        [{"name": "chat-module-api", "type": "hostname"},
+         {"name": "staging queue worker", "type": "service"}],
+        [{"source": "chat-module-api", "target": "staging queue worker",
+          "relation_type": "fronts", "fact": solo_fact, "confidence": "extracted"}],
+        entity_resolutions={"chat-module-api": {"resolved_to": "new"},
+                            "staging queue worker": {"resolved_to": "new"}},
+    )
+
+    with server._state.pool.connection() as conn:
+        result = recall.recall_for_prompt(
+            conn, config, "does chat-module-api front the staging queue worker"
+        )
+        assert any(solo_fact in f["fact"] for f in result["facts"]), "fixture did not retrieve"
+        recall.record_read(conn, config, result, recall.render_context(result), "s-read")
+
+        rows = conn.execute(
+            """SELECT group_id, n_facts, returned_fact_ids FROM public.read_event
+               WHERE kind = 'hook' ORDER BY id DESC LIMIT 5"""
+        ).fetchall()
+
+    by_group = {g: (n, ids) for g, n, ids in rows}
+    assert config.group_id("solo") in by_group, (
+        f"the solo fact was filed under {list(by_group)}"
+    )
+    assert by_group[config.group_id("solo")][0] >= 1
+
+
+def test_the_injected_cost_is_not_counted_twice(migrated_db):
+    """Splitting one read into two rows must not double the token total the
+    health report adds up."""
+    other = "chat-module-api is fronted by the dev load balancer"
+    config = _seed(migrated_db, {other: REFERENCE})
+    server.write_episode(
+        "solo", "s-solo2",
+        [{"name": "chat-module-api", "type": "hostname"}],
+        [{"source": "chat-module-api", "target": "chat-module-api",
+          "relation_type": "is", "fact": other, "confidence": "extracted"}],
+        entity_resolutions={"chat-module-api": {"resolved_to": "new"}},
+    )
+
+    with server._state.pool.connection() as conn:
+        result = recall.recall_for_prompt(conn, config, "is chat-module-api dev or prod")
+        context = recall.render_context(result)
+        conn.execute("DELETE FROM public.read_event")
+        recall.record_read(conn, config, result, context, "s-read2")
+        total = conn.execute(
+            "SELECT coalesce(sum(injected_chars), 0) FROM public.read_event"
+        ).fetchone()[0]
+
+    assert total == len(context), f"{total} charged for a {len(context)}-char injection"

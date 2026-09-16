@@ -212,19 +212,57 @@ def record_read(conn, config, result: dict, context: str, session_id: str | None
 
     Counted even when the context is empty: a read that returned nothing still
     happened, and reads-that-found-nothing over reads-total is the ratio that
-    says whether retrieval is working."""
-    reads.record(
-        conn, config.group_id("shared"), reads.HOOK,
-        n_facts=len(result.get("facts") or []), injected_chars=len(context),
-        project=config.project, session_id=session_id,
-        # agent_id was available here and never passed, which is why 434 of
-        # this store's 458 reads carry no tool: the hook is the busiest read
-        # surface by an order of magnitude, and it was the anonymous one. It
-        # also decides whether a recall save can be corroborated against the
-        # tool that made the read rather than only against the scope.
-        agent_id=config.agent_id,
-        fact_ids=[f.get("fact_id") for f in result.get("facts") or []],
-    )
+    says whether retrieval is working.
+
+    **One row per scope that answered.** This queries shared AND solo and used
+    to record the lot against shared, so every solo fact it delivered was filed
+    under a scope it did not come from. The store showed 227 active solo facts
+    and not one of them ever returned in thirty days, which is not a fact about
+    retrieval - it is the read log pointing at the wrong scope.
+
+    That matters beyond tidiness. `returned_fact_ids` is what corroborates a
+    cross-tool recall save against the read that delivered the fact, and a save
+    citing a solo fact could never be matched to a read recorded under shared.
+
+    The character count follows the facts. Charging both rows the full figure
+    would double the injected-token total; the facts are what differ between
+    the scopes, so the cost is split in their proportion, and a read that found
+    nothing anywhere is still recorded once against shared."""
+    facts = result.get("facts") or []
+    by_scope: dict[str, list] = {}
+    for fact in facts:
+        by_scope.setdefault(fact.get("scope") or "shared", []).append(fact)
+
+    if not facts:
+        reads.record(
+            conn, config.group_id("shared"), reads.HOOK,
+            n_facts=0, injected_chars=len(context),
+            project=config.project, session_id=session_id,
+            agent_id=config.agent_id, fact_ids=[],
+        )
+        return
+
+    # Allocated so the parts sum to the whole. Rounding each share on its own
+    # loses a character to the halfway case, and injected_chars is summed into
+    # a token total that should not drift because a read was split in two.
+    remaining, left = len(context), len(facts)
+    for scope, scoped in by_scope.items():
+        share = round(remaining * len(scoped) / left) if left else 0
+        remaining -= share
+        left -= len(scoped)
+        reads.record(
+            conn, config.group_id(scope), reads.HOOK,
+            n_facts=len(scoped),
+            injected_chars=share,
+            project=config.project, session_id=session_id,
+            # agent_id was available here and never passed, which is why 434 of
+            # this store's 458 reads carry no tool: the hook is the busiest read
+            # surface by an order of magnitude, and it was the anonymous one. It
+            # also decides whether a recall save can be corroborated against the
+            # tool that made the read rather than only against the scope.
+            agent_id=config.agent_id,
+            fact_ids=[f.get("fact_id") for f in scoped],
+        )
 
 
 def render_hook_output(context: str) -> str:
