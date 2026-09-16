@@ -397,6 +397,84 @@ SHAPE_NOTES = {
 }
 
 
+def corpus_tokens(conn, group_id: str) -> tuple[int, int]:
+    """Every live fact in the scope: how many, and what they cost to inject.
+
+    This is the baseline a targeted recall is worth measuring against. It is
+    deliberately NOT "no memory at all" - that cost is however long a human
+    spends re-explaining, which is unbounded and unmeasurable. It is the thing
+    people do instead: keep the project's accumulated notes in one file and put
+    the whole file in context. A memory tool that answers by returning
+    everything it holds is the same shape and the same cost.
+    """
+    rows = conn.execute(
+        f"""SELECT * FROM cypher('{GRAPH}', $$
+            MATCH (a:Node)-[e:FACT]->(b:Node)
+            WHERE e.group_id = $gid AND e.t_invalid IS NULL
+            RETURN e.fact
+        $$, %s) AS (fact agtype)""",
+        (json.dumps({"gid": group_id}),),
+    ).fetchall()
+    facts = [str(f).strip('"') for (f,) in rows]
+    return len(facts), sum(len(f) for f in facts) // CHARS_PER_TOKEN
+
+
+def render_context_saving(results: list[Result], facts: int, whole: int) -> str:
+    """What the recall cost against what injecting the whole scope would.
+
+    The hit rate is printed beside the saving and is the point of printing it:
+    returning less context is not an improvement on its own, it is only an
+    improvement if the answer is still in what came back. A configuration that
+    returned nothing would score a 100% saving here.
+
+    The percentage is a property of THIS store, not of the software. It rises
+    as the store grows, because the numerator is bounded by top_k and the
+    denominator is not - which is the actual claim being made, and the reason
+    the fact count and corpus size are printed next to it rather than hidden.
+    """
+    if not results or not whole:
+        return "no cases"
+
+    lines = [
+        "",
+        f"whole scope      {facts:,} live facts, ~{whole:,} tokens to inject",
+        "",
+        f"  {'shape':<16}{'cases':>7}{'recall':>9}{'hit@10':>9}{'saving':>10}",
+        "  " + "-" * 51,
+    ]
+    total = 0
+    weighted_tokens = 0.0
+    weighted_hits = 0.0
+    for r in results:
+        if not r.cases:
+            continue
+        tokens = r.mean_tokens
+        total += r.cases
+        weighted_tokens += tokens * r.cases
+        weighted_hits += r.recall(10) * r.cases
+        lines.append(
+            f"  {r.shape:<16}{r.cases:>7}{tokens:>9,}{r.recall(10):>9.3f}"
+            f"{1 - tokens / whole:>9.1%}"
+        )
+    if not total:
+        return "no cases"
+    mean_tokens = weighted_tokens / total
+    lines += [
+        "  " + "-" * 51,
+        (
+            f"  {'weighted':<16}{total:>7}{mean_tokens:>9,.0f}"
+            f"{weighted_hits / total:>9.3f}{1 - mean_tokens / whole:>9.1%}"
+        ),
+        "",
+        (
+            f"A token is {CHARS_PER_TOKEN} characters, the constant the read "
+            "accounting uses."
+        ),
+        "Fact text only: no framing, no ids, no formatting either side would add.",
+    ]
+    return "\n".join(lines)
+
+
 def render(results: list[Result]) -> str:
     """A table per query shape, with each row's difference from the first.
 
