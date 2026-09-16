@@ -695,7 +695,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "eval":
         from echo_memory.eval.retrieval import (
-            SHAPES, build_cases, corpus_tokens, render, render_context_saving, run,
+            SHAPES,
+            build_cases,
+            corpus_tokens,
+            render,
+            render_context_saving,
+            run,
         )
         from echo_memory.ingestion.embeddings import LocalEmbedder
 

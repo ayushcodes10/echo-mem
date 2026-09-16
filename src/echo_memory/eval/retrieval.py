@@ -461,11 +461,15 @@ def render_context_saving(results: list[Result], facts: int, whole: int) -> str:
     mean_tokens = weighted_tokens / total
     lines += [
         "  " + "-" * 51,
-        f"  {'weighted':<16}{total:>7}{mean_tokens:>9,.0f}"
-        f"{weighted_hits / total:>9.3f}{1 - mean_tokens / whole:>9.1%}",
+        (
+            f"  {'weighted':<16}{total:>7}{mean_tokens:>9,.0f}"
+            f"{weighted_hits / total:>9.3f}{1 - mean_tokens / whole:>9.1%}"
+        ),
         "",
-        f"A token is {CHARS_PER_TOKEN} characters, the constant the read accounting "
-        "uses.",
+        (
+            f"A token is {CHARS_PER_TOKEN} characters, the constant the read "
+            "accounting uses."
+        ),
         "Fact text only: no framing, no ids, no formatting either side would add.",
     ]
     return "\n".join(lines)
