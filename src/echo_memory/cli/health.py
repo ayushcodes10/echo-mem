@@ -345,6 +345,7 @@ def collect(conn, config, today: datetime | None = None) -> dict:
         "duplicates": report["counts"]["duplicates"],
         "bad_merges": report["counts"]["bad_merges"],
         "reads": read_stats,
+        "unreturned": trial_reads.unreturned(conn, group_ids),
         "stale_writer": stale_writer(conn, group_ids),
         "gate": gate_conversion(conn),
     }
@@ -474,6 +475,24 @@ def findings(h: dict) -> tuple[list[str], list[str], list[str]]:
             "A read that helped is only visible if record_recall_save is called. "
             "Zero saves against real read volume means either the recall is not "
             "useful or nobody is reporting when it is - and those need different fixes."
+        )
+
+    u = h.get("unreturned") or {}
+    if u.get("active") and u.get("unreturned"):
+        share = 100 * u["unreturned"] // u["active"]
+        attention.append(
+            f"{u['unreturned']} of {u['active']} active facts were returned to "
+            f"nobody in {u['days']} days ({share}%)"
+        )
+        # Deliberately no pruning advice. Every "forgetting layer" in the
+        # agent-memory literature answers this with a policy - a decay curve, a
+        # TTL, an eviction rule - chosen before anyone counted. A fact nothing
+        # returned may be the one that matters next week, or retrieval may be
+        # failing to reach it, and those need opposite responses.
+        rec.append(
+            "A fact nothing returns is either unneeded or unreachable, and the two "
+            "want opposite fixes - check whether a question you would expect to hit "
+            "one actually does before treating this as dead weight."
         )
 
     if h["unreviewed_pairs"] > REVIEW_BACKLOG:

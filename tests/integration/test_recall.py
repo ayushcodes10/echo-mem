@@ -393,3 +393,49 @@ def test_the_injected_cost_is_not_counted_twice(migrated_db):
         ).fetchone()[0]
 
     assert total == len(context), f"{total} charged for a {len(context)}-char injection"
+
+
+def test_unreturned_counts_facts_retrieval_has_not_reached(migrated_db):
+    """The question under every "forgetting layer" is which memories are worth
+    keeping, and it is usually answered with a policy - a decay curve, a TTL,
+    an eviction rule - chosen before anyone counted. This counts first, and
+    proposes nothing: a fact nothing returned may be the one that matters next
+    week, or retrieval may simply be failing to reach it."""
+    from echo_memory.trial import reads as trial_reads
+
+    config = _seed(migrated_db)
+    shared = config.group_id("shared")
+
+    with server._state.pool.connection() as conn:
+        before = trial_reads.unreturned(conn, [shared])
+        assert before["active"] == 1
+        assert before["unreturned"] == 1, "nothing has been read yet"
+
+        result = recall.recall_for_prompt(conn, config, "is chat-module-api dev or prod")
+        recall.record_read(conn, config, result, recall.render_context(result), "s-r")
+        after = trial_reads.unreturned(conn, [shared])
+
+    assert after["returned"] == 1
+    assert after["unreturned"] == 0
+
+
+def test_unreturned_ignores_superseded_facts(migrated_db):
+    """Only active facts. A superseded fact is not unreachable, it is gone, and
+    counting it would inflate the share of the store that looks like dead
+    weight."""
+    from echo_memory.trial import reads as trial_reads
+
+    newer = "chat-module-api resolves to the prod load balancer after all"
+    config = _seed(migrated_db, {newer: REFERENCE})
+    server.write_episode(
+        "shared", "s2",
+        [{"name": "chat-module-api", "type": "hostname"},
+         {"name": "genai-web-dug", "type": "repo"}],
+        [{"source": "chat-module-api", "target": "genai-web-dug",
+          "relation_type": "caused_bug_in", "fact": newer, "confidence": "extracted"}],
+    )
+
+    with server._state.pool.connection() as conn:
+        counts = trial_reads.unreturned(conn, [config.group_id("shared")])
+
+    assert counts["active"] == 1, "the superseded fact was counted as active"
