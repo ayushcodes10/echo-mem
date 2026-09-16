@@ -238,3 +238,36 @@ def test_a_text_the_prefetch_did_not_predict_is_still_embedded(migrated_db):
 
     prefetched.embed(FACT)
     assert inner.late == [FACT], "an unpredicted text was not remembered"
+
+
+def test_an_embedder_without_embed_many_still_works(migrated_db):
+    """`Embedder` is a Protocol offered as swappable, so implementations exist
+    outside this repository. Adding `embed_many` to it broke one the same day -
+    echo-mem-cloud's StubEmbedder - with an AttributeError raised from inside a
+    write that had already begun, rather than at import where it would have
+    been obvious.
+
+    Batching is an optimisation, and an optimisation is not allowed to be a
+    breaking change to a published interface."""
+
+    class _OldShape:
+        """Exactly the protocol as it was before batching existed."""
+
+        dimension = 384
+
+        def __init__(self, vectors):
+            self._vectors = vectors
+
+        def embed(self, text):
+            return VectorEmbedder(self._vectors).embed(text)
+
+    with connect(migrated_db) as conn:
+        embedder = _OldShape({
+            "Acme": REFERENCE, "release branch": REFERENCE, FACT: REFERENCE,
+            f"Acme release branch. {FACT}": REFERENCE,
+        })
+        assert not hasattr(embedder, "embed_many")
+
+        result = _write(conn, embedder)
+
+    assert result["edges_created"], "a write failed for an embedder without embed_many"

@@ -12,7 +12,13 @@ class Embedder(Protocol):
     def embed(self, text: str) -> list[float]: ...
 
     def embed_many(self, texts: list[str]) -> list[list[float]]:
-        """Embed several texts at once, in order.
+        """Embed several texts at once, in order. **Optional.**
+
+        Optional because this protocol is offered as swappable and gained this
+        method after implementations already existed. Callers go through
+        `_batch`, which falls back to a loop over `embed`, so an embedder
+        written against the older shape still works - slower, same answers.
+
 
         A transformer forward pass has fixed overhead - tokenisation, tensor
         setup, the call into torch - that one text pays in full and twelve
@@ -100,6 +106,26 @@ class LocalEmbedder:
         ).tolist()
 
 
+def _batch(inner: Embedder, texts: list[str]) -> list[list[float]]:
+    """`embed_many` when the embedder has one, a loop over `embed` when it does
+    not.
+
+    `Embedder` is a Protocol and its own docstring offers it as swappable, so
+    implementations exist that this repository cannot see - a test double in a
+    downstream service, someone's hosted model. Adding `embed_many` to the
+    protocol made every one of them break at runtime rather than at import,
+    with an AttributeError from inside a write that had already started. That
+    happened the same day, to echo-mem-cloud's StubEmbedder.
+
+    Batching is an optimisation. An optimisation is not allowed to be a
+    breaking change to a published interface, so it degrades instead: an
+    embedder with only `embed` gets the old cost and the same answers.
+    """
+    if hasattr(inner, "embed_many"):
+        return inner.embed_many(texts)
+    return [inner.embed(t) for t in texts]
+
+
 class Prefetched:
     """An embedder that has already computed the texts it was told to expect.
 
@@ -120,7 +146,7 @@ class Prefetched:
         self._inner = inner
         self.dimension = inner.dimension
         wanted = list(dict.fromkeys(t for t in texts if t))
-        self._cache = dict(zip(wanted, inner.embed_many(wanted), strict=True))
+        self._cache = dict(zip(wanted, _batch(inner, wanted), strict=True))
 
     def embed(self, text: str) -> list[float]:
         hit = self._cache.get(text)
@@ -144,4 +170,4 @@ class Prefetched:
         """
         missing = [t for t in dict.fromkeys(texts) if t and t not in self._cache]
         if missing:
-            self._cache.update(zip(missing, self._inner.embed_many(missing), strict=True))
+            self._cache.update(zip(missing, _batch(self._inner, missing), strict=True))
