@@ -50,6 +50,61 @@ def record(
         _logger.warning("read_event_not_recorded", extra={"error": str(e)})
 
 
+def unreturned(conn, group_ids: list[str], days: int = 30) -> dict:
+    """Active facts that retrieval has not handed to anyone in `days`.
+
+    The question underneath every "forgetting layer" in the agent-memory
+    literature is which memories are worth keeping, and it is usually answered
+    by policy - a decay curve, a TTL, an eviction rule - chosen before anyone
+    has counted. This counts first.
+
+    A fact nothing has returned is not automatically dead. It may be the one
+    that matters next week, retrieval may simply be failing to reach it, or it
+    may be about a project nobody has touched. So this reports a number and
+    proposes nothing: no pruning, no scoring, no decay. It exists so that a
+    decision about forgetting can be made against evidence, and so that the
+    share of the store that is unreachable in practice stops being invisible.
+
+    Needs `returned_fact_ids`, added by migration 0021, so the window can only
+    see reads recorded since. A shorter history reads as a larger unreturned
+    share, which is a floor on the estimate rather than a measurement of decay.
+    """
+    import json as _json
+
+    from echo_memory.infra.db import GRAPH_NAME as GRAPH
+
+    active = {
+        str(edge_id)
+        for group_id in group_ids
+        for (edge_id,) in conn.execute(
+            f"""SELECT * FROM cypher('{GRAPH}', $$
+                MATCH ()-[e:FACT]->()
+                WHERE e.group_id = $g AND e.t_invalid IS NULL
+                RETURN id(e) $$, %s) AS (i agtype)""",
+            (_json.dumps({"g": group_id}),),
+        ).fetchall()
+    }
+    if not active:
+        return {"active": 0, "returned": 0, "unreturned": 0, "days": days}
+
+    seen = {
+        row[0]
+        for row in conn.execute(
+            """SELECT DISTINCT unnest(returned_fact_ids) FROM public.read_event
+               WHERE group_id = ANY(%s) AND returned_fact_ids IS NOT NULL
+                 AND at > now() - make_interval(days => %s)""",
+            (group_ids, days),
+        ).fetchall()
+    }
+    returned = len(active & seen)
+    return {
+        "active": len(active),
+        "returned": returned,
+        "unreturned": len(active) - returned,
+        "days": days,
+    }
+
+
 def summary(conn, group_ids: list[str], days: int = 7) -> dict:
     """Reads and their cost over a window, next to the saves they produced.
 
