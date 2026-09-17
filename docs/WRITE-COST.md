@@ -44,9 +44,23 @@ is unavailable when the insight happens is memory you do not have.
 
 **The cost shape is different, not just the cost.** Server side extraction
 scales with write volume, by its own authors' description. Echo Memory's server
-cost per write is flat and small. The cost that does scale sits inside a
-context window the user is already paying for, which is also the only place it
-can be spent once rather than twice.
+cost per write does not, and the cost that does scale sits inside a context
+window the user is already paying for, which is also the only place it can be
+spent once rather than twice.
+
+That paragraph originally said the server cost per write was "flat", and it was
+not. Measured on 2026-09-18, a write cost 29ms into a store of 1,057 nodes and
+129ms into one of 24,054, and throughput over a single ingest fell from 28
+writes a second to 8. Two of the three causes were defects rather than
+properties: a neighbourhood lookup that walked every fact edge in the database
+on every write, and an entity lookup that scanned every node because it went
+through Cypher and could not reach the index built for it. Both are fixed, the
+same write is now 45ms at 24,054 nodes, and the remaining growth is the vector
+index getting larger, which is real and is not free.
+
+It is left in rather than quietly edited because the claim was published before
+it was measured, and the correction is more useful than the original sentence
+was.
 
 **Provenance means something different when a person's agent asserted the
 fact.** `echo-memory why <fact_id>` can answer "who believed this, in which
