@@ -211,7 +211,7 @@ def render(points: list[Point]) -> str:
         "  " + "-" * 44,
         "",
         (
-            f"Across a {growth:.0f}x range of corpus size the cost of injecting "
+            f"Across {growth:.0f}x of corpus growth the cost of injecting "
             f"everything rose {last.inject_tokens / first.inject_tokens:.0f}x, "
             f"while what a recall returned moved {drift:+.0%}. That is the claim: "
             "the saving is not a constant, it is what happens when a bounded "
