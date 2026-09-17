@@ -23,7 +23,7 @@ should mean for a store that returns facts rather than documents.
 
     ECHO_MEMORY_DATABASE_URL=postgresql://.../lme_bench \
     ECHO_MEMORY_USER_ID=bench ECHO_MEMORY_AGENT_ID=bench \
-        python scripts/longmemeval-bench.py longmemeval_s.json [instances] [results.jsonl]
+        python scripts/longmemeval-bench.py longmemeval_s.json --per-type 12
 
 Point it at a scratch database. The full run writes 246,930 facts across 500
 scopes and takes hours, and write throughput decays as the database grows, so
@@ -32,16 +32,24 @@ which you ran when you quote the result.
 
 **It is safe to rerun.** A scope already holding exactly its expected number of
 facts is scored without being rewritten, so a run killed at hour three resumes
-rather than starting over. Pass a results path to have each scored question
+rather than starting over. Pass `--results` to have each scored question
 appended as it happens.
+
+**Never report a prefix.** The file is ordered by question type: the first 70
+instances are all single-session-user, the easiest category, and the last are
+not. `--limit` exists for smoke tests only. `--per-type N` takes the first N of
+each of the six types, which is what a partial run has to be if its numbers are
+going to mean anything. Say which you ran, and the n per type, whenever you
+quote a result.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import statistics
-import sys
 import time
+from collections import Counter
 
 from echo_memory.infra.config import load_config
 from echo_memory.infra.db import connect
@@ -258,12 +266,21 @@ def render(rows: list[dict]) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
-        print(__doc__)
-        return 2
-    path = sys.argv[1]
-    limit = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-    results = sys.argv[3] if len(sys.argv) > 3 else ""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", help="longmemeval_s.json")
+    parser.add_argument(
+        "--per-type", type=int, default=0, metavar="N",
+        help="take the first N instances of each question type. The honest way "
+             "to run a subset, because the file is ordered by type",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=0, metavar="N",
+        help="take the first N instances. Smoke tests only: a prefix is one "
+             "question type, not a sample",
+    )
+    parser.add_argument("--results", default="", metavar="PATH",
+                        help="append each scored question as it happens")
+    args = parser.parse_args()
 
     conn = connect(load_config().database_url)
     embedder = LocalEmbedder()
@@ -275,11 +292,17 @@ def main() -> int:
     # is one haystack, and a run that dies at hour three has scored everything
     # it ingested instead of nothing.
     rows: list[dict] = []
+    taken: Counter[str] = Counter()
     written = 0
     scopes = 0
     skipped = 0
     started = time.time()
-    for instance in instances_in(path, limit):
+    for instance in instances_in(args.path, args.limit):
+        kind = instance.get("question_type") or "unknown"
+        if args.per_type:
+            if taken[kind] >= args.per_type:
+                continue
+            taken[kind] += 1
         group = f"lme:{instance['question_id']}"
         expected = sum(1 for _ in turns_of(instance))
         if already_ingested(conn, group, expected):
@@ -290,9 +313,9 @@ def main() -> int:
         scopes += 1
         if row:
             rows.append(row)
-            if results:
+            if args.results:
                 # Written as we go, so a killed run keeps what it scored.
-                with open(results, "a") as handle:
+                with open(args.results, "a") as handle:
                     handle.write(json.dumps({"question_id": instance["question_id"],
                                              **row}) + "\n")
         if scopes % 25 == 0:
