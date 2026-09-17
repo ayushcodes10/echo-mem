@@ -383,6 +383,12 @@ def _add_project_parsers(sub) -> None:
         help="report what a recall costs in tokens against injecting the whole "
              "scope, with the hit rate beside it",
     )
+    ev.add_argument(
+        "--sweep", action="store_true",
+        help="with --context, measure the saving at several corpus sizes "
+             "instead of only the current one; slow, because it rebuilds and "
+             "re-queries scratch scopes rather than extrapolating",
+    )
     bench.add_argument(
         "--group", metavar="ID", default="benchmark:scratch",
         help="scope to write throwaway probe facts into (default: a dedicated "
@@ -733,6 +739,16 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+
+        if args.context and args.sweep:
+            from echo_memory.eval.sweep import measure
+            from echo_memory.eval.sweep import render as render_sweep
+
+            def sweeping(size, total):
+                print(f"  building a {size:,} fact scope of {total:,}", file=sys.stderr)
+
+            print(render_sweep(measure(conn, group_id, embedder, progress=sweeping)))
+            return 0
 
         if args.context:
             # One row per shape, and only the shipping configuration: this
