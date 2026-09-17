@@ -36,8 +36,6 @@ somebody.
 
 from __future__ import annotations
 
-import json
-
 from echo_memory.infra.db import GRAPH_NAME as GRAPH
 
 # Enough for an agent to notice a word it should have used, few enough that the
@@ -68,17 +66,37 @@ def _endpoints(conn, edge_ids: list[str]) -> list[dict]:
 
     Ordered by the caller's list rather than by the database, so the nearest
     fact's entities come first and rank the result.
+
+    Read off the edge and node tables rather than through Cypher, for exactly
+    the reason _adjacent gives twelve lines below. `MATCH (s)-[e:FACT]->(t)
+    WHERE id(e) = eid` cannot use an index: AGE expands the match and filters
+    afterwards, so every call walked every FACT edge in the database, every
+    scope and in the hosted service every tenant, once per id.
+
+    That made the cost of a write grow with the size of the whole store rather
+    than the caller's own. Measured 2026-09-18 while ingesting LongMemEval:
+    29ms per write at 1,057 nodes, 129ms at 24,054, with this function 55% of
+    the time at the larger size and 141ms per call. Write throughput fell from
+    28/s to 8/s over one run, which had been read as the benchmark being large
+    rather than as a defect.
+
+    id is the primary key of the edge table and start_id/end_id are indexed, so
+    the same answer comes back as three index lookups.
     """
     if not edge_ids:
         return []
     rows = conn.execute(
-        f"""SELECT * FROM cypher('{GRAPH}', $$
-            UNWIND $ids AS eid
-            MATCH (s)-[e:FACT]->(t) WHERE id(e) = eid
-            RETURN id(e), e.fact, id(s), s.name, id(t), t.name
-        $$, %s) AS (edge_id agtype, fact agtype, source_id agtype, source agtype,
-                     target_id agtype, target agtype)""",
-        (json.dumps({"ids": [int(i) for i in edge_ids]}),),
+        f"""SELECT e.id::text,
+                   e.properties ->> '"fact"'::agtype,
+                   s.id::text,
+                   s.properties ->> '"name"'::agtype,
+                   t.id::text,
+                   t.properties ->> '"name"'::agtype
+            FROM {GRAPH}."FACT" e
+            JOIN {GRAPH}."Node" s ON s.id = e.start_id
+            JOIN {GRAPH}."Node" t ON t.id = e.end_id
+            WHERE e.id = ANY(SELECT unnest(%s::text[])::graphid)""",
+        ([str(i) for i in edge_ids],),
     ).fetchall()
 
     by_edge = {
