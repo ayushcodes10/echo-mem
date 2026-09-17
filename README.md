@@ -73,6 +73,7 @@ echo-memory adopt                  # wire every MCP client on the machine, each 
 
 echo-memory eval                   # retrieval quality against your own store
 echo-memory eval --context         # what a recall costs against injecting everything
+echo-memory eval --context --sweep # the same, as a curve across corpus size
 echo-memory calibrate              # is entity resolution trustworthy on your data
 echo-memory benchmark              # write, query and digest latency
 ```
@@ -112,6 +113,12 @@ has to arrive with entities and facts already extracted, which is what the
 Zep/Graphiti, the closest architectural match, whose own description of ingestion is that
 "every episode triggers multiple LLM calls" and that "write cost scales with volume".
 
+The obvious reply is that cheap writes are cheap because they do less, and that reply is
+correct on the mechanism. [`docs/WRITE-COST.md`](docs/WRITE-COST.md) answers it properly,
+including the two measured costs of the choice: the Stop gate fired seven times and
+produced one fact, and a write touching an ambiguous entity is deferred while the call
+returns as though it succeeded.
+
 **Any MCP client.** A coding assistant, a chatbot, an ops agent, or something built in
 house. Coding agents are where this is proven, not what it is limited to.
 
@@ -124,6 +131,8 @@ difference nobody sized is not a result.
 | Measure | Value | Reproduce |
 |---|---|---|
 | Context per recall vs injecting everything | **96.7% less**, hit@10 0.872 over 1,190 questions | `echo-memory eval --context` |
+| The same saving across 8x of corpus growth | 75.5% at 32 facts rising to **96.4% at 261**, hit@10 0.900 to 0.946 | `echo-memory eval --context --sweep` |
+| LoCoMo retrieval, 1,982 questions, 5,882 turns | recall@10 **0.601**, hit@10 0.658, MRR 0.460 | `scripts/locomo-bench.py` |
 | Server side model calls per write | **0** | `echo-memory benchmark` |
 | Write, query, digest latency (median) | 15ms, 8ms, 1ms | `echo-memory benchmark` |
 | Entity resolution AUC | 0.666, 95% CI [0.421, 0.881] | `echo-memory calibrate` |
@@ -132,6 +141,14 @@ That last row is the one that went the wrong way, and it is here on purpose. The
 includes chance, so the unattended merge is switched off: at the automatic bar precision
 was 50% over two reviewed pairs, and the audit log showed that path had fired once in the
 system's entire history. A near match is now offered for confirmation instead.
+
+The LoCoMo row is retrieval, not QA accuracy. Published LoCoMo results have a model write
+an answer and a second model judge it; this asks only whether the turn holding the answer
+came back, which is a ceiling on QA accuracy rather than a substitute for it, and is not
+comparable to anybody's published QA figure. It also feeds raw dialogue turns, which skips
+the extraction step this design pushes to the calling agent, so it is a floor as well as a
+ceiling. The worst row, multi hop at recall@1 0.099, is in
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) with the rest.
 
 The context saving is measured against a specific baseline, stated so it cannot be read
 as more than it is. Not "no memory at all", which is however long a human spends re
