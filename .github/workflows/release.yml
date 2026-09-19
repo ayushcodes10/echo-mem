@@ -16,6 +16,23 @@
 # secrets to leak or rotate. It requires a one-time setup on PyPI: project
 # settings, publishing, add a GitHub publisher for this repo with workflow
 # `release.yml` and environment `pypi`.
+#
+# That setup names an OWNER, and moving the repository invalidates it silently.
+# v0.4.0 failed here on 2026-09-19 with `invalid-publisher`: the publisher still
+# named ayushcodes10 while the token said echo-mem, because the repositories
+# moved to the organisation on 2026-09-16. Nothing warns about this, and the
+# build job succeeds, so the failure looks like a publish step flake rather than
+# a configuration that stopped being true. The Vercel deploy for the landing
+# page broke the same way on the same day, which makes this the second one.
+#
+# The publisher PyPI needs now:
+#   owner        echo-mem
+#   repository   echo-mem
+#   workflow     release.yml
+#   environment  pypi
+#
+# Fixing it does not need a new tag. Re-run the failed workflow:
+#   gh run rerun <run-id> --failed
 
 name: Release
 
