@@ -63,22 +63,62 @@ because it is hard is how benchmark tables become useless.
 surprise.** Each fact records the date the turn was spoken, in the fact text, so
 "when did she say that" has something to match against.
 
-## LongMemEval S
+## LongMemEval S, 2026-09-18, stratified sample of 90
 
 500 questions, each with its own haystack of roughly 50 chat sessions, 246,930
-turns in total.
+turns in total. What was run is **15 questions of each of the six types, 90 in
+all, 33,261 turns**, and that is what these numbers describe.
 
 ```bash
 curl -sLo longmemeval_s.json \
   https://huggingface.co/datasets/xiaowu0162/longmemeval/resolve/main/longmemeval_s
-python scripts/longmemeval-bench.py longmemeval_s.json
+python scripts/longmemeval-bench.py longmemeval_s.json --per-type 15
 ```
 
-Two recalls are reported because the benchmark supports both and they answer
-different questions. `session@k` asks whether the right conversation surfaced,
-which is what a reader would then have to read. `turn@k` asks whether the
-specific line flagged `has_answer` surfaced, which is what retrieval working
-should mean for a store that returns facts rather than documents.
+Not a prefix, and the distinction is not pedantry. The file is ordered by
+question type: the first 70 instances are all single-session-user, which is one
+of the easiest categories. A `--limit 70` run would have reported turn@10 near
+0.95 and been a sample of one category rather than of the benchmark.
+
+Two recalls, because the benchmark supports both and they answer different
+questions. `session@k` asks whether the right conversation surfaced, which is
+what a reader would then have to read. `turn@k` asks whether the specific line
+flagged `has_answer` surfaced, which is what retrieval working should mean for
+a store that returns facts rather than documents.
+
+| Question type | n | session@5 | session@10 | turn@10 | turn@30 |
+|---|---:|---:|---:|---:|---:|
+| **overall** | **90** | **0.882** | **0.940** | **0.727** | **0.834** |
+| single session assistant | 15 | 1.000 | 1.000 | 1.000 | 1.000 |
+| single session user | 15 | 0.933 | 1.000 | 0.933 | 0.933 |
+| knowledge update | 15 | 0.867 | 1.000 | 0.911 | 0.978 |
+| temporal reasoning | 15 | 0.839 | 0.933 | 0.756 | 0.924 |
+| single session preference | 15 | 0.933 | 0.933 | 0.467 | 0.578 |
+| multi session | 15 | 0.722 | 0.772 | 0.297 | 0.590 |
+
+**Fifteen per cell is few, so here are the intervals rather than only the
+means.** Overall, 95% confidence: session@10 [0.905, 0.975], turn@10 [0.645,
+0.809]. Per type the intervals are wide enough that the middle of the table
+should not be ranked: single session preference is 0.467 plus or minus 0.245.
+Only the two ends survive that, and they are the interesting parts anyway.
+
+**Multi session is the floor, at turn@10 0.297 plus or minus 0.150.** When an
+answer is spread across conversations, ranking the individual lines that carry
+it is where this fails, exactly as LoCoMo's multi hop row says. The same
+feature, v1b's multi hop retrieval, is the answer to both, and both numbers now
+exist before it does.
+
+**Session recall stays high while turn recall falls**, 0.940 against 0.727. The
+right conversation is usually found; the specific line inside it often is not.
+For a store that returns facts rather than documents that gap is the honest
+statement of what is still missing, and it is invisible if only one of the two
+is reported.
+
+**Single session preference is the surprise**, session@10 0.933 but turn@10
+0.467: the conversation is found almost always and the line inside it less than
+half the time. A stated preference tends to be a short aside inside a long
+exchange about something else, which is the shape hybrid retrieval handles
+worst. Not chased down, and recorded here so it is not quietly forgotten.
 
 ## Context cost as the store grows
 
