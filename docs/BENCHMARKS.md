@@ -107,6 +107,29 @@ facts come back but not how long they are.
 the answer is still in what came back, and a configuration that returned nothing
 would score a perfect 100%.
 
+## What a write costs as the store grows
+
+Found while ingesting LongMemEval, by noticing that throughput fell from 28
+writes a second to 8 over one run and then checking whether that was the
+machine or the store. It was the store: an empty database on the same machine
+at the same moment still ran at 28/s.
+
+| Store size | Before | After |
+|---|---:|---:|
+| 1,057 nodes | 29ms | 22ms |
+| 24,054 nodes | 129ms | 45ms |
+
+Two defects, both the same shape. A neighbourhood lookup and an entity lookup
+each went through Cypher, where `MATCH ... WHERE id(x) = $id` cannot use an
+index, because AGE expands the match and filters afterwards. Each therefore
+scanned the whole graph on every write: every scope, and in a hosted deployment
+every tenant. Read off the tables directly they are index lookups, and one of
+them reaches an index that migration 0016 had already built for it.
+
+The remaining growth, roughly 2x across that range, is the vector index getting
+larger as it gains rows. That one is real rather than a defect, and it is the
+number to beat next.
+
 ## Reproducing any of it
 
 Point every script at a scratch database. They write real facts through the

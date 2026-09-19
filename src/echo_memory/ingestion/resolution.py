@@ -153,31 +153,52 @@ class ResolutionOutcome:
     new_entities: set[str] = field(default_factory=set)
 
 
+# The properties expressions below have to match migration 0016's index
+# definition character for character, or Postgres will not use it.
+_GROUP = """(properties ->> '"group_id"'::agtype)"""
+_NAME = """(properties ->> '"name"'::agtype)"""
+
+
 def _exact_match(conn, group_id: str, name: str) -> tuple[str, str] | None:
     """Case-insensitive match against node.name or any alias. Returns
-    (graphid, matched_name) or None."""
-    params = json.dumps({"gid": group_id, "name": name})
+    (graphid, matched_name) or None.
 
+    Read off the node table rather than through Cypher. `MATCH (n:Node
+    {group_id: $gid}) WHERE toLower(n.name) = toLower($name)` is a sequential
+    scan of every node in the database - every scope, and in the hosted service
+    every tenant - because AGE expands the match before filtering. Confirmed by
+    EXPLAIN on 2026-09-18: Seq Scan, 0.19ms at 1,057 nodes and 4.2ms at 24,054,
+    called twice per write.
+
+    Migration 0016 already created exactly the index this wants,
+    node_name_per_group_idx on (group_id, lower(name)). It was unreachable from
+    Cypher and has been sitting unused by the query it was made for.
+
+    The alias lookup still scans, and it now scans only within the group rather
+    than the whole store, which is the property that matters: one caller's
+    write cost should not depend on how much everybody else has written.
+    """
     row = conn.execute(
-        f"""SELECT * FROM cypher('{GRAPH}', $$
-            MATCH (n:Node {{group_id: $gid}})
-            WHERE toLower(n.name) = toLower($name)
-            RETURN id(n), n.name
-            LIMIT 1
-        $$, %s) AS (node_id agtype, name agtype)""",
-        (params,),
+        f"""SELECT id::text, {_NAME}
+            FROM {GRAPH}."Node"
+            WHERE {_GROUP} = %s AND lower({_NAME}) = lower(%s)
+            LIMIT 1""",
+        (group_id, name),
     ).fetchone()
     if row is None:
         row = conn.execute(
-            f"""SELECT * FROM cypher('{GRAPH}', $$
-                MATCH (n:Node {{group_id: $gid}})
-                UNWIND n.aliases AS alias
-                WITH n, alias
-                WHERE toLower(alias) = toLower($name)
-                RETURN id(n), n.name
-                LIMIT 1
-            $$, %s) AS (node_id agtype, name agtype)""",
-            (params,),
+            f"""SELECT id::text, {_NAME}
+                FROM {GRAPH}."Node"
+                WHERE {_GROUP} = %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements_text(
+                          COALESCE((properties ->> '"aliases"'::agtype)::jsonb, '[]'::jsonb)
+                      ) AS alias
+                      WHERE lower(alias) = lower(%s)
+                  )
+                LIMIT 1""",
+            (group_id, name),
         ).fetchone()
     if row is None:
         return None
